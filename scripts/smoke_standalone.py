@@ -3,6 +3,7 @@
 Run with backend/.venv/bin/python scripts/smoke_standalone.py after npm run build.
 """
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -39,6 +40,7 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             "JWT_SECRET_KEY": "standalone-smoke-test-key-at-least-32-bytes",
             "EMAIL_PROVIDER": "disabled", "EMAIL_VERIFICATION_REQUIRED": "false",
             "GOOGLE_OAUTH_ENABLED": "false", "PUBLIC_REGISTRATION_ENABLED": "true",
+            "LLM_TEST_MODE": "true", "LLM_CONNECTIONS_JSON": "[]",
         }
         web_env = os.environ | {"APP_URL": "http://127.0.0.1:3100", "PORT": "3100", "HOSTNAME": "127.0.0.1",
             "AUTH_SERVER_URL": "http://127.0.0.1:8100", "AUTH_COOKIE_SECURE": "false"}
@@ -55,6 +57,7 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
                     time.sleep(0.1)
                 else:
                     raise RuntimeError(f"Server did not start: {url}")
+            assert all(process.poll() is None for process in processes), 'A newly launched server exited; refusing to test another process on the same port'
             client.headers.update({"x-llm-account": "1", "origin": "http://127.0.0.1:3100"})
             username = f"standalone_{uuid.uuid4().hex[:12]}"
             response = client.post("/api/auth/register", json={"username": username,
@@ -75,6 +78,53 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             assert response.status_code == 201, response.text
             path = response.json()["avatar_url"].replace("/users/avatars/", "/api/avatars/")
             assert client.get(path).headers["content-type"] == "image/png"
+            config = client.get('/api/chat/config', headers=access)
+            assert config.status_code == 200 and config.json()['connections'][0]['is_test']
+            response = client.post('/api/chat/conversations', headers=access, json={})
+            assert response.status_code == 201, response.text
+            conversation = response.json()['id']
+            chat_path = f'/api/chat/conversations/{conversation}'
+            def turn(content, retry=False, stop=False):
+                request_id = str(uuid.uuid4())
+                collected, first_delta, terminal = '', None, None
+                started = time.monotonic()
+                with client.stream('POST', chat_path + '/messages', headers=access, json={
+                    'content': content, 'request_id': request_id, 'retry': retry}) as stream:
+                    assert stream.status_code == 200
+                    assert stream.headers['content-type'].startswith('text/event-stream')
+                    kind = ''
+                    for line in stream.iter_lines():
+                        if line.startswith('event: '): kind = line[7:]
+                        elif line.startswith('data: '):
+                            data = json.loads(line[6:])
+                            if kind == 'delta':
+                                first_delta = first_delta or time.monotonic()
+                                collected += data['content']
+                                if stop:
+                                    assert client.post(chat_path + '/cancel', headers=access, json={'request_id':request_id}).status_code == 204
+                                    break
+                            if kind in {'done', 'error', 'cancelled'}: terminal = kind
+                if not stop:
+                    assert terminal == 'done' and collected
+                    assert first_delta and time.monotonic() - first_delta > .1
+                    assert first_delta - started < 5
+                return collected
+            answer = turn('테스트 대화를 시작할게요')
+            detail = client.get(chat_path, headers=access).json()
+            assert len(detail['messages']) == 2 and detail['messages'][1]['content'] == answer
+            assert detail['messages'][1]['is_test'] and not detail['conversation']['busy']
+            partial = turn('응답 중지를 확인할게요', stop=True)
+            for _ in range(40):
+                detail = client.get(chat_path, headers=access).json()
+                if not detail['conversation']['busy']: break
+                time.sleep(.1)
+            assert partial and not detail['conversation']['busy']
+            assert detail['messages'][-1]['status'] == 'cancelled'
+            turn('응답 중지를 확인할게요', retry=True)
+            assert len(client.get(chat_path, headers=access).json()['messages']) == 4
+            assert client.patch(chat_path, headers=access, json={'title':'스트리밍 검증'}).json()['title'] == '스트리밍 검증'
+            assert client.get('/api/chat/conversations?offset=1', headers=access).json()['items'] == []
+            assert client.delete(chat_path, headers=access).status_code == 204
             response = client.post("/api/auth/refresh")
             assert response.status_code == 200, response.text
             refreshed = response.json()
@@ -85,7 +135,8 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             assert not any(c.name == "llm_accounts_refresh" for c in client.cookies.jar)
             assert client.get("/api/account/users/me", headers=access).status_code == 401
             assert client.get("/login").status_code == 200
-            print("PASS: standalone Python + Next.js signup, login, profile, avatar, refresh, logout and page rendering")
+            assert all(process.poll() is None for process in processes), 'A test server exited during validation'
+            print("PASS: real Python + Next.js accounts, streaming chat, persistence, stop, retry, pagination and deletion")
     except Exception:
         for handle in logs:
             handle.flush()

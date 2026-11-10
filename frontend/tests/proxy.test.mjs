@@ -20,6 +20,14 @@ before(async () => {
     for await (const chunk of request) chunks.push(chunk);
     received = { path: request.url, method: request.method,
       headers: request.headers, body: Buffer.concat(chunks).toString() };
+    if (mode === "chat-stream") {
+      response.setHeader("content-type", "text/event-stream");
+      response.write('event: start\ndata: {"ready":true}\n\n');
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      response.write('event: delta\ndata: {"content":"실시간 답변"}\n\n');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      response.end('event: done\ndata: {}\n\n'); return;
+    }
     response.setHeader("content-type", "application/json");
     if (mode === "timeout") { await new Promise((resolve) => setTimeout(resolve, 350)); }
     if (mode === "invalid-json") { response.end("not-json"); return; }
@@ -162,4 +170,32 @@ test("the current user endpoint forwards its bearer token", async () => {
   mode = "tokens";
   await fetch(`${origin}/api/auth/me`, { headers: { authorization: "Bearer account-access-token" } });
   assert.equal(received.headers.authorization, "Bearer account-access-token");
+});
+
+test("chat SSE reaches the client before generation finishes and forwards only the bearer", async () => {
+  mode = "chat-stream";
+  const response = await fetch(`${origin}/api/chat/conversations/12345678-1234-1234-1234-123456789abc/messages`, {
+    method: "POST", headers: { ...csrf, authorization: "Bearer chat-user", cookie: `llm_accounts_refresh=${refresh}` }, body: "{}" });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/event-stream/);
+  assert.equal(response.headers.get("x-accel-buffering"), "no");
+  const reader = response.body.getReader();
+  const first = new TextDecoder().decode((await reader.read()).value);
+  assert.match(first, /event: start/);
+  assert.doesNotMatch(first, /event: done/);
+  let rest = "";
+  while (true) { const part = await reader.read(); if (part.done) break; rest += new TextDecoder().decode(part.value); }
+  assert.match(rest, /실시간 답변/);
+  assert.match(rest, /event: done/);
+  assert.equal(received.headers.authorization, "Bearer chat-user");
+  assert.equal(received.headers.cookie, undefined);
+});
+
+test("chat routes keep origin validation, path boundaries and pagination query", async () => {
+  mode = "tokens";
+  assert.equal((await fetch(`${origin}/api/chat/conversations`, { method: "POST", body: "{}" })).status, 403);
+  assert.equal((await fetch(`${origin}/api/chat/conversations`, { method: "POST", headers: { ...csrf, origin: "https://other.example" }, body: "{}" })).status, 403);
+  assert.equal((await fetch(`${origin}/api/chat/admin`)).status, 404);
+  await fetch(`${origin}/api/chat/conversations?offset=50&limit=25`);
+  assert.equal(received.path, "/chat/conversations?offset=50&limit=25");
 });

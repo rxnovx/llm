@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     password_min_length: int = Field(10, alias='PASSWORD_MIN_LENGTH', ge=8)
     password_reset_token_expire_minutes: int = Field(30, alias='PASSWORD_RESET_TOKEN_EXPIRE_MINUTES', ge=5)
     public_registration_enabled: bool = Field(True, alias='PUBLIC_REGISTRATION_ENABLED')
+    llm_test_mode: bool = True
+    llm_connections_json: str = '[]'
+    llm_timeout_seconds: int = Field(120, ge=5, le=600)
+    llm_max_tokens: int = Field(2048, ge=64, le=16384)
     refresh_token_days: int = Field(14, validation_alias=AliasChoices('REFRESH_TOKEN_DAYS', 'REFRESH_TOKEN_EXPIRE_DAYS'), ge=1)
     registration_rate_limit_attempts: int = Field(30, alias='REGISTRATION_RATE_LIMIT_ATTEMPTS', ge=1, le=1000)
     registration_rate_limit_window_seconds: int = Field(600, alias='REGISTRATION_RATE_LIMIT_WINDOW_SECONDS', ge=10, le=86400)

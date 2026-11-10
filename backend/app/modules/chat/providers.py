@@ -1,0 +1,147 @@
+"""Server-configured adapters. No request can supply an upstream URL or API key."""
+import asyncio
+from collections.abc import AsyncIterator
+import json
+import secrets
+from typing import Literal
+from urllib.parse import urlsplit
+
+import httpx
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
+
+from app.core.config import Settings
+
+
+class ProviderError(Exception):
+    pass
+
+
+class Connection(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,64}$')
+    name: str = Field(min_length=1, max_length=80)
+    provider: Literal['vllm', 'ollama', 'test']
+    base_url: str = ''
+    model: str = Field('', max_length=200)
+    api_key: SecretStr = SecretStr('')
+
+    @model_validator(mode='after')
+    def validate_url(self):
+        if self.provider != 'test':
+            url = urlsplit(self.base_url)
+            if (url.scheme not in {'http', 'https'} or not url.hostname or url.username
+                    or url.password or url.query or url.fragment):
+                raise ValueError('Use an HTTP(S) base URL without credentials, query or fragment')
+            # Validate malformed / out-of-range ports as well.
+            _ = url.port
+        return self
+
+    def public(self):
+        return {'id': self.id, 'name': self.name, 'provider': self.provider,
+                'default_model': self.model, 'is_test': self.provider == 'test'}
+
+
+def connections(settings: Settings) -> list[Connection]:
+    try:
+        values = json.loads(settings.llm_connections_json)
+        if not isinstance(values, list) or len(values) > 20:
+            raise ValueError()
+        configured = [Connection.model_validate(value) for value in values]
+        ids = [item.id for item in configured]
+        if len(ids) != len(set(ids)) or 'demo' in ids or any(item.provider == 'test' for item in configured):
+            raise ValueError()
+    except (ValueError, TypeError, ValidationError):
+        # Never include configuration values: they may contain an API key.
+        raise ProviderError('서버의 LLM_CONNECTIONS_JSON 설정을 확인해 주세요.') from None
+    demo = [Connection(id='demo', name='테스트 모델', provider='test', model='demo')] if settings.llm_test_mode else []
+    return demo + configured
+
+
+def resolve(settings: Settings, connection_id: str) -> Connection:
+    for item in connections(settings):
+        if item.id == connection_id:
+            return item
+    raise ProviderError('선택한 연결을 사용할 수 없습니다. 연결 설정을 확인해 주세요.')
+
+
+def client(connection: Connection, timeout: float) -> httpx.AsyncClient:
+    key = connection.api_key.get_secret_value()
+    return httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(10, timeout)),
+        headers={'Authorization': f'Bearer {key}'} if key else {},
+        follow_redirects=False, trust_env=False)
+
+
+def endpoint(connection: Connection, suffix: str) -> str:
+    return f'{connection.base_url.rstrip("/")}/{suffix}'
+
+
+async def list_models(connection: Connection) -> list[str]:
+    if connection.provider == 'test':
+        return ['demo']
+    path, key = ('models', 'data') if connection.provider == 'vllm' else ('api/tags', 'models')
+    try:
+        async with client(connection, 10) as session:
+            response = await session.get(endpoint(connection, path))
+            response.raise_for_status()
+            payload = response.json()
+        field = 'id' if connection.provider == 'vllm' else 'name'
+        names = [item[field] for item in payload[key] if isinstance(item.get(field), str)]
+        return list(dict.fromkeys(names))[:200]
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+        raise ProviderError('모델 목록을 가져오지 못했습니다. 서버 주소와 인증 설정을 확인해 주세요.') from None
+
+
+DEMO_REPLIES = [
+    '좋아요. 먼저 **목표와 조건**을 나눠 적어 보면 정리가 쉬워져요.\n\n1. 원하는 결과를 한 문장으로 적기\n2. 꼭 지켜야 할 조건 정리하기\n3. 가장 작은 단계부터 실행하기\n\n지금 가장 먼저 해결하고 싶은 부분은 무엇인가요?',
+    '한 가지 방법만 고르기보다 두 가지 안을 비교해 보면 어떨까요?\n\n| 기준 | 간단하게 시작 | 충분히 준비 |\n| --- | --- | --- |\n| 장점 | 바로 확인할 수 있어요 | 방향을 미리 정할 수 있어요 |\n| 고려할 점 | 수정이 필요할 수 있어요 | 준비 시간이 필요해요 |\n\n어떤 쪽이 지금 상황에 더 잘 맞나요?',
+    '조금 더 구체적으로 생각해 볼게요.\n\n- **현재 상황**: 이미 알고 있는 것과 모르는 것을 나눠 보세요.\n- **다음 행동**: 오늘 할 수 있는 일 하나를 정해 보세요.\n- **확인 방법**: 잘됐는지 판단할 기준을 적어 보세요.\n\n작게 시작한 뒤 결과를 보고 조정해도 충분해요.',
+    '코드로 표현하면 이런 식으로 시작할 수 있어요.\n\n```python\ndef next_step(goal: str) -> str:\n    return f"먼저 {goal}의 가장 작은 단계를 정해 보세요."\n\nprint(next_step("아이디어 정리"))\n```\n\n실제로 다루고 싶은 코드나 입력 예시가 있다면 이어서 보내 주세요.',
+    '그 부분은 배경을 조금 더 알면 더 잘 정리할 수 있을 것 같아요.\n\n어떤 결과를 원하고, 지금은 어디까지 진행했나요? 한두 문장으로 알려 주셔도 괜찮아요.',
+]
+
+
+async def stream_reply(connection: Connection, model: str, history: list[dict], settings: Settings) -> AsyncIterator[str]:
+    if connection.provider == 'test':
+        reply = secrets.choice(DEMO_REPLIES)
+        for index in range(0, len(reply), 9):
+            await asyncio.sleep(0.025)
+            yield reply[index:index + 9]
+        return
+    vllm = connection.provider == 'vllm'
+    payload = {'model': model, 'messages': history, 'stream': True}
+    payload.update({'max_tokens': settings.llm_max_tokens} if vllm else {'options': {'num_predict': settings.llm_max_tokens}})
+    complete = False
+    try:
+        async with client(connection, settings.llm_timeout_seconds) as session:
+            async with session.stream('POST', endpoint(connection, 'chat/completions' if vllm else 'api/chat'), json=payload) as response:
+                if not response.is_success:
+                    raise ProviderError('모델 서버가 요청을 거부했습니다. 모델 이름과 서버 인증을 확인해 주세요.')
+                async for line in response.aiter_lines():
+                    if not line or (vllm and not line.startswith('data:')):
+                        continue
+                    data = line[5:].strip() if vllm else line
+                    if data == '[DONE]':
+                        complete = True
+                        break
+                    item = json.loads(data)
+                    if item.get('error'):
+                        raise ProviderError('모델 서버에서 응답 생성 중 오류가 발생했습니다.')
+                    if vllm:
+                        choices = item.get('choices') or []
+                        if not choices:
+                            continue
+                        text = choices[0].get('delta', {}).get('content', '')
+                        complete = complete or choices[0].get('finish_reason') is not None
+                    else:
+                        text = item.get('message', {}).get('content', '')
+                        complete = bool(item.get('done'))
+                    if text and isinstance(text, str):
+                        yield text
+                    if not vllm and complete:
+                        break
+        if not complete:
+            raise ProviderError('모델 서버의 응답이 중간에 끊겼습니다. 다시 시도해 주세요.')
+    except httpx.TimeoutException:
+        raise ProviderError('모델 서버 응답 시간이 초과되었습니다. 다시 시도해 주세요.') from None
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+        raise ProviderError('모델 서버에 연결할 수 없거나 응답 형식이 올바르지 않습니다.') from None

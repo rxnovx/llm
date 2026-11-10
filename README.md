@@ -1,11 +1,13 @@
 # LLM
 
-`rxnovx/my-note-app`의 Next.js 프론트엔드와 FastAPI 백엔드에서 유저 기능을 분리한 초기 구성입니다. 현재는 계정 기능만 제공하며, 노트·채팅·캘린더·블로그와 협업 서버는 포함하지 않습니다.
+내부 모델 서버에 연결해 대화하는 Next.js·FastAPI 앱입니다. `rxnovx/my-note-app`에서 이관한 계정 기능 위에 대화 워크스페이스를 구성했습니다. vLLM·Ollama 연결과 서버 없는 랜덤 테스트 대화를 지원합니다. 원본의 노트·메신저·캘린더·블로그·협업 서버는 포함하지 않습니다.
 
 ## 포함 기능
 
 | 구분 | 기능 |
 | --- | --- |
+| 대화 | 스트리밍 답변, 중지·다시 생성·복사, Markdown, 저장된 대화 재개·이름 변경·삭제 |
+| 모델 연결 | 등록된 vLLM·Ollama 서버 선택·조회·해제, 외부 요청 없는 랜덤 테스트 모드 |
 | 계정 | 회원가입, 사용자명/이메일 로그인, 로그아웃, 모든 기기 로그아웃 |
 | 프로필 | 표시 이름, 프로필 이미지 업로드·링크·삭제, 사용자명 고정 |
 | 보안 | 비밀번호 설정·변경·재설정, 로그인 세션 조회·원격 해제 |
@@ -14,6 +16,8 @@
 | 배포 | Docker Compose, SQLite 기본값, PostgreSQL 옵션, Nginx |
 
 원본의 사용자 기능과 보안 로직을 재사용하되 앱별 설정, 체험, 관리자 콘솔, PAT, 법적 권리행사 워크플로는 이 초기 앱에 포함하지 않았습니다. 가입 화면의 계정 생성 동의는 원본 서비스의 약관을 LLM에 적용한다는 뜻이 아닙니다. 이관 범위와 수정 근거는 [PORTING.md](PORTING.md)에 기록했습니다.
+
+로그인 후 `/`에서 대화를 시작합니다. 기본 `LLM_TEST_MODE=true`는 랜덤 예시 답변을 스트리밍하며 실제 모델에 접속하지 않습니다. 대화 기록은 기본 SQLite에 계정별로 저장됩니다. 실제 폐쇄망 서버를 연결하려면 [LLM_CONNECTIONS.md](LLM_CONNECTIONS.md)를 참고합니다. 서비스 10곳의 레퍼런스와 화면 구성 판단은 [DESIGN.md](DESIGN.md)에 기록했습니다.
 
 ## Docker 없이 실행
 
@@ -139,6 +143,7 @@ npm run build
 npm run test:session
 npm run test:proxy
 npm run test:env
+npm run test:chat
 npm run test:portable
 ```
 

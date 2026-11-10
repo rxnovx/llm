@@ -2,6 +2,8 @@
 
 Android arm64의 네이티브 Termux에서 SQLite 백엔드와 Next.js 프론트엔드를 각각 실행하는 구성입니다. 기본 설치는 `backend/requirements.txt`, 개발 테스트는 `backend/requirements-dev.txt`를 그대로 사용합니다.
 
+대화 화면은 로그인 후 `/`입니다. 기본 `LLM_TEST_MODE=true`에서는 폐쇄망 서버 없이 랜덤 예시 답변을 주고받습니다. 실제 vLLM/Ollama를 연결할 때는 `backend/.env`의 `LLM_CONNECTIONS_JSON`을 지정하고 백엔드를 재시작합니다. 설정 형식과 네트워크 경로는 [모델 연결](LLM_CONNECTIONS.md)에 있습니다. 새로 추가한 HTTP 클라이언트와 Markdown 렌더러는 GPU·추론 라이브러리를 요구하지 않습니다.
+
 ## 첨부된 설치 오류 해결
 
 `psycopg-binary==3.3.4` 설치 실패는 PostgreSQL용 바이너리를 SQLite 기본 설치에도 포함했던 문제입니다. PostgreSQL 의존성은 `requirements-postgres.txt`로 분리했습니다.

@@ -12,6 +12,8 @@ test("회원가입부터 프로필·사진·재접속·로그아웃까지", asyn
   await page.getByLabel("비밀번호 확인", { exact: true }).fill("BrowserPass123!");
   await page.getByRole("checkbox", { name: "입력한 정보로 LLM 계정을 생성하는 데 동의합니다." }).check();
   await page.getByRole("button", { name: "회원가입", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "무엇을 함께 해볼까요?" })).toBeVisible();
+  await page.goto("/user/profile");
   await expect(page.getByRole("heading", { name: "계정 설정", exact: true })).toBeVisible();
   const cookies = await context.cookies();
   const cookie = cookies.find((c) => c.name === "llm_accounts_refresh");
@@ -49,6 +51,8 @@ test("회원가입부터 프로필·사진·재접속·로그아웃까지", asyn
   await page.getByLabel("사용자명 또는 이메일", { exact: true }).fill(id);
   await page.getByLabel("비밀번호", { exact: true }).fill("BrowserPass123!");
   await page.getByRole("button", { name: "로그인", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "무엇을 함께 해볼까요?" })).toBeVisible();
+  await page.goto("/user/profile");
   await expect(page.getByRole("heading", { name: "계정 설정", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });

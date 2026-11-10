@@ -1,0 +1,37 @@
+import type { ChatEvent } from "../types/chat";
+
+/** Parse SSE by lines, preserving UTF-8 and CRLF across arbitrary network chunks. */
+export async function readChatStream(stream: ReadableStream<Uint8Array>, onEvent: (event: ChatEvent) => void) {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "", name = "", data: string[] = [], finished = false;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      if (buffer.length + data.join("\n").length > 1024 * 1024) throw new Error("응답 크기가 너무 큽니다.");
+      let index;
+      while ((index = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, index).replace(/\r$/, "");
+        buffer = buffer.slice(index + 1);
+        if (line.startsWith("event:")) name = line.slice(6).trim();
+        else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+        else if (!line) {
+          if (data.length && ["start", "delta", "done", "error", "cancelled"].includes(name)) {
+            const payload = JSON.parse(data.join("\n"));
+            if (!payload || typeof payload !== "object") throw new Error("응답 형식이 올바르지 않습니다.");
+            if (name === "delta" && typeof payload.content !== "string") throw new Error("응답 형식이 올바르지 않습니다.");
+            onEvent({ event: name, data: payload } as ChatEvent);
+            if (["done", "error", "cancelled"].includes(name)) finished = true;
+          }
+          name = ""; data = [];
+        }
+      }
+      if (done) break;
+    }
+    if (!finished) throw new Error("응답 연결이 중단되었습니다. 다시 시도해 주세요.");
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}

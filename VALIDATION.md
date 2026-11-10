@@ -1,4 +1,4 @@
-# 초기 이관 검증
+# 계정 및 대화 워크스페이스 검증
 
 검증일: 2026-11-10. Node.js 24.22.1, Python 3.12.14. 이 저장소의 루트 경로와 LLM 서비스 식별자로 다시 검증했습니다. GitHub Actions는 실행하지 않았습니다.
 
@@ -6,16 +6,17 @@
 
 | 검증 | 결과 |
 | --- | --- |
-| `cd backend && python -m pytest -q` | PostgreSQL 드라이버 없는 가상환경에서 33개 통과 |
+| `cd backend && python -m pytest -q` | PostgreSQL 드라이버 없는 가상환경에서 46개 통과 (기존 계정·환경 설정 33개 + 대화 13개) |
 | `npm run test:session` | 5개 통과 |
-| `npm run test:proxy` | 12개 통과 |
+| `npm run test:proxy` | 14개 통과 |
 | `npm run test:env` | 실제 Next.js 환경파일 로더로 우선순위 검증 3개 통과 |
+| `npm run test:chat` | UTF-8·CRLF·분할 SSE·중단·크기 제한 5개 통과 |
 | `npm run test:portable` | Next.js WASM 바인딩으로 TypeScript 변환·실행 1개 통과 |
 | `npm run typecheck` | 통과 |
 | `npm run lint` | 오류·경고 없이 통과 |
 | `npm run build` | Webpack 프로덕션 빌드·정적 페이지 생성 통과 |
 | `NEXT_TEST_WASM=1 npm run build` | 이전 Termux 대응에서 강제 WASM 프로덕션 빌드 통과; 이번 환경파일 변경은 일반 Webpack 빌드로 재검증 |
-| `backend/.venv-portable/bin/python scripts/smoke_standalone.py` | PostgreSQL 없는 Python + 새 Webpack 빌드의 전체 계정 API 연동 통과 |
+| `backend/.venv-portable/bin/python scripts/smoke_standalone.py` | 실제 계정 API + 대화 스트리밍·저장·중지·재생성·페이지 조회·삭제 통과 |
 | `python -m pip check` | 의존성 충돌 없음 |
 | SQLite Compose 구성 | 공식 Compose JSON Schema 검증 통과 |
 | PostgreSQL Compose 병합 구성 | 공식 Compose JSON Schema 검증 통과 |
@@ -40,7 +41,19 @@ Compose 스키마 출처: `compose-spec/compose-spec`의 `schema/compose-spec.js
 
 프론트엔드는 Webpack으로 바꾸고, Next.js와 동일 버전의 SWC WASM 패키지를 고정했습니다. Android 준비 스크립트는 해당 패키지를 Next.js WASM 캐시에 연결합니다. 생성 캐시를 비운 뒤 준비 스크립트를 실행했고, 접근 불가능한 npm registry를 지정한 상태에서도 실제 Next.js WASM 로더가 TypeScript를 변환했습니다. Next.js의 강제 WASM 테스트 모드로 전체 프로덕션 빌드와 독립 실행 API 연동도 통과했습니다. 이 강제 플래그는 검증에만 사용하며 앱 실행 설정에는 넣지 않았습니다.
 
-합계 54개 테스트가 통과했습니다. 이 결과는 Linux에서 확인한 설정·출처 검사·SQLite 의존성·WASM 경로 검증이며 Android ABI, Termux의 실제 패키지 빌드, 파일 감시, 휴대전화 브라우저 동작을 검증했다는 의미는 아닙니다. `LD_PRELOAD` 방식은 Termux 문서에 안내했으며 이 Linux 환경에서 해당 Android 심볼 오류의 해결을 검증한 것은 아닙니다.
+계정·설정·대화·프론트엔드 합계 74개 테스트가 통과했습니다. 이 결과는 Linux에서 확인한 설정·출처 검사·SQLite 의존성·WASM 경로 검증이며 Android ABI, Termux의 실제 패키지 빌드, 파일 감시, 휴대전화 브라우저 동작을 검증했다는 의미는 아닙니다. `LD_PRELOAD` 방식은 Termux 문서에 안내했으며 이 Linux 환경에서 해당 Android 심볼 오류의 해결을 검증한 것은 아닙니다.
+
+## LLM 대화 검증
+
+대화 테스트 13개는 미로그인 차단, 다른 계정의 대화 조회·변경·삭제·중지 차단, 테스트 연결의 무네트워크 응답, 테스트 모드 해제 시 자동 대체 금지, 임의 URL/키 입력 차단, 부분 응답 저장, 재생성 시 중복 메시지 방지, 동시 생성 잠금·취소 ID·만료 후 회수, 기존 정상 답변 보존을 확인합니다.
+
+vLLM과 Ollama는 공식 프로토콜 형식의 HTTP 테스트 대역으로 검증했습니다. 실제 어댑터의 서버 인증 헤더, 모델 목록 경로, 이전 메시지 전달, 생성 옵션, 한글 UTF-8이 3바이트씩 나뉘는 스트림, 종료 표시 없는 응답·잘못된 JSON 거부를 확인했습니다. 실제 폐쇄망 GPU 서버·모델에 접속한 결과는 아닙니다.
+
+프론트엔드의 공통 SSE 파서는 1바이트 단위 UTF-8 분할, CRLF가 조각 사이에 걸친 경우, 명시적 완료·오류·취소, 비정상 EOF, 크기 초과 시 reader 해제를 검증합니다. 실제 Next.js 프록시 검증은 첫 프레임에 완료 이벤트가 포함되지 않음을 확인해 응답 버퍼링을 검사하며, 대화 API의 출처 검사·인증 헤더 전달·쿠키 비전달·허용 경로·페이지 쿼리 전달을 확인합니다.
+
+실제 Python + Next.js 통합 검증은 로컬 랜덤 답변의 첫 조각을 먼저 수신하고, 완료 후 SQLite 기록을 대조합니다. 두 번째 답변 도중 취소를 보내 잠금이 해제되고 부분 답변이 `cancelled`로 저장되는지 확인한 뒤, 같은 턴을 다시 생성해 메시지 중복이 없음을 검사합니다.
+
+브라우저 테스트 시나리오 `tests/chat.spec.ts`와 기존 계정 시나리오를 함께 제공합니다. 이번 브라우저 제어 환경에서는 준비된 `http://127.0.0.1:3100` 서버에도 `ERR_CONNECTION_REFUSED`가 발생해 화면을 확인하지 못했습니다. 데스크톱·모바일 레이아웃, Markdown 화면, 한글 IME, 화면 키보드와 실제 클릭 흐름은 통과로 기록하지 않습니다. 디자인은 공식 서비스 10곳의 자료를 검토해 구성했으며 판단과 자료 링크는 `DESIGN.md`에 있습니다.
 
 ## 환경 제한으로 미검증
 

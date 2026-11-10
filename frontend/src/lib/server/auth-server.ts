@@ -61,7 +61,7 @@ export async function requestBody(request: NextRequest): Promise<ArrayBuffer> {
   return result.buffer;
 }
 
-export async function authServerFetch(path: string, init: RequestInit = {}): Promise<Response> {
+export async function authServerFetch(path: string, init: RequestInit = {}, timeoutMs = timeout): Promise<Response> {
   const outgoing = new Headers(init.headers);
   const incoming = await requestHeaders();
   const userAgent = incoming.get("user-agent");
@@ -75,7 +75,8 @@ export async function authServerFetch(path: string, init: RequestInit = {}): Pro
   try {
     return await fetch(`${(process.env.AUTH_SERVER_URL ?? "http://127.0.0.1:8000").replace(/\/+$/, "")}${path}`, {
       ...init, headers: outgoing, cache: "no-store",
-      signal: AbortSignal.timeout(Number.isFinite(timeout) && timeout > 0 ? timeout : 8000),
+      signal: AbortSignal.any([AbortSignal.timeout(Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 8000),
+        ...(init.signal ? [init.signal] : [])]),
     });
   } catch (error) {
     const timedOut = error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name);

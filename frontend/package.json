@@ -14,6 +14,7 @@
     "test:session": "node --test tests/auth-session.test.mjs",
     "test:proxy": "node --test tests/proxy.test.mjs",
     "test:env": "node --test tests/env.test.mjs",
+    "test:chat": "node --experimental-strip-types --test tests/chat-stream.test.mjs",
     "test:browser": "playwright test",
     "predev": "node scripts/prepare-next-wasm.mjs",
     "prebuild": "node scripts/prepare-next-wasm.mjs",
@@ -24,6 +25,8 @@
     "next": "16.2.12",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "zustand": "^5.0.14"
   },
   "devDependencies": {
