@@ -6,11 +6,11 @@
 
 | 검증 | 결과 |
 | --- | --- |
-| `cd backend && python -m pytest -q` | PostgreSQL 드라이버 없는 가상환경에서 61개 통과 (계정·설정 33개 + 대화 13개 + 운영·제목 15개) |
+| `cd backend && python -m pytest -q` | PostgreSQL 드라이버 없는 가상환경에서 77개 통과 (계정·설정 33개 + 대화 13개 + 운영·제목 15개 + 모델 운영·문맥·대기열 16개) |
 | `npm run test:session` | 5개 통과 |
-| `npm run test:proxy` | 16개 통과 |
+| `npm run test:proxy` | 18개 통과 |
 | `npm run test:env` | 실제 Next.js 환경파일 로더로 우선순위 검증 3개 통과 |
-| `npm run test:chat` | UTF-8·CRLF·분할 SSE·중단·크기 제한 5개 통과 |
+| `npm run test:chat` | UTF-8·CRLF·분할 SSE·중단·크기 제한·대기/문맥 이벤트 7개 통과 |
 | `npm run test:markdown` | 실제 렌더러의 CommonMark·GFM·코드·수식·각주·스트리밍·안전한 링크 10개 통과 |
 | `npm run test:api` | 인증 헤더·갱신·권한 오류·장애·스트림 재전송 금지 4개 통과 |
 | `npm run test:portable` | Next.js WASM 바인딩으로 TypeScript 변환·실행 1개 통과 |
@@ -18,7 +18,7 @@
 | `npm run lint` | 오류·경고 없이 통과 |
 | `npm run build` | Webpack 프로덕션 빌드·정적 페이지 생성 통과 |
 | `NEXT_TEST_WASM=1 npm run build` | 이전 Termux 대응에서 강제 WASM 프로덕션 빌드 통과; 이번 환경파일 변경은 일반 Webpack 빌드로 재검증 |
-| `backend/.venv-portable/bin/python scripts/smoke_standalone.py` | 실제 계정·대화 + 운영 권한·통계·감사 + 로컬 역할 지정 + 수식 폰트 HTTP 제공 통과 |
+| `backend/.venv-portable/bin/python scripts/smoke_standalone.py` | 실제 계정·대화·운영 권한·수식 폰트 + 연결 편집·요약 + HTTP 모델 대역의 대기 취소·슬롯 회수 통과 |
 | `python -m pip check` | 의존성 충돌 없음 |
 | SQLite Compose 구성 | 공식 Compose JSON Schema 검증 통과 |
 | PostgreSQL Compose 병합 구성 | 공식 Compose JSON Schema 검증 통과 |
@@ -39,11 +39,11 @@ Compose 스키마 출처: `compose-spec/compose-spec`의 `schema/compose-spec.js
 
 ## Termux 대응 검증
 
-첨부 로그의 `psycopg-binary==3.3.4` 설치 실패에 대응해 기본 SQLite 의존성에서 PostgreSQL 바이너리를 분리했습니다. `requirements-dev.txt`만 설치한 가상환경에서 `psycopg` 미설치를 확인했으며, 환경파일 추가 단계에서 백엔드 33개 테스트가 통과했으며 이번 확장 후에는 61개가 통과했습니다. PostgreSQL import를 차단한 새 프로세스에서도 가입·로그인·프로필 조회가 성공하며, 시스템 시간대 DB를 비운 프로세스에서도 `tzdata`로 `Asia/Seoul`을 검증합니다.
+첨부 로그의 `psycopg-binary==3.3.4` 설치 실패에 대응해 기본 SQLite 의존성에서 PostgreSQL 바이너리를 분리했습니다. `requirements-dev.txt`만 설치한 가상환경에서 `psycopg` 미설치를 확인했으며, 환경파일 추가 단계에서 백엔드 33개 테스트가 통과했고 이번 확장 후에는 77개가 통과했습니다. PostgreSQL import를 차단한 새 프로세스에서도 가입·로그인·프로필 조회가 성공하며, 시스템 시간대 DB를 비운 프로세스에서도 `tzdata`로 `Asia/Seoul`을 검증합니다.
 
 프론트엔드는 Webpack으로 바꾸고, Next.js와 동일 버전의 SWC WASM 패키지를 고정했습니다. Android 준비 스크립트는 해당 패키지를 Next.js WASM 캐시에 연결합니다. 생성 캐시를 비운 뒤 준비 스크립트를 실행했고, 접근 불가능한 npm registry를 지정한 상태에서도 실제 Next.js WASM 로더가 TypeScript를 변환했습니다. Next.js의 강제 WASM 테스트 모드로 전체 프로덕션 빌드와 독립 실행 API 연동도 통과했습니다. 이 강제 플래그는 검증에만 사용하며 앱 실행 설정에는 넣지 않았습니다.
 
-계정·설정·대화·운영·프론트엔드 합계 105개 테스트가 통과했습니다. 이 결과는 Linux에서 확인한 설정·출처 검사·SQLite 의존성·WASM 경로 검증이며 Android ABI, Termux의 실제 패키지 빌드, 파일 감시, 휴대전화 브라우저 동작을 검증했다는 의미는 아닙니다. `LD_PRELOAD` 방식은 Termux 문서에 안내했으며 이 Linux 환경에서 해당 Android 심볼 오류의 해결을 검증한 것은 아닙니다.
+계정·설정·대화·운영·프론트엔드 합계 125개 테스트가 통과했습니다. 이 결과는 Linux에서 확인한 설정·출처 검사·SQLite 의존성·WASM 경로 검증이며 Android ABI, Termux의 실제 패키지 빌드, 파일 감시, 휴대전화 브라우저 동작을 검증했다는 의미는 아닙니다. `LD_PRELOAD` 방식은 Termux 문서에 안내했으며 이 Linux 환경에서 해당 Android 심볼 오류의 해결을 검증한 것은 아닙니다.
 
 ## LLM 대화 검증
 
@@ -68,6 +68,18 @@ Markdown 테스트는 실제 `MessageContent`와 플러그인을 컴파일해 �
 제목 변경은 상단 버튼과 기존 사이드바 메뉴에서 같은 저장 흐름을 사용합니다. 백엔드에서는 첫 메시지 자동 제목이 사용자 지정 제목을 덮어쓰지 않는지, 공백·길이·추가 필드 검증과 소유권을 확인했습니다. 독립 실행 검증으로 제목 저장·재조회도 확인하며, 데스크톱·모바일 브라우저 시나리오는 상단에서 수정 후 새로고침해 제목이 유지되는 경로로 보완했습니다.
 
 새 JS 의존성 26개가 추가됐으며 기존 의존성 버전은 바꾸지 않았습니다. Python 외부 의존성은 추가하지 않았습니다. 새 운영 통계 테이블은 추가 방식이며 기존 계정·대화 컬럼을 변경하지 않습니다. 브라우저에서의 실제 수식 폰트 표시, 클립보드, 모바일 표/코드 스크롤, 운영 화면 클릭, 한글 IME는 미검증입니다. 서버 HTML·HTTP 검증을 시각적 브라우저 검증으로 간주하지 않습니다.
+
+## 모델 운영·문맥·대기열 검증
+
+모델 운영 테스트 16개는 운영자 제한, 환경 연결의 DB 우선 설정·재시작 없는 반영, 기존 키 상속·이름 참조·키 삭제 시 제공 중단, 사용자/모델 허용 목록, 비활성화, 버전 충돌, 잘못된 설정과 비밀값 비노출을 확인합니다. 요약 메모의 소유권·범위·충돌, 전체 턴 단위 문맥 포함·제외, UTF-8 추정 표시, 예산 초과 시 메시지·허가 롤백도 검증합니다.
+
+SQLite 파일을 공유하는 **독립 Python 프로세스 두 개**에서 허가를 동시에 요청해 한 개만 실행 상태에 들어가는지 확인했습니다. API 프로세스를 여러 개 배포한 부하 테스트는 아닙니다. 연결/모델/사용자 한도, 관련 대기열 순서, 전역·계정 대기 상한, 기한 만료 회수, 대기 중 취소·연결 비활성화·시간 초과를 검사했습니다. 첫 응답이 오기 전에 중지해도 공급자 iterator가 닫히고 허가가 반환되는지 확인했습니다.
+
+독립 실행 통합 검증은 실제 Next.js BFF와 FastAPI, 로컬 HTTP vLLM 프로토콜 대역을 연결합니다. 첫 모델 호출을 보류한 동안 두 번째 요청의 대기 이벤트가 완료 전에 도착하고, 취소한 요청은 대역에 전달되지 않는지 검사했습니다. 첫 호출 완료 후 다음 요청이 실행되며, 요약 메모가 지정 범위의 원문을 대신하는 실제 공급자 payload와 출력 상한을 대조했습니다. 완료 2·취소 1의 실제 모드 통계도 비교했습니다. 실제 GPU/폐쇄망 모델 결과는 아닙니다.
+
+프록시 테스트는 연결 등록·수정 본문/인증 전달·쿠키 비전달·출처 제한·256 KiB 상한, 문맥 미리보기·요약 수정 경로 제한을 확인합니다. SSE 테스트는 대기/문맥 이벤트의 UTF-8 분할과 비종료 처리, 잘못된 순서 값 거부를 추가했습니다. 이번 확장에는 JS/Python 외부 의존성을 추가하지 않았습니다.
+
+설정 폼·문맥 다이얼로그·대기 버튼의 실제 브라우저 클릭과 모바일 레이아웃은 미검증입니다. 시스템 Chromium을 다시 실행했지만 `process_singleton_posix.cc: socket() failed: Operation not permitted`로 시작하지 못했습니다. 타입 검사·서버 통합 검증을 브라우저 검증으로 기록하지 않습니다. 모델 토큰 수는 로컬 추정치이며 자동 요약 기능은 없습니다.
 
 ## 환경 제한으로 미검증
 

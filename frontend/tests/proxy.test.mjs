@@ -221,3 +221,33 @@ test("operator mutations still require same-origin CSRF protection and cannot re
   assert.equal((await fetch(`${origin}/api/admin/database`)).status, 404);
   assert.equal((await fetch(`${origin}/api/admin/users`, { method: "POST", headers: csrf })).status, 404);
 });
+
+test("connection edits forward JSON and authorization, enforce CSRF and bound the body", async () => {
+  mode = "tokens";
+  for (const [method,path] of [["POST","connections"],["PATCH","connections/office"]]) {
+    const endpoint = `${origin}/api/admin/${path}`;
+    assert.equal((await fetch(endpoint,{method,body:"{}"})).status,403);
+    assert.equal((await fetch(endpoint,{method,headers:{...csrf,origin:"https://elsewhere.example"},body:"{}"})).status,403);
+    const body = JSON.stringify({id:"office",name:"내부 모델",revision:2});
+    assert.equal((await fetch(endpoint,{method,headers:{...csrf,authorization:"Bearer operator",cookie:"private=value"},body})).status,200);
+    assert.equal(received.method,method); assert.equal(received.body,body);
+    assert.equal(received.path,`/admin/${path}`); assert.equal(received.headers.cookie,undefined);
+    assert.equal(received.headers.authorization,"Bearer operator");
+    assert.equal(received.headers["content-type"],"application/json");
+  }
+  const before = received;
+  assert.equal((await fetch(`${origin}/api/admin/connections`,{method:"POST",headers:csrf,body:"x".repeat(256*1024+1)})).status,413);
+  assert.equal(received,before);
+});
+
+test("context preview and summary edits keep chat route and CSRF boundaries", async () => {
+  mode = "tokens";
+  const path = "conversations/12345678-1234-1234-1234-123456789abc/context";
+  for (const [method,suffix] of [["POST","/preview"],["PATCH",""]]) {
+    const body = JSON.stringify({summary:"이전 대화",revision:1});
+    assert.equal((await fetch(`${origin}/api/chat/${path}${suffix}`,{method,body})).status,403);
+    assert.equal((await fetch(`${origin}/api/chat/${path}${suffix}`,{method,headers:{...csrf,authorization:"Bearer member"},body})).status,200);
+    assert.equal(received.path,`/chat/${path}${suffix}`); assert.equal(received.body,body);
+  }
+  assert.equal((await fetch(`${origin}/api/chat/${path}/unknown`,{method:"POST",headers:csrf})).status,404);
+});

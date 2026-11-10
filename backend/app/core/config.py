@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     llm_connections_json: str = '[]'
     llm_timeout_seconds: int = Field(120, ge=5, le=600)
     llm_max_tokens: int = Field(2048, ge=64, le=16384)
+    llm_provider_keys_json: SecretStr = SecretStr('{}')
+    llm_user_concurrency: int = Field(1, ge=1, le=20)
+    llm_user_queue_limit: int = Field(2, ge=1, le=20)
+    llm_queue_capacity: int = Field(50, ge=1, le=500)
+    llm_queue_wait_seconds: int = Field(30, ge=1, le=300)
     refresh_token_days: int = Field(14, validation_alias=AliasChoices('REFRESH_TOKEN_DAYS', 'REFRESH_TOKEN_EXPIRE_DAYS'), ge=1)
     registration_rate_limit_attempts: int = Field(30, alias='REGISTRATION_RATE_LIMIT_ATTEMPTS', ge=1, le=1000)
     registration_rate_limit_window_seconds: int = Field(600, alias='REGISTRATION_RATE_LIMIT_WINDOW_SECONDS', ge=10, le=86400)

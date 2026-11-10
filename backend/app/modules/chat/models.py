@@ -61,3 +61,36 @@ class GenerationRun(Base):
     first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_chars: Mapped[int] = mapped_column(Integer, default=0)
     error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class ConnectionSetting(Base):
+    __tablename__ = 'chat_connection_settings'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    configuration: Mapped[str] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class ContextNote(Base):
+    __tablename__ = 'chat_context_notes'
+    conversation_id: Mapped[str] = mapped_column(ForeignKey('chat_conversations.id', ondelete='CASCADE'), primary_key=True)
+    summary: Mapped[str] = mapped_column(Text, default='')
+    # A summary covers only complete turns up to this position.
+    through_position: Mapped[int] = mapped_column(Integer, default=-1)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class SchedulerLock(Base):
+    __tablename__ = 'chat_scheduler_lock'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Admission(Base):
+    __tablename__ = 'chat_admissions'
+    __table_args__ = (Index('ix_admission_state_expiry', 'state', 'expires_at'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(ForeignKey('chat_generation_runs.id', ondelete='CASCADE'), unique=True)
+    state: Mapped[str] = mapped_column(String(16), default='queued')
+    enqueued_at: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expires_at: Mapped[int] = mapped_column(Integer)

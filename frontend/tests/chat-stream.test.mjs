@@ -43,3 +43,21 @@ test("malformed JSON and oversized unfinished events fail and release the reader
     assert.equal(source.locked, false);
   }
 });
+
+test("queue and estimated context events survive split UTF-8 and remain nonterminal", async () => {
+  const received = [];
+  const value = 'event: queue\ndata: {"status":"queued","position":2,"request_id":"one"}\n\n'
+    + 'event: context\ndata: {"is_estimate":true,"summary":"이전 요약"}\n\n' + events;
+  await readChatStream(stream(encoder.encode(value), 2), (event) => received.push(event));
+  assert.deepEqual(received.map((item) => item.event), ["queue", "context", "start", "delta", "done"]);
+  assert.equal(received[1].data.summary, "이전 요약");
+  await assert.rejects(() => readChatStream(stream(encoder.encode(value.replace(events, ""))), () => {}), /중단/);
+});
+
+test("invalid queue positions and states fail and release the reader", async () => {
+  for (const data of [{status:"queued",position:-1}, {status:"queued",position:1.5}, {status:"unknown",position:0}]) {
+    const source = stream(encoder.encode(`event: queue\ndata: ${JSON.stringify(data)}\n\n`));
+    await assert.rejects(() => readChatStream(source, () => {}), /대기열/);
+    assert.equal(source.locked, false);
+  }
+});

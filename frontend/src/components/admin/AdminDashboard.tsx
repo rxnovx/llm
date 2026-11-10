@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { authenticatedFetch, ApiRequestError } from "@/lib/authenticated-fetch";
 import { useAuthStore } from "@/stores/authStore";
@@ -8,10 +8,11 @@ import { Icon, Wordmark } from "@/components/chat/Icons";
 import type { OpsAudit, OpsMode, OpsOverview, OpsPage, OpsRequest, OpsUser, RunStatus } from "@/types/admin";
 import "@/components/chat/workspace.css";
 import "./admin.css";
+import { ConnectionManager } from "./ConnectionManager";
 
-type Tab = "overview" | "requests" | "users" | "audit";
-const tabs: [Tab, string][] = [["overview", "개요"], ["requests", "생성 요청"], ["users", "사용자"], ["audit", "감사 기록"]];
-const labels: Record<RunStatus, string> = { complete: "완료", error: "실패", cancelled: "취소", running: "진행 중", interrupted: "중단" };
+type Tab = "overview" | "connections" | "requests" | "users" | "audit";
+const tabs: [Tab, string][] = [["overview", "개요"], ["connections", "모델 관리"], ["requests", "생성 요청"], ["users", "사용자"], ["audit", "감사 기록"]];
+const labels: Record<RunStatus, string> = { complete: "완료", error: "실패", cancelled: "취소", queued: "대기 중", running: "진행 중", interrupted: "중단" };
 const milliseconds = (value: number | null) => value === null ? "—" : value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(1)}초`;
 const timestamp = (value: number | null, zone: string) => value === null ? "—" : new Date(value * 1000).toLocaleString("ko-KR", {
   timeZone: zone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
@@ -58,6 +59,7 @@ function Dashboard({ name }: { name: string }) {
   const [checking, setChecking] = useState("");
   const [checks, setChecks] = useState<Record<string, { status?: string; models?: string[]; error?: string }>>({});
   const checkController = useRef<AbortController | null>(null);
+  const deny = useCallback(() => { setOverview(null); setRequests([]); setUsers([]); setAudit([]); setForbidden(true); }, []);
 
   useEffect(() => () => checkController.current?.abort(), []);
   useEffect(() => {
@@ -74,7 +76,7 @@ function Dashboard({ name }: { name: string }) {
       try {
         const [snapshot, rows] = await Promise.all([
           adminJson<OpsOverview>(`/overview?mode=${mode}`, { signal }),
-          tab === "overview" ? Promise.resolve(null) : adminJson<OpsPage<OpsRequest | OpsUser | OpsAudit>>(path, { signal }),
+          tab === "overview" || tab === "connections" ? Promise.resolve(null) : adminJson<OpsPage<OpsRequest | OpsUser | OpsAudit>>(path, { signal }),
         ]);
         if (abort.signal.aborted) return;
         setOverview(snapshot); setError(""); setHasMore(rows?.has_more ?? false);
@@ -130,7 +132,7 @@ function Dashboard({ name }: { name: string }) {
         <div><span>전체 사용자</span><strong>{number(overview.users.total)}</strong><small>활성 {number(overview.users.active)}명 · 24시간 신규 {number(overview.users.new_24h)}명</small></div>
         <div><span>생성 요청 · 24시간</span><strong>{number(stats!.total)}</strong><small>완료 {number(stats!.complete)} · 실패 {number(stats!.error + stats!.interrupted)} · 취소 {number(stats!.cancelled)}</small></div>
         <div><span>완료 평균 응답 시간 · 24시간</span><strong>{milliseconds(stats!.average_ms)}</strong><small>성공률 {stats!.success_rate === null ? "—" : `${stats!.success_rate}%`}</small></div>
-        <div><span>현재 생성 중</span><strong>{number(overview.generating)}</strong><small>만료되지 않은 생성 요청</small></div>
+        <div><span>현재 생성 중</span><strong>{number(overview.generating)}</strong><small>대기 중 {number(overview.queued)}건</small></div>
       </section>
       <div className="ops-service-strip"><span><i />데이터베이스 연결됨</span><span>유효 세션 {number(overview.users.sessions)}</span><span>대화 {number(overview.conversations)}</span>
         <span>메시지 {number(overview.messages)}</span><span>24시간 로그인 {number(overview.users.logged_in_24h)}명</span><span>API 가동 {Math.floor(overview.service.uptime_seconds / 3600)}시간 {Math.floor(overview.service.uptime_seconds % 3600 / 60)}분</span></div>
@@ -138,7 +140,7 @@ function Dashboard({ name }: { name: string }) {
         <div className="ops-overview-grid"><section className="ops-panel"><header><div><h2>최근 7일 생성 요청</h2><p>{zone} · 날짜별 실제 기록</p></div><div className="ops-chart-legend"><span>완료</span><span>실패·중단</span><span>취소·진행 중</span></div></header>
           <div className="ops-chart">{overview.daily.map((day) => <div className="ops-chart-day" key={day.date} role="img" aria-label={`${day.date}: 요청 ${day.total}, 완료 ${day.complete}, 실패 ${day.error + day.interrupted}, 취소 ${day.cancelled}, 진행 중 ${day.running}`}>
             <strong>{number(day.total)}</strong><div className="ops-chart-track"><div className="ops-chart-bar" style={{ height: `${day.total / maximum * 135}px` }}>
-              <span className="ops-bar-other" style={{ flex: day.cancelled + day.running }} /><span className="ops-bar-error" style={{ flex: day.error + day.interrupted }} /><span className="ops-bar-complete" style={{ flex: day.complete }} /></div></div><span>{day.date.slice(5).replace("-", "/")}</span></div>)}</div>
+              <span className="ops-bar-other" style={{ flex: day.cancelled + day.running + day.queued }} /><span className="ops-bar-error" style={{ flex: day.error + day.interrupted }} /><span className="ops-bar-complete" style={{ flex: day.complete }} /></div></div><span>{day.date.slice(5).replace("-", "/")}</span></div>)}</div>
           {!overview.first_record_at && <p className="ops-collection-note">생성 요청이 기록되면 통계가 표시됩니다.</p>}
         </section>
         <section className="ops-panel"><header><div><h2>서비스 설정</h2><p>현재 API 프로세스 기준</p></div><Icon name="server" /></header><dl className="ops-config">
@@ -157,7 +159,7 @@ function Dashboard({ name }: { name: string }) {
         <section className="ops-panel"><header><div><h2>모델별 사용량</h2><p>최근 24시간 · 출력 문자는 토큰 수와 다릅니다.</p></div></header><div className="ops-table-scroll"><table><thead><tr><th>모델</th><th>연결</th><th>요청</th><th>출력 문자</th></tr></thead><tbody>
           {overview.model_usage.map((item, index) => <tr key={`${item.connection_id}-${item.model}-${index}`}><td><strong>{item.model}</strong>{item.is_test && <small className="ops-inline-tag">테스트</small>}</td><td>{item.connection_id}</td><td>{number(item.requests)}</td><td>{number(item.output_chars)}</td></tr>)}
           {!overview.model_usage.length && <tr><td colSpan={4} className="ops-empty">수집된 요청이 없습니다.</td></tr>}</tbody></table></div></section>
-      </> : <section className="ops-panel"><header><div><h2>{tabs.find(([id]) => id === tab)?.[1]}</h2><p>{tab === "requests" ? "요청 메타데이터만 표시하며 대화 본문은 조회하지 않습니다." : tab === "users" ? "계정과 유효 로그인 세션 현황" : "인증·계정·권한 변경 기록"}</p></div>
+      </> : tab === "connections" ? <ConnectionManager onForbidden={deny} /> : <section className="ops-panel"><header><div><h2>{tabs.find(([id]) => id === tab)?.[1]}</h2><p>{tab === "requests" ? "요청 메타데이터만 표시하며 대화 본문은 조회하지 않습니다." : tab === "users" ? "계정과 유효 로그인 세션 현황" : "인증·계정·권한 변경 기록"}</p></div>
         {tab === "requests" && <select aria-label="요청 상태" value={status} onChange={(event) => { setLoading(true); setStatus(event.target.value as RunStatus | "all"); setPage(0); }}><option value="all">전체 상태</option>{Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>}
         {tab === "users" && <form className="ops-user-search" onSubmit={(event) => { event.preventDefault(); setLoading(true); setQuery(search.trim()); setPage(0); setRefresh((old) => old + 1); }}>
           <input aria-label="사용자 검색" placeholder="이름 또는 사용자명" maxLength={100} value={search} onChange={(event) => setSearch(event.target.value)} /><button className="ops-button">검색</button></form>}</header>
@@ -171,6 +173,6 @@ function Dashboard({ name }: { name: string }) {
             {!audit.length && <tr><td colSpan={5} className="ops-empty">감사 기록이 없습니다.</td></tr>}</tbody></table>}</div>
         <footer className="ops-pagination"><span>{page + 1}페이지</span><button className="ops-button" disabled={loading || page === 0} onClick={() => { setLoading(true); setPage((old) => old - 1); }}>이전</button><button className="ops-button" disabled={loading || !hasMore} onClick={() => { setLoading(true); setPage((old) => old + 1); }}>다음</button></footer>
       </section>}
-      <p className="ops-footnote">생성 통계 필터는 사용자·세션 수에 적용되지 않습니다. 성공률은 완료·실패·중단 요청을 기준으로 계산하며 취소와 진행 중 요청은 제외합니다. 화면이 열려 있을 때 30초마다 갱신합니다.</p></>}
+      <p className="ops-footnote">생성 통계 필터는 사용자·세션 수에 적용되지 않습니다. 성공률은 완료·실패·중단 요청을 기준으로 계산하며 취소·대기·진행 중 요청은 제외합니다. 통계는 화면이 열려 있을 때 30초마다 갱신합니다.</p></>}
     </div></main>;
 }

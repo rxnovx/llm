@@ -6,10 +6,11 @@ import { useAuthStore } from "@/stores/authStore";
 import { chatFetch, chatJson } from "@/lib/chat-api";
 import { readChatStream } from "@/lib/chat-stream";
 import type { AuthUser } from "@/types/auth";
-import type { ChatMessage, Connection, Conversation, ConversationDetail } from "@/types/chat";
+import type { ChatMessage, Connection, ContextReport, Conversation, ConversationDetail, QueueState } from "@/types/chat";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
 import { UserAvatar } from "@/components/shared/UserAvatar";
 import { ConnectionsDialog } from "./ConnectionsDialog";
+import { ContextDialog } from "./ContextDialog";
 import { CopyButton, MessageContent } from "./MessageContent";
 import { Icon, Wordmark, type IconName } from "./Icons";
 import "./workspace.css";
@@ -51,6 +52,9 @@ function Workspace({ user }: { user: AuthUser }) {
   const [hasMore, setHasMore] = useState(false);
   const [sidebar, setSidebar] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [contextReport, setContextReport] = useState<ContextReport | null>(null);
+  const [queue, setQueue] = useState<QueueState | null>(null);
   const [menu, setMenu] = useState("");
   const [accountOpen, setAccountOpen] = useState(false);
   const [action, setAction] = useState<{ type: "rename" | "delete"; item: Conversation } | null>(null);
@@ -83,12 +87,27 @@ function Workspace({ user }: { user: AuthUser }) {
       if (id && /^[a-f0-9-]{36}$/.test(id)) {
         const detail = await chatJson<ConversationDetail>(`/conversations/${id}`, { signal: abort.signal });
         setActive(detail.conversation); setMessages(detail.messages);
+        setQueue(detail.generation ?? null);
+        generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
         setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
       }
     }).catch((caught) => { if (!abort.signal.aborted) setError(errorText(caught)); })
       .finally(() => { if (!abort.signal.aborted) setInitializing(false); });
     return () => { abort.abort(); controller.current?.abort(); loadController.current?.abort(); };
   }, []);
+
+  useEffect(() => {
+    if (busy) return;
+    const abort = new AbortController();
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      void chatJson<{ connections: Connection[] }>("/config", { signal: AbortSignal.any([abort.signal, AbortSignal.timeout(6000)]) })
+        .then((value) => { if (!abort.signal.aborted) setConnections(value.connections); }).catch(() => {});
+    };
+    if (settingsOpen) refresh();
+    window.addEventListener("focus", refresh);
+    return () => { abort.abort(); window.removeEventListener("focus", refresh); };
+  }, [busy, settingsOpen]);
 
   useEffect(() => {
     const keyboard = (event: KeyboardEvent) => {
@@ -129,17 +148,32 @@ function Workspace({ user }: { user: AuthUser }) {
       void chatJson<ConversationDetail>(`/conversations/${active.id}`, {
         signal: AbortSignal.any([abort.signal, AbortSignal.timeout(5000)]),
       }).then((detail) => {
-        if (!abort.signal.aborted) { setActive(detail.conversation); setMessages(detail.messages); }
+        if (!abort.signal.aborted) {
+          setActive(detail.conversation); setMessages(detail.messages); setQueue(detail.generation ?? null);
+          generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
+        }
       }).catch(() => {}).finally(() => { pending = false; });
     }, 1000);
     return () => { clearInterval(timer); abort.abort(); };
   }, [active?.id, active?.busy, streaming]);
+
+  useEffect(() => {
+    if (!active?.id || busy || !selected || !model) return;
+    const abort = new AbortController();
+    const timer = setTimeout(() => {
+      void chatJson<ContextReport>(`/conversations/${active.id}/context/preview`, { method: "POST",
+        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(6000)]), body: JSON.stringify({ connection_id: selected, model, content: draft }) })
+        .then((value) => { if (!abort.signal.aborted) setContextReport(value); }).catch(() => {});
+    }, 600);
+    return () => { clearTimeout(timer); abort.abort(); };
+  }, [active?.id, busy, selected, model, draft]);
 
   const updateConversation = (item: Conversation) => setConversations((old) => [item, ...old.filter((entry) => entry.id !== item.id)]);
   const newConversation = () => {
     if (sending.current || busy) return;
     loadController.current?.abort(); setLoading(false);
     setActive(null); setMessages([]); setDraft(""); setError(""); setSidebar(false); setMenu(""); pinned.current = true;
+    setContextReport(null); setQueue(null); setContextOpen(false); generation.current = null;
     window.history.replaceState(null, "", "/");
     requestAnimationFrame(() => editor.current?.focus());
   };
@@ -152,6 +186,8 @@ function Workspace({ user }: { user: AuthUser }) {
       const detail = await chatJson<ConversationDetail>(`/conversations/${item.id}`, { signal: abort.signal });
       if (abort.signal.aborted) return;
       pinned.current = true; setActive(detail.conversation); setMessages(detail.messages); setDraft("");
+      setContextReport(null); setQueue(detail.generation ?? null); setContextOpen(false);
+      generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
       setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
       window.history.replaceState(null, "", `/?chat=${item.id}`);
     } catch (caught) { if (!abort.signal.aborted) setError(errorText(caught)); }
@@ -181,14 +217,20 @@ function Workspace({ user }: { user: AuthUser }) {
       await readChatStream(response.body, (event) => {
         if (abort.signal.aborted) return;
         if (event.event === "start") {
-          const { user_message: human, assistant_message: assistant, conversation } = event.data;
+          const { user_message: human, assistant_message: assistant, conversation, context } = event.data;
+          if (context) setContextReport(context);
           assistantId = assistant.id;
           setMessages((old) => [...old.filter((item) => item.id !== human.id && item.id !== assistant.id), human, assistant]);
           setActive(conversation); updateConversation(conversation);
           requestAnimationFrame(() => editor.current?.focus());
         } else if (event.event === "delta") {
           setMessages((old) => old.map((item) => item.id === assistantId ? { ...item, content: item.content + event.data.content } : item));
+        } else if (event.event === "queue") {
+          setQueue(event.data);
+        } else if (event.event === "context") {
+          setContextReport(event.data);
         } else {
+          setQueue(null);
           setMessages((old) => old.map((item) => item.id === event.data.message.id ? event.data.message : item));
           setActive(event.data.conversation); updateConversation(event.data.conversation);
           if (event.data.detail) setError(event.data.detail);
@@ -210,7 +252,7 @@ function Workspace({ user }: { user: AuthUser }) {
         } catch { /* Preserve partial text and the original error while offline. */ }
       }
     } finally {
-      generation.current = null; controller.current = null; sending.current = false; setStreaming(false);
+      generation.current = null; controller.current = null; sending.current = false; setStreaming(false); setQueue(null);
     }
   };
   const stop = () => {
@@ -263,8 +305,9 @@ function Workspace({ user }: { user: AuthUser }) {
       }} />
     <div className="cw-composer-bottom"><button className="cw-model-picker" type="button" disabled={busy} onClick={() => setSettingsOpen(true)}>
       <Icon name={connection?.is_test ? "chat" : "server"} size={16} /><span>{connection?.is_test ? connection.name : model || connection?.name || "모델 연결"}</span><Icon name="chevron" size={14} /></button>
+      {active && <button className="cw-context-button" type="button" disabled={busy || !connection} onClick={() => setContextOpen(true)}>문맥</button>}
       <span className="cw-enter-hint">Shift + Enter 줄바꿈</span>
-      {streaming ? <button type="button" onClick={stop} className="cw-send" aria-label="응답 중지"><span className="cw-stop-square" /></button>
+      {busy ? <button type="button" onClick={stop} className="cw-send" aria-label={queue?.status === "queued" ? "대기 취소" : "응답 중지"}><span className="cw-stop-square" /></button>
         : <button className="cw-send" disabled={!draft.trim() || !canSend} aria-label="메시지 전송"><Icon name="arrow" size={20} /></button>}</div>
   </form>;
 
@@ -321,9 +364,16 @@ function Workspace({ user }: { user: AuthUser }) {
           </article>)}</div>}
       </div>
       {messages.length > 0 && <div className="cw-composer-dock">{scrollDown && <button className="cw-scroll-down" aria-label="최신 메시지로 이동" onClick={() => { pinned.current = true; viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: "smooth" }); setScrollDown(false); }}><Icon name="down" size={17} /></button>}
-        {composer}<p className="cw-composer-caption">{active?.busy && !streaming ? "진행 중인 응답을 불러오고 있습니다…" : connection?.is_test ? "테스트 모드 · 예시 답변이며 실제 모델을 호출하지 않습니다." : "모델의 답변은 부정확할 수 있습니다. 중요한 내용은 확인해 주세요."}</p></div>}
+        {queue?.status === "queued" && <p className="cw-queue-notice" role="status">모델 응답 대기 중 · 관련 대기열 {queue.position}번째<button type="button" className="cw-text-button" onClick={stop}>대기 취소</button></p>}
+        {contextReport && <div className={`cw-context-status ${contextReport.too_large ? "is-over-budget" : ""}`} role={contextReport.too_large || contextReport.omitted_turns > 0 ? "status" : undefined}>
+          <span>입력 추정 {contextReport.estimated_input_tokens.toLocaleString()} / {contextReport.input_budget.toLocaleString()} 토큰</span>
+          {contextReport.omitted_turns > 0 && <span>이전 {contextReport.omitted_turns}턴은 이번 문맥에서 제외됩니다.</span>}
+          {contextReport.summary_included && <span>요약 메모 사용</span>}{contextReport.too_large && <span>입력 예산 초과</span>}</div>}
+        {composer}<p className="cw-composer-caption">{active?.busy && !streaming ? "진행 중인 요청을 불러오고 있습니다…" : connection?.is_test ? "테스트 모드 · 예시 답변이며 실제 모델을 호출하지 않습니다." : "모델의 답변은 부정확할 수 있습니다. 중요한 내용은 확인해 주세요."}</p></div>}
       {error && <div className="cw-error-toast" role="alert"><span>{error}</span><button className="cw-icon-button" aria-label="오류 알림 닫기" onClick={() => setError("")}><Icon name="close" size={16} /></button></div>}
     </main>
+    {contextOpen && active && <ContextDialog key={active.id} conversationId={active.id} connectionId={selected} model={model} content={draft}
+      onClose={() => setContextOpen(false)} onSaved={setContextReport} />}
     <ConnectionsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} connections={connections} selected={selected} model={model} disabled={busy}
       onSelect={(id, nextModel) => { setSelected(id); setModel(nextModel); }} />
     <dialog ref={actionDialog} className="cw-dialog cw-action-dialog" aria-labelledby="conversation-action-title" onCancel={() => setAction(null)} onClose={() => setAction(null)}>
