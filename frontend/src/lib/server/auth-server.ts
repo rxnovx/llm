@@ -6,13 +6,31 @@ export const REFRESH_COOKIE_NAME = "llm_accounts_refresh";
 const timeout = Number(process.env.AUTH_SERVER_TIMEOUT_MS ?? 8000);
 export const MAX_BODY_BYTES = 6 * 1024 * 1024;
 
+function allowedOrigins(requestUrl: string): Set<string> {
+  const entries = [process.env.APP_URL?.trim() || new URL(requestUrl).origin,
+    ...(process.env.APP_ALLOWED_ORIGINS ?? "").split(",").map((value) => value.trim()).filter(Boolean)];
+  return new Set(entries.map((value) => {
+    const url = new URL(value);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password ||
+        url.pathname !== "/" || url.search || url.hash) {
+      throw new Error("APP_URL and APP_ALLOWED_ORIGINS must be HTTP(S) origins");
+    }
+    return url.origin;
+  }));
+}
+
 export function rejectUnsafeMutation(request: NextRequest): NextResponse | null {
   if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return null;
   const origin = request.headers.get("origin");
-  const expectedOrigin = new URL(process.env.APP_URL ?? request.url).origin;
+  let origins: Set<string>;
+  try {
+    origins = allowedOrigins(request.url);
+  } catch {
+    return NextResponse.json({ detail: "프론트엔드의 APP_URL / APP_ALLOWED_ORIGINS 설정을 확인해 주세요." }, { status: 503 });
+  }
   if (request.headers.get("x-llm-account") !== "1" ||
       request.headers.get("sec-fetch-site") === "cross-site" ||
-      (origin !== null && origin !== expectedOrigin)) {
+      (origin !== null && !origins.has(origin))) {
     return NextResponse.json({ detail: "요청 출처를 확인할 수 없습니다." }, { status: 403 });
   }
   return null;

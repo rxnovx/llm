@@ -22,10 +22,18 @@
 Termux(Android arm64)의 설치 순서와 현재 `psycopg-binary` 오류 복구 방법은 [TERMUX.md](TERMUX.md)에 정리했습니다. 기본 SQLite 설치에는 PostgreSQL 드라이버가 필요하지 않습니다.
 
 ```bash
-python scripts/init_env.py
+python scripts/init_env.py --standalone
 ```
 
-이 명령은 `.env.example`을 바탕으로 `.env`를 만들고 JWT·프록시 비밀값을 각각 생성합니다. 이미 있는 `.env`는 변경하지 않으며 비밀값을 터미널에 출력하지 않습니다.
+이 명령은 서비스별 예제를 바탕으로 `backend/.env`와 `frontend/.env.local`을 만들고 JWT·프록시 비밀값을 생성합니다. 기존 파일은 변경하지 않으며 비밀값을 터미널에 출력하지 않습니다.
+
+| 실행 방식 | 예제 | 실제 설정파일 |
+| --- | --- | --- |
+| 백엔드 개별 실행 | `backend/.env.example` | `backend/.env` |
+| 프론트엔드 개별 실행 | `frontend/.env.example` | `frontend/.env.local` |
+| Docker Compose / 공통 설정 | `.env.example` | 루트 `.env` |
+
+환경변수 우선순위는 터미널에 지정한 값 → 서비스별 파일 → 루트 `.env`입니다. 기존 공통 설정 방식은 `python scripts/init_env.py`로 계속 사용할 수 있습니다. 서비스별 파일이 이미 있다면 변경할 항목을 직접 수정하고 두 프로세스를 재시작합니다. Compose는 루트 `.env`를 사용하며 서비스별 로컬 파일은 이미지에 포함하지 않습니다.
 
 백엔드 터미널:
 
@@ -45,9 +53,11 @@ npm ci
 npm run dev
 ```
 
-브라우저에서 <http://localhost:3000>을 엽니다. API는 `127.0.0.1:8000`, 개발 문서는 <http://127.0.0.1:8000/docs>입니다. `.env`를 두 프로세스가 공통으로 읽습니다. 프론트엔드는 별도의 `.env.local`로 `AUTH_SERVER_URL`을 지정할 수도 있습니다.
+브라우저에서 <http://localhost:3000> 또는 <http://127.0.0.1:3000>을 엽니다. 개별 실행 예제는 두 출처를 명시적으로 허용합니다. API는 `127.0.0.1:8000`, 개발 문서는 <http://127.0.0.1:8000/docs>입니다.
 
-SQLite DB와 프로필 이미지는 `backend/data/`에 생성됩니다. 다른 디렉터리에서 Python을 실행해도 상대 DB 경로는 백엔드 디렉터리를 기준으로 해석합니다. 개발 자동 재시작은 `.env`의 `SERVER_RELOAD=true`로 켤 수 있습니다.
+“요청 출처를 확인할 수 없습니다”가 표시되면 `frontend/.env.local`의 `APP_URL`과 브라우저 주소의 프로토콜·호스트·포트를 확인합니다. 추가 주소는 `APP_ALLOWED_ORIGINS`에 쉼표로 구분해 지정합니다. 백엔드 연결 주소인 `AUTH_SERVER_URL`이나 백엔드 `CORS_ORIGINS`를 바꾸는 것만으로는 프론트엔드의 출처 검사가 변경되지 않습니다. 상세 예시는 [TERMUX.md](TERMUX.md#요청-출처를-확인할-수-없습니다-오류)에 있습니다.
+
+SQLite DB와 프로필 이미지는 `backend/data/`에 생성됩니다. 다른 디렉터리에서 Python을 실행해도 상대 DB 경로는 백엔드 디렉터리를 기준으로 해석합니다. 개발 자동 재시작은 `backend/.env`의 `SERVER_RELOAD=true`로 켤 수 있습니다.
 
 ## Docker Compose 배포
 
@@ -98,7 +108,7 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-운영 HTTPS에서는 `.env`의 `APP_URL`, `FRONTEND_URL`, `CORS_ORIGINS`를 `https://실제도메인`으로 맞추고 `AUTH_COOKIE_SECURE=true`를 설정합니다. 호스트 Nginx를 사용하면서 앱을 개별 실행한다면 `APP_ENV=production`, `EXPOSE_DOCS=false`, `SERVER_RELOAD=false`, `AUTH_PROXY_CLIENT_IP_HEADER=x-real-ip`도 지정합니다.
+운영 HTTPS에서는 `.env`의 `APP_URL`, `FRONTEND_URL`, `CORS_ORIGINS`를 `https://실제도메인`으로 맞추고 `AUTH_COOKIE_SECURE=true`를 설정합니다. `APP_ALLOWED_ORIGINS`는 비워 두거나 실제 운영 출처만 지정합니다. 호스트 Nginx를 사용하면서 앱을 개별 실행한다면 `APP_ENV=production`, `EXPOSE_DOCS=false`, `SERVER_RELOAD=false`, `AUTH_PROXY_CLIENT_IP_HEADER=x-real-ip`도 지정합니다.
 
 쿠키 이름은 `llm_accounts_refresh`, 경로는 `/api/auth`, 속성은 HttpOnly·SameSite=Lax입니다. 갱신 토큰은 브라우저 JavaScript와 localStorage에 저장하지 않습니다. 로그인·갱신·로그아웃은 브라우저 탭 간에 순서를 맞추며, API는 회전된 토큰과 해제된 세션을 거부합니다.
 
@@ -128,6 +138,7 @@ npm run lint
 npm run build
 npm run test:session
 npm run test:proxy
+npm run test:env
 npm run test:portable
 ```
 

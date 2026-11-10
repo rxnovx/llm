@@ -2,7 +2,8 @@ import type { NextConfig } from "next";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-// Share .env with python main.py. Explicit process variables take priority.
+// Next.js loads frontend/.env.local first. Root .env only fills missing values;
+// explicit process variables take priority over both files.
 const sharedEnv = path.resolve(process.cwd(), "../.env");
 if (existsSync(sharedEnv)) process.loadEnvFile(sharedEnv);
 

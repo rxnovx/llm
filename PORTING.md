@@ -28,3 +28,5 @@
 프로필 사진 처리는 원본의 노트 업로드 엔진 대신 계정 전용 저장소로 옮겼습니다. 허용 이미지의 실제 내용을 검사·재인코딩하며 사용자별 해시 경로와 임의 파일명을 사용합니다. 변경 후 이전 파일은 소유자 경로에 한해 제거합니다.
 
 Termux 지원을 위해 기본 SQLite 의존성에서 PostgreSQL 바이너리를 분리했습니다. Docker는 `requirements-postgres.txt`를 설치해 PostgreSQL 옵션을 유지합니다. 프론트엔드는 원본과 같이 Webpack으로 실행하며, Android에서는 고정 버전 SWC WASM 의존성을 Next.js의 캐시 경로에 연결합니다. `tzdata`와 `TERMUX.md`도 추가했습니다.
+
+개별 실행용으로 `backend/.env.example`과 `frontend/.env.example`을 제공하며 `init_env.py --standalone`은 기존 파일을 보존하면서 각 로컬 설정을 생성합니다. 프론트엔드는 기본 `APP_URL` 외에 `APP_ALLOWED_ORIGINS`의 정확한 출처를 추가로 검사합니다. 이를 통해 Termux의 localhost·루프백 IP 접속을 명시적으로 지원하며, 외부 출처·다른 포트·위조된 전달 헤더로 허용 범위가 확장되지는 않습니다.

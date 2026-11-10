@@ -10,6 +10,7 @@ Android arm64의 네이티브 Termux에서 SQLite 백엔드와 Next.js 프론트
 
 ```bash
 git pull --ff-only
+python ../scripts/init_env.py --standalone
 python -m pip install -r requirements.txt
 python main.py
 ```
@@ -27,12 +28,14 @@ pkg update
 pkg install python python-pip nodejs-lts npm git rust clang make pkg-config openssl libffi libjpeg-turbo libpng zlib
 ```
 
-저장소 루트에서 환경 설정을 만듭니다. 기존 `.env`가 있으면 그대로 보존합니다.
+저장소 루트에서 각 서비스의 환경 설정을 만듭니다. 기존 설정파일은 보존합니다.
 
 ```bash
 cd ~/workspace/llm
-python scripts/init_env.py
+python scripts/init_env.py --standalone
 ```
+
+`backend/.env.example` → `backend/.env`, `frontend/.env.example` → `frontend/.env.local`이 생성됩니다. 루트 `.env`가 Compose용 주소로 설정되어 있어도 서비스별 파일이 우선합니다. 터미널에 직접 지정한 환경변수는 파일보다 우선합니다. 이미 서비스별 파일이 있다면 새 예제를 참고해 필요한 값을 직접 수정합니다.
 
 ### 백엔드 세션
 
@@ -46,6 +49,18 @@ python main.py
 
 이미 `venv`라는 이름으로 만들었다면 `source venv/bin/activate`로 활성화하면 됩니다. SQLite DB와 프로필 이미지는 `backend/data/`에 저장합니다. 별도의 PostgreSQL 서버는 기본 실행에 필요하지 않습니다.
 
+#### cryptography의 `PyType_Type` 심볼 오류
+
+`_rust.abi3.so`를 불러올 때 `cannot locate symbol "PyType_Type"`가 나오면 `.env`의 주소 설정과는 별개인 네이티브 라이브러리 연결 문제입니다. Python 3.13을 사용하는 Termux에서 아래 파일이 존재한다면 해당 프로세스에만 libpython을 먼저 불러오는 방법을 시험할 수 있습니다.
+
+```bash
+python --version
+ls "$PREFIX/lib/libpython3.13.so"
+LD_PRELOAD="$PREFIX/lib/libpython3.13.so${LD_PRELOAD:+:$LD_PRELOAD}" python main.py
+```
+
+버전 번호는 실행 중인 Python과 일치해야 합니다. 이 방법은 해당 심볼 오류의 우회이며 실제 단말에서 성공 여부를 확인해야 합니다. [Termux의 같은 유형 오류 보고](https://github.com/termux/termux-packages/issues/30705)에도 선행 로딩으로 import가 성공한 사례가 있습니다.
+
 ### 프론트엔드 세션
 
 ```bash
@@ -54,7 +69,7 @@ npm ci --include=optional
 npm run dev
 ```
 
-휴대전화 브라우저에서 `http://localhost:3000`을 엽니다. 백엔드는 `127.0.0.1:8000`으로 실행됩니다. 두 Termux 세션을 유지합니다.
+휴대전화 브라우저에서 `http://localhost:3000` 또는 `http://127.0.0.1:3000`을 엽니다. 백엔드는 `127.0.0.1:8000`으로 실행됩니다. 두 Termux 세션을 유지합니다.
 
 `npm run dev`와 `npm run build`는 원본 프로젝트와 같은 Webpack을 사용합니다. Next.js와 동일한 버전의 SWC WASM 패키지를 설치하며, Android에서는 실행 전에 해당 패키지를 Next.js의 WASM 캐시에 연결합니다. 따라서 Turbopack 전용 네이티브 바인딩에 의존하지 않습니다. Tailwind/Lightning CSS의 Android arm64 패키지도 설치되도록 optional 의존성을 포함합니다.
 
@@ -65,6 +80,23 @@ WATCHPACK_POLLING=true npm run dev
 ```
 
 운영용 Next.js 실행 명령은 `npm run build` 후 `npm start`입니다. 실제 Termux 단말에서의 빌드·화면 동작은 아직 검증하지 못했으며, Linux에서 PostgreSQL 없는 설치와 WASM 컴파일 경로를 검증한 결과는 [VALIDATION.md](VALIDATION.md)에 기록합니다.
+
+## “요청 출처를 확인할 수 없습니다” 오류
+
+이 메시지는 Next.js의 인증 요청 출처 검사에서 나옵니다. `localhost`와 `127.0.0.1`, 서로 다른 포트, HTTP와 HTTPS는 각각 다른 출처입니다. `frontend/.env.local`의 개발 설정은 다음과 같습니다.
+
+```dotenv
+APP_URL=http://localhost:3000
+APP_ALLOWED_ORIGINS=http://127.0.0.1:3000
+AUTH_SERVER_URL=http://127.0.0.1:8000
+AUTH_COOKIE_SECURE=false
+```
+
+`APP_URL`은 기본 브라우저 주소, `APP_ALLOWED_ORIGINS`는 추가로 허용할 정확한 브라우저 주소, `AUTH_SERVER_URL`은 Next.js가 연결할 백엔드 주소입니다. 설정을 수정한 후 `npm run dev`를 종료하고 다시 실행합니다. 브라우저에서 실제 사용하는 주소에 맞춰 지정하며, 와일드카드는 지원하지 않습니다. HTTP 로컬 테스트에서 `AUTH_COOKIE_SECURE=true`를 사용하면 세션 쿠키가 정상 전달되지 않을 수 있습니다.
+
+다른 포트나 LAN 주소로 접속한다면 그 출처를 명시적으로 추가해야 합니다. 예를 들어 `http://192.168.0.10:3001`로 접속할 경우 해당 주소를 추가하고 Next.js도 그 인터페이스·포트에서 실행합니다. `FRONTEND_URL`은 백엔드에서 만드는 이메일 링크의 기본 주소이며 프론트엔드 출처 허용 목록을 대신하지 않습니다.
+
+루트 `.env`에 `APP_URL=http://localhost:8080` 같은 Compose 설정만 있고 서비스별 파일이 없으면 직접 실행한 `3000` 포트의 요청이 차단됩니다. `--standalone`으로 로컬 파일을 만들거나 기존 로컬 파일의 주소를 수정하면 됩니다. 허용하지 않은 외부 출처와 `Sec-Fetch-Site: cross-site` 요청은 계속 차단합니다.
 
 ## PostgreSQL을 사용하는 경우
 
@@ -78,7 +110,7 @@ python -m pip install "psycopg==3.3.4"
 PSYCOPG_IMPL=python python main.py
 ```
 
-이 경우 `.env`의 `DATABASE_URL`도 실제 PostgreSQL 주소로 지정합니다. 기존 SQLite 데이터는 자동으로 옮겨지지 않습니다.
+이 경우 `backend/.env`의 `DATABASE_URL`도 실제 PostgreSQL 주소로 지정합니다. 기존 SQLite 데이터는 자동으로 옮겨지지 않습니다.
 
 ## 참고 근거
 

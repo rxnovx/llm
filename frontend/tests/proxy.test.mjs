@@ -35,7 +35,8 @@ before(async () => {
   });
   await new Promise((resolve) => server.listen(8099, "127.0.0.1", resolve));
   child = spawn(process.execPath, [".next/standalone/server.js"], {
-    env: { ...process.env, PORT: "3099", HOSTNAME: "127.0.0.1", APP_URL: origin,
+    env: { ...process.env, PORT: "3099", HOSTNAME: "127.0.0.1", APP_URL: "http://localhost:3099",
+      APP_ALLOWED_ORIGINS: origin,
       AUTH_SERVER_URL: upstreamOrigin, AUTH_SERVER_TIMEOUT_MS: "150", AUTH_COOKIE_SECURE: "true" },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -115,9 +116,23 @@ test("an upstream timeout returns 504 without destroying the cookie", async () =
   assert.equal(response.headers.get("set-cookie"), null);
 });
 
-test("mutations require the same origin and a non-simple header", async () => {
+test("explicitly allowed localhost and IP origins can both log in", async () => {
   mode = "tokens";
-  for (const headers of [{}, { ...csrf, origin: "https://other.example" }, { ...csrf, "sec-fetch-site": "cross-site" }]) {
+  for (const allowedOrigin of ["http://localhost:3099", origin]) {
+    const response = await fetch(`${origin}/api/auth/login`, { method: "POST",
+      headers: { ...csrf, origin: allowedOrigin, "content-type": "application/json" },
+      body: JSON.stringify({ loginId: "alice", password: "some-password" }) });
+    assert.equal(response.status, 200, `${allowedOrigin}: ${await response.text()}`);
+  }
+});
+
+test("mutations require an allowed origin and a non-simple header", async () => {
+  mode = "tokens";
+  for (const headers of [{}, { ...csrf, origin: "https://other.example" },
+    { ...csrf, origin: "http://127.0.0.1:3100" }, { ...csrf, origin: "https://127.0.0.1:3099" },
+    { ...csrf, origin: "http://localhost.evil.example:3099" }, { ...csrf, origin: "null" },
+    { ...csrf, origin: "https://other.example", host: "other.example", "x-forwarded-host": "other.example" },
+    { ...csrf, "sec-fetch-site": "cross-site" }]) {
     assert.equal((await fetch(`${origin}/api/auth/logout`, { method: "POST", headers })).status, 403);
   }
 });

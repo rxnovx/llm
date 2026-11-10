@@ -13,6 +13,7 @@
     "lint": "eslint .",
     "test:session": "node --test tests/auth-session.test.mjs",
     "test:proxy": "node --test tests/proxy.test.mjs",
+    "test:env": "node --test tests/env.test.mjs",
     "test:browser": "playwright test",
     "predev": "node scripts/prepare-next-wasm.mjs",
     "prebuild": "node scripts/prepare-next-wasm.mjs",
