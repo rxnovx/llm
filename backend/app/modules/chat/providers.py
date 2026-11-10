@@ -10,6 +10,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
 from app.core.config import Settings
+from app.core.tls import assistant_tls
 
 
 class ProviderError(Exception):
@@ -116,7 +117,7 @@ def client(connection: Connection, timeout: float) -> httpx.AsyncClient:
     key = connection.api_key.get_secret_value()
     return httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(10, timeout)),
         headers={'Authorization': f'Bearer {key}'} if key else {},
-        follow_redirects=False, trust_env=False)
+        follow_redirects=False, trust_env=False,verify=assistant_tls())
 
 
 def endpoint(connection: Connection, suffix: str) -> str:
@@ -201,6 +202,9 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
 async def tool_reply(connection,model,history,tools,settings):
     """One structured agent step; tools are executed exclusively by the application host."""
     if connection.provider=='test':
+        names={t['function']['name'] for t in tools}
+        if 'repo_map' not in names:
+            return {'role':'assistant','content':'테스트 모드에서 선택한 자료와 앱 연결 흐름을 확인했습니다. '+('[KS1]' if any('[KS1]' in m.get('content','') for m in history) else '')+'\n\n실제 모델이 작성한 분석은 아닙니다. 실제 연결을 선택하면 자료 검색과 도구 호출을 사용해 답변합니다.','tool_calls':[]}
         results=[item for item in history if item['role']=='tool']
         if not results:
             return {'role':'assistant','content':'','tool_calls':[{'id':'demo-map','type':'function','function':{'name':'repo_map','arguments':{'limit':20}}}]}

@@ -20,6 +20,8 @@ import { appMentionAt, removeAppMention } from "@/lib/app-mentions";
 import { GitlabScopeDialog } from "./GitlabScopeDialog";
 import { MessageSources } from "./MessageSources";
 import { WorkspaceDialog } from "./WorkspaceDialog";
+import { AssistantDialog } from './AssistantDialog';
+import { emptySelection,type AssistantSelection } from '@/lib/knowledge';
 
 const starters: { icon: IconName; title: string; prompt: string }[] = [
   { icon: "idea", title: "아이디어 정리", prompt: "떠오른 아이디어를 실행 가능한 계획으로 정리하고 싶어요. 먼저 어떤 내용을 알려드리면 좋을까요?" },
@@ -64,8 +66,10 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const [queue, setQueue] = useState<QueueState | null>(null);
   const [appSelections, setAppSelections] = useState<GitlabSelection[]>([]);
   const [mention, setMention] = useState<ReturnType<typeof appMentionAt>>(null);
+  const [mentionChoice,setMentionChoice]=useState(0);
   const [scopeOpen, setScopeOpen] = useState(false), [toolStatus, setToolStatus] = useState("");
   const [terminal,setTerminal]=useState({enabled:false,execution_enabled:false}),[workspaceOpen,setWorkspaceOpen]=useState(false);
+  const [assistantOpen,setAssistantOpen]=useState(false),[assistantSelection,setAssistantSelection]=useState<AssistantSelection>(emptySelection);
   const [menu, setMenu] = useState("");
   const [accountOpen, setAccountOpen] = useState(false);
   const [action, setAction] = useState<{ type: "rename" | "delete"; item: Conversation } | null>(null);
@@ -93,6 +97,14 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     if (!user) { router.push(workspaceHref("/login?next=/user/settings/apps", window.location.search), { scroll: false }); return; }
     setScopeOpen(true);
   };
+  const openAssistant=async()=>{
+    if(mention)setDraft(removeAppMention(draft,mention));setMention(null);
+    if(!user){router.push(workspaceHref('/login',window.location.search),{scroll:false});return;}
+    try{
+      if(!active){const next=await chatJson<Conversation>('/conversations',{method:'POST',body:JSON.stringify({connection_id:selected,model})});setActive(next);updateConversation(next);replaceConversationLocation(next.id);}
+      setAssistantOpen(true);
+    }catch(e){setError(errorText(e));}
+  };
 
   useEffect(() => {
     if (!subject) return;
@@ -119,6 +131,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         const detail = await chatJson<ConversationDetail>(`/conversations/${id}`, { signal: abort.signal });
         setActive(detail.conversation); setMessages(detail.messages);
         const previousApp=detail.messages.at(-1)?.apps?.[0];
+        setAssistantSelection({...emptySelection(),...detail.messages.at(-1)?.assistant});
         if(previousApp?.mode==='workspace'||previousApp?.mode==='execute')setAppSelections([previousApp]);
         setQueue(detail.generation ?? null);
         generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
@@ -209,6 +222,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     setActive(null); setMessages([]); setDraft(""); setError(""); setSidebar(false); setMenu(""); pinned.current = true;
     setContextReport(null); setQueue(null); setContextOpen(false); generation.current = null;
     setAppSelections([]); setMention(null); setToolStatus("");
+    setAssistantSelection(emptySelection());setAssistantOpen(false);
     replaceConversationLocation(null);
     requestAnimationFrame(() => editor.current?.focus());
   };
@@ -225,6 +239,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
       setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
       const previousApp=detail.messages.at(-1)?.apps?.[0];
+      setAssistantSelection({...emptySelection(),...detail.messages.at(-1)?.assistant});
       setAppSelections(previousApp?.mode==='workspace'||previousApp?.mode==='execute'?[previousApp]:[]);setMention(null);setToolStatus("");
       replaceConversationLocation(item.id);
     } catch (caught) { if (!abort.signal.aborted) setError(errorText(caught)); }
@@ -252,7 +267,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       }
       const id = crypto.randomUUID(); generation.current = { id, conversation: current.id };
       const response = await chatFetch(`/conversations/${current.id}/messages`, { method: "POST", signal: abort.signal,
-        body: JSON.stringify({ content: text, connection_id: selected, model, request_id: id, retry, apps: usedApps }) });
+        body: JSON.stringify({ content: text, connection_id: selected, model, request_id: id, retry, apps: usedApps,
+          assistant:retry?messages.at(-1)?.assistant:assistantSelection }) });
       if (!response.body) throw new Error("응답 연결을 열지 못했습니다.");
       await readChatStream(response.body, (event) => {
         if (abort.signal.aborted) return;
@@ -349,20 +365,21 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const composer = <form className={`cw-composer ${streaming ? "is-streaming" : ""}`} onSubmit={(event) => { event.preventDefault(); void send(); }}>
     {!!appSelections.length && <div className="cw-app-selection">{appSelections.map((selection) => <div key={selection.connection_id}><Icon name="code" size={15} /><span>GitLab · {selection.ref} · {selection.mode==='execute'?'분석·실행':selection.mode==='workspace'?'프로젝트 분석':`${selection.paths.length}개 파일`}</span>
       <button type="button" className="cw-icon-button" aria-label="GitLab 파일 선택 제거" onClick={() => setAppSelections([])}><Icon name="close" size={13} /></button></div>)}</div>}
-    {mention && <div className="cw-app-mention" id="chat-app-options" role="listbox" aria-label="사용할 앱"><button id="chat-app-gitlab" type="button" role="option" aria-selected="true"
-      onMouseDown={(e) => e.preventDefault()} onClick={selectGitlab}><Icon name="code" size={20} /><span><strong>GitLab</strong><small>내 프로젝트에서 파일 가져오기</small></span><kbd>↵</kbd></button></div>}
+    {(assistantSelection.base_ids.length>0||assistantSelection.document_ids.length>0||assistantSelection.mcp_ids.length>0)&&<div className="cw-assistant-selection"><button type="button" onClick={()=>void openAssistant()}>지식 {assistantSelection.base_ids.length} · 첨부 {assistantSelection.document_ids.length} · 앱 {assistantSelection.mcp_ids.length}{assistantSelection.allow_writes?' · 쓰기 허용':''}</button><button type="button" aria-label="자료와 앱 선택 제거" onClick={()=>setAssistantSelection(emptySelection())}>×</button></div>}
+    {mention && <div className="cw-app-mention" id="chat-app-options" role="listbox" aria-label="사용할 앱"><button id="chat-app-gitlab" type="button" role="option" aria-selected={mentionChoice===0}
+      onMouseMove={()=>setMentionChoice(0)} onMouseDown={(e) => e.preventDefault()} onClick={selectGitlab}><Icon name="code" size={20} /><span><strong>GitLab</strong><small>내 프로젝트에서 파일 가져오기</small></span><kbd>↵</kbd></button><button id="chat-app-knowledge" type="button" role="option" aria-selected={mentionChoice===1} onMouseMove={()=>setMentionChoice(1)} onMouseDown={e=>e.preventDefault()} onClick={()=>void openAssistant()}><Icon name="plus" size={20}/><span><strong>지식·연결된 앱</strong><small>문서 검색과 MCP 도구 선택</small></span></button></div>}
     <label className="cw-sr-only" htmlFor="chat-message">메시지</label>
     <textarea ref={editor} id="chat-message" placeholder={!user || connection ? "무엇이든 편하게 물어보세요" : "모델을 연결하고 대화를 시작하세요"}
       value={draft} rows={2} maxLength={16000} disabled={loading || initializing || !!active?.busy && !streaming}
-      role="combobox" aria-expanded={!!mention} aria-autocomplete="list" aria-controls={mention ? "chat-app-options" : undefined} aria-activedescendant={mention ? "chat-app-gitlab" : undefined}
-      onBlur={() => setMention(null)} onChange={(event) => { setDraft(event.target.value); setMention(appMentionAt(event.target.value, event.target.selectionStart)); }}
+      role="combobox" aria-expanded={!!mention} aria-autocomplete="list" aria-controls={mention ? "chat-app-options" : undefined} aria-activedescendant={mention ? mentionChoice===0?"chat-app-gitlab":"chat-app-knowledge" : undefined}
+      onBlur={() => setMention(null)} onChange={(event) => { setDraft(event.target.value); const next=appMentionAt(event.target.value,event.target.selectionStart);setMention(next);setMentionChoice(next?.query&&!"gitlab".startsWith(next.query.toLowerCase())?1:0); }}
       onClick={(event) => setMention(appMentionAt(event.currentTarget.value,event.currentTarget.selectionStart))}
       onKeyDown={(event) => {
         if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
         if (mention) {
           if (event.key === "Escape") { event.preventDefault(); setMention(null); return; }
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); return; }
-          if (event.key === "Enter" && !event.shiftKey || event.key === "Tab") { event.preventDefault(); selectGitlab(); return; }
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault();setMentionChoice(v=>v===0?1:0);return; }
+          if (event.key === "Enter" && !event.shiftKey || event.key === "Tab") { event.preventDefault();if(mentionChoice===1)void openAssistant();else selectGitlab();return; }
         }
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
           event.preventDefault(); void send();
@@ -370,7 +387,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       }} />
     <div className="cw-composer-bottom"><button className="cw-model-picker" type="button" disabled={busy} onClick={openModels}>
       <Icon name={connection?.is_test ? "chat" : "server"} size={16} /><span>{connection?.is_test ? connection.name : model || connection?.name || "모델 연결"}</span><Icon name="chevron" size={14} /></button>
-      <button type="button" className="cw-context-button" aria-label="앱 추가" disabled={busy} onClick={() => { const caret = editor.current?.selectionStart ?? draft.length; setMention({ start: caret, end: caret, query: "" }); editor.current?.focus(); }}>@ 앱</button>
+      <button type="button" className="cw-context-button" aria-label="앱 추가" disabled={busy} onClick={() => { const caret = editor.current?.selectionStart ?? draft.length;setMentionChoice(0);setMention({ start: caret, end: caret, query: "" }); editor.current?.focus(); }}>@ 앱</button>
+      <button type="button" className="cw-context-button" disabled={busy||loading||initializing} onClick={()=>void openAssistant()}>파일·지식</button>
       {active && <button className="cw-context-button" type="button" disabled={busy || !connection} onClick={() => setContextOpen(true)}>문맥</button>}
       {active&&terminal.enabled&&<button className="cw-context-button" type="button" onClick={()=>setWorkspaceOpen(true)}>작업공간</button>}
       <span className="cw-enter-hint">Shift + Enter 줄바꿈</span>
@@ -447,6 +465,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     </main>
     {scopeOpen && <GitlabScopeDialog terminal={terminal} onClose={() => { setScopeOpen(false); editor.current?.focus(); }} onSelect={(selection) => { setAppSelections([selection]); setScopeOpen(false); editor.current?.focus(); }} />}
     {workspaceOpen&&active&&<WorkspaceDialog conversationId={active.id} onClose={()=>setWorkspaceOpen(false)}/>}
+    {assistantOpen&&active&&<AssistantDialog key={active.id} conversationId={active.id} admin={!!user?.is_global_admin} value={assistantSelection} onClose={()=>{setAssistantOpen(false);editor.current?.focus();}} onSelect={value=>{setAssistantSelection(value);setAssistantOpen(false);editor.current?.focus();}}/>}
     {contextOpen && active && <ContextDialog key={active.id} conversationId={active.id} connectionId={selected} model={model} content={draft}
       onClose={() => setContextOpen(false)} onSaved={setContextReport} />}
     <ConnectionsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} connections={connections} selected={selected} model={model} disabled={busy}

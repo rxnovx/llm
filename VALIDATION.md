@@ -2,6 +2,27 @@
 
 검증일: 2026-11-10. Node.js 24.22.1, Python 3.12.14. 이 저장소의 루트 경로와 LLM 서비스 식별자로 다시 검증했습니다. GitHub Actions는 실행하지 않았습니다.
 
+## 범용 대화·파일 RAG·MCP 앱 추가 검증
+
+검증일: 2026-11-11 (Asia/Seoul). 기존 PR #4에 범용 기능을 추가한 최신 검증 기록입니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 백엔드 전체 `python -m pytest -q` | **156개 통과**. 기존 127개 + 범용 지식·문서·임베딩·벡터·MCP·기억·조합 흐름 29개 |
+| 문서·RAG | 실제 PDF/DOCX/XLSX/텍스트/Markdown/CSV/JSON/HTML 추출, 별도 추출 프로세스, 대기/오류/재색인·내용 해시 재사용·버전 교체, 대화별 첨부/만료, 개인/공유/공유 해제 권한, 검색 도중 삭제 후 재확인, 새 lease를 이전 워커가 덮어쓰지 않는 흐름 검증 |
+| 모델·벡터 어댑터 | 도구 미지원 모델에도 검색 근거가 실제 입력으로 전달됨을 확인. vLLM/Ollama 임베딩 형식·정규화, SQLite dense 검색, 모델 변경 시 재색인, Qdrant 생성/upsert/현재 문서 ID 필터/삭제 정리 및 rerank 형식은 HTTP 계약 대역으로 검증 |
+| 공통 MCP | 공식 SDK 기반 실제 HTTP MCP 서버 2개로 같은 도구명 구분, 선택·사용자/현재 권한·쓰기 허용·서비스 키 헤더 분리, 숨겨진 도구 미노출과 외부 schema 참조 차단 검증. 실제 Git HTTP/Terminal MCP와 일반 지식의 동시 사용도 확인 |
+| 맞춤 설정·기억 | 사용자별 목록·입력 격리, revision 충돌, 명시적 저장/삭제/사용 토글, 실제 모델 입력에 적용되는 지침·기억 검증 |
+| 프론트엔드 Node | **68개 통과**. multipart 업로드의 boundary 유지·인증/출처 검사·쿠키 비전달, 지식/운영 BFF 경로/크기 제한, 문서 출처 SSE 추가 |
+| 타입·린트·빌드 | 모두 통과. 새 파일·지식·앱·기억·운영 모달과 BFF 포함 |
+| 실제 별도 실행 smoke | Python main.py + 빌드한 Next.js + 격리 SQLite에서 업로드 → 자동 워커/문서 추출 → RAG SSE → 출처 저장·원문 조회 → 삭제·개인 설정 통과. 기존 계정·운영·채팅·GitLab OAuth HTTP 흐름도 통과 |
+| 전용 워커 | 새 SQLite DB에서 knowledge_main.py가 스키마를 만들고 실행되는 것 확인 |
+| Compose | compose.knowledge.yaml YAML 파싱·서비스/이미지 연결 확인. Qdrant v1.20.0 릴리스 메타데이터 확인. Docker 실행 파일이 없어 실제 이미지·Compose 실행은 미검증 |
+
+`tests/knowledge.spec.ts`에 실제 업로드·색인 완료·질문 초안 유지·출처 모달·맞춤 설정 시나리오를 추가했습니다. 실행을 시도했으나 Chromium이 `socket() failed: Operation not permitted`, `ptrace: Operation not permitted`로 시작하지 못했습니다. 화면·포커스·모바일/IME·스크린샷은 미검증입니다.
+
+실제 사용자 임베딩·reranker·Qdrant·폐쇄망 vLLM/Ollama의 검색/도구 선택 품질과 부하, Docker·Termux·사설 CA 배포는 미검증입니다. 기본 SQLite는 명시적으로 키워드/BM25 검색이며 임베딩 설정 시에만 의미 검색을 결합합니다. 가짜 임베딩을 운영 검색으로 제공하지 않습니다. OCR/멀티미디어, 웹 자동 수집, 범용 MCP 개인 OAuth는 포함하지 않습니다. 설치·현재 제한·MCP 세션 격리는 [ASSISTANT.md](ASSISTANT.md)에 정리했습니다. GitHub Actions는 실행하지 않았습니다.
+
 ## Terminal MCP·프로젝트 분석 추가 검증
 
 PR #4의 GitLab OAuth 구성에 Terminal MCP, 사용자·대화별 저장소, 모델 도구 호출 루프, 작업공간 모달을 추가했습니다. 아래 기록은 이전 GitLab/계정 검증 표보다 최신입니다.

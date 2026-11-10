@@ -1,0 +1,18 @@
+# Optional remote vector search. SQLite metadata and raw files remain in the API database.
+services:
+  api:
+    environment:
+      KNOWLEDGE_VECTOR_STORE: qdrant
+      KNOWLEDGE_QDRANT_URL: http://qdrant:6333
+      KNOWLEDGE_QDRANT_KEY: ${KNOWLEDGE_QDRANT_KEY:?Set a private Qdrant API key}
+    depends_on:
+      qdrant: {condition: service_started}
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${KNOWLEDGE_QDRANT_KEY:?Set a private Qdrant API key}
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes: [knowledge-vectors:/qdrant/storage]
+volumes:
+  knowledge-vectors:

@@ -23,6 +23,8 @@ from app.modules.integrations.tools import GitlabSelection, read_context
 from app.modules.integrations.transport import GitlabError
 from app.modules.workspaces import agent as workspace_agent
 from app.modules.workspaces import client as workspace_client
+from app.modules.assistant import context as assistant_context
+from app.modules.assistant.models import TurnContext
 
 router = APIRouter(prefix='/chat', tags=['chat'])
 Database = Annotated[Session, Depends(get_db)]
@@ -44,6 +46,7 @@ class TurnInput(ConversationInput):
     request_id: UUID
     retry: bool = False
     apps: list[GitlabSelection] | None = Field(None,max_length=1)
+    assistant: assistant_context.Selection | None = None
 
 
 class CancelInput(BaseModel):
@@ -70,6 +73,7 @@ def message_data(item: Message):
     record = item.source_record
     return {key: getattr(item, key) for key in ('id', 'role', 'content', 'status', 'model', 'is_test', 'error', 'created_at')} | {
         'apps':json.loads(record.apps_json) if record else [], 'sources':json.loads(record.sources_json) if record else [],
+        'assistant':json.loads(item.assistant_context.data_json) if item.assistant_context else {},
         'tools':[{'name':trace.name,'step':trace.step,'status':trace.status,'detail':trace.detail} for trace in item.tool_traces[-80:]]}
 
 
@@ -200,6 +204,9 @@ async def delete_conversation(conversation_id: UUID, context: Authenticated, db:
     await close_copies(db.get_bind(),user_id,conversation_id=str(conversation_id))
     item=owned(db,conversation_id,user_id)
     if item.generation_id and item.generation_until>time.time():raise HTTPException(409,'응답을 중지한 뒤 대화를 삭제해 주세요.')
+    from app.modules.knowledge.models import Document
+    from app.modules.knowledge.service import remove as remove_document
+    for doc in db.scalars(select(Document).where(Document.conversation_id==item.id)):remove_document(db,doc)
     db.delete(item)
     db.commit()
     return Response(status_code=204)
@@ -297,6 +304,11 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         assistant.source_record = MessageContext(apps_json=json.dumps(apps),sources_json='[]')
     else:
         assistant.source_record.apps_json,assistant.source_record.sources_json = json.dumps(apps),'[]'
+    options=data.assistant.model_dump(mode='json') if data.assistant is not None else (
+        json.loads(assistant.assistant_context.data_json) if data.retry and assistant.assistant_context else {})
+    assistant_context.validate(db,user_id,item.id,options,connection,model)
+    if assistant.assistant_context is None:assistant.assistant_context=TurnContext(data_json=json.dumps(options))
+    else:assistant.assistant_context.data_json=json.dumps(options)
     try:
         history, report = context_budget.plan(db, item.id, connection, model, content)
     except providers.ProviderError as error:
@@ -394,10 +406,12 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                 yield event('queue', {'status': 'running', 'position': 0, 'request_id': turn.request_id})
                 apps = turn.start['assistant_message']['apps']
                 workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute'})
-                async with asyncio.timeout(settings.terminal_agent_timeout_seconds if workspace_mode else settings.llm_timeout_seconds):
-                    if workspace_mode:
-                        workspace_selection=GitlabSelection.model_validate(apps[0])
-                        iterator=workspace_agent.stream(bind,user_id,turn,workspace_selection,admitted,settings,cancelled)
+                options=turn.start['assistant_message']['assistant']
+                with Session(bind) as session:general_mode=assistant_context.active(session,user_id,options)
+                async with asyncio.timeout(settings.terminal_agent_timeout_seconds if workspace_mode or general_mode else settings.llm_timeout_seconds):
+                    if workspace_mode or general_mode:
+                        workspace_selection=GitlabSelection.model_validate(apps[0]) if workspace_mode else None
+                        iterator=workspace_agent.stream(bind,user_id,turn,workspace_selection,admitted,settings,cancelled,options=options)
                         async with aclosing(guarded_parts(iterator,cancelled)) as parts:
                             async for kind,payload in parts:
                                 if kind=='delta':
@@ -419,7 +433,7 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                                     turn.history,report = context_budget.plan(session,turn.conversation_id,admitted,
                                         turn.start['conversation']['model'],data.content.strip(),extra_context=reference)
                         yield event('sources',{'sources':sources})
-                    if not workspace_mode:
+                    if not workspace_mode and not general_mode:
                         yield event('context', report)
                         iterator = providers.stream_reply(admitted, turn.start['conversation']['model'], turn.history, settings)
                         async with aclosing(guarded_parts(iterator, cancelled)) as parts:
@@ -478,6 +492,7 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                         if message.source_record:
                             message.source_record.apps_json = json.dumps(previous['apps'])
                             message.source_record.sources_json = json.dumps(previous['sources'],ensure_ascii=False)
+                        if message.assistant_context:message.assistant_context.data_json=json.dumps(previous.get('assistant',{}))
                         item.connection_id, item.model = turn.previous_connection, previous['model']
                     item.generation_id, item.generation_until, item.cancel_requested = None, 0, False
                     item.updated_at = int(time.time())

@@ -83,3 +83,10 @@ test("workspace and tool activity events remain distinct from answer text", asyn
   assert.deepEqual(received.map(event=>event.event),['workspace','activity','start','delta','done']);
   assert.equal(received[1].data.detail,'파일 조회');
 });
+
+test('knowledge sources preserve document version and location without an external URL',async()=>{
+  const events=[];
+  const source={id:'KS1',app:'knowledge',document_id:'document',chunk_id:'chunk',filename:'매뉴얼.pdf',location:'3쪽',sha256:'abc',revision:2};
+  const stream=new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(`event: sources\ndata: ${JSON.stringify({sources:[source]})}\n\nevent: done\ndata: {}\n\n`));controller.close();}});
+  await readChatStream(stream,event=>events.push(event));assert.deepEqual(events[0].data.sources,[source]);
+});

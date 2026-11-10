@@ -11,7 +11,7 @@ function environment(replies, refreshed = "new-token") {
   const calls = [];
   let refreshes = 0, expirations = 0;
   const exports = {};
-  const context = vm.createContext({ exports, Headers,
+  const context = vm.createContext({ exports, Headers,FormData,
     require: () => ({ getAccessToken: () => "old-token", refreshAccessToken: async () => { refreshes++; return refreshed; },
       notifyAuthExpired: () => { expirations++; } }),
     fetch: async (url, init) => { calls.push({ url, ...init }); return replies.shift(); },
@@ -26,6 +26,13 @@ test("authenticated API requests preserve headers and use the current bearer and
   assert.equal(env.calls[0].headers.get("x-llm-account"), "1");
   assert.equal(env.calls[0].headers.get("x-extra"), "value");
   assert.equal(env.calls[0].credentials, "same-origin");
+});
+test('file uploads leave multipart boundaries to the browser while retaining bearer and CSRF headers',async()=>{
+  const env=environment([Response.json({ok:true})]);const form=new FormData();form.set('file',new Blob(['text']),'a.txt');
+  await env.authenticatedFetch('/api/knowledge/documents',{method:'POST',body:form});
+  assert.equal(env.calls[0].headers.has('content-type'),false);
+  assert.equal(env.calls[0].headers.get('authorization'),'Bearer old-token');
+  assert.equal(env.calls[0].headers.get('x-llm-account'),'1');assert.equal(env.calls[0].body,form);
 });
 test("401 refreshes once and retries with the new bearer", async () => {
   const env = environment([Response.json({}, { status: 401 }), Response.json({ ok: true })]);

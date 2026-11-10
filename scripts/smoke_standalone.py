@@ -355,6 +355,34 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             assert client.get('/api/admin/connections',headers=access).json()['items'][0]['enabled'] is False
             model_controls_smoke(client,access)
             access = gitlab_apps_smoke(client,access)
+            # Real multipart BFF -> API -> automatic subprocess index worker -> RAG SSE.
+            knowledge_base=client.post('/api/knowledge/bases',headers=access,json={'name':'HTTP 지식 검증'})
+            assert knowledge_base.status_code==201,knowledge_base.text
+            knowledge_id=knowledge_base.json()['id']
+            uploaded=client.post('/api/knowledge/documents',headers=access,data={'base_id':knowledge_id},
+                files={'file':('vacation.md','연차 휴가 규정: 연간 15일을 사용할 수 있습니다.'.encode(),'text/markdown')})
+            assert uploaded.status_code==201,uploaded.text
+            document_id=uploaded.json()['id']
+            for _ in range(100):
+                documents=client.get('/api/knowledge/documents',headers=access,params={'base_id':knowledge_id}).json()['items']
+                if documents[0]['status']=='ready':break
+                assert documents[0]['status']!='error',documents[0]['error']
+                time.sleep(.1)
+            else:raise AssertionError('Automatic knowledge worker did not finish')
+            rag_conversation=client.post('/api/chat/conversations',headers=access,json={}).json()['id']
+            rag=client.post(f'/api/chat/conversations/{rag_conversation}/messages',headers=access,
+                json={'content':'연차 휴가 규정을 알려줘','request_id':str(uuid.uuid4()),'assistant':{'base_ids':[knowledge_id]}})
+            assert rag.status_code==200 and 'event: done' in rag.text,rag.text[-2000:]
+            detail=client.get(f'/api/chat/conversations/{rag_conversation}',headers=access).json()['messages'][-1]
+            source=detail['sources'][0]
+            assert source['app']=='knowledge' and source['document_id']==document_id and '[KS1]' in detail['content']
+            citation=client.get(f"/api/knowledge/documents/{document_id}/chunks/{source['chunk_id']}",headers=access)
+            assert citation.status_code==200 and '15일' in citation.json()['content']
+            assert client.post('/api/assistant/memories',headers=access,json={'content':'검증용 개인 기억'}).status_code==201
+            assert client.put('/api/assistant/preferences',headers=access,json={'instructions':'간결하게 답변','memory_enabled':True,'revision':0}).status_code==200
+            assert client.get('/api/assistant/catalog',headers=access).status_code==200
+            assert client.get('/api/assistant/operations',headers=access).json()['documents']['ready']==1
+            assert client.delete('/api/knowledge/bases/'+knowledge_id,headers=access).status_code==200
             assert client.get('/api/admin/overview').status_code == 401
             assert client.get('/admin').status_code == 200
             response = client.post("/api/auth/refresh")
@@ -368,7 +396,7 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             assert client.get("/api/account/users/me", headers=access).status_code == 401
             assert client.get("/login").status_code == 200
             assert all(process.poll() is None for process in processes), 'A test server exited during validation'
-            print("PASS: chat-first HTML, modal routes, accounts, streaming, operator controls, context/queue and GitLab OAuth/refresh/read/sources/disconnect over HTTP")
+            print("PASS: chat-first HTML, accounts, streaming, operator controls, context/queue, GitLab, multipart knowledge upload/automatic indexing/RAG/citations/deletion and personal preferences over HTTP")
     except Exception:
         for handle in logs:
             handle.flush()

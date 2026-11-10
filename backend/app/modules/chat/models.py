@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from app.modules.integrations.models import MessageContext
 from app.modules.workspaces.models import ToolTrace
+from app.modules.assistant.models import TurnContext
 
 
 class Conversation(Base):
@@ -44,6 +45,7 @@ class Message(Base):
     source_record = relationship(MessageContext, uselist=False, lazy='selectin',
                                  cascade='all, delete-orphan', passive_deletes=True)
     tool_traces = relationship(ToolTrace,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True,order_by=ToolTrace.created_at)
+    assistant_context = relationship(TurnContext,uselist=False,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True)
 
 
 class GenerationRun(Base):

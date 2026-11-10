@@ -186,3 +186,5 @@ GitLab 계정 연결과 `@GitLab` 코드 조회는 [GITLAB_APPS.md](GITLAB_APPS.
 LD_PRELOAD="$PREFIX/lib/libpython3.13.so${LD_PRELOAD:+:$LD_PRELOAD}" \
 python main.py
 ```
+
+범용 문서 RAG·파일 첨부·공유 지식베이스·MCP 앱·개인 기억 설정은 [ASSISTANT.md](ASSISTANT.md)를 참고하세요.

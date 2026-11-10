@@ -124,3 +124,5 @@ PSYCOPG_IMPL=python python main.py
 - [Next.js CLI의 Webpack 옵션](https://nextjs.org/docs/app/api-reference/cli/next)
 - 설치 버전 Next.js 16.2.12의 `build/swc/index.js`는 Android를 WASM 우선 대상으로 분류합니다. `scripts/prepare-next-wasm.mjs`는 그 버전의 캐시 위치를 준비하며 Next.js 코드를 수정하지 않습니다.
 - [Python의 tzdata fallback](https://docs.python.org/3/library/zoneinfo.html): 시스템 시간대 DB가 없는 환경에서도 `Asia/Seoul` 같은 계정 시간대 검증이 가능하도록 `tzdata`를 기본 의존성에 포함합니다.
+
+범용 파일·지식 검색은 [ASSISTANT.md](ASSISTANT.md)를 참고하세요. 텍스트 검색은 기본 의존성으로 동작하며 PDF/DOCX/XLSX는 `requirements-knowledge.txt`를 설치합니다. SQLite 기본 검색을 사용하거나 내부 임베딩·Qdrant 서버를 연결할 수 있습니다.

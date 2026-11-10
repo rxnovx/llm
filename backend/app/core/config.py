@@ -66,6 +66,24 @@ class Settings(BaseSettings):
     terminal_execution_enabled: bool = False
     terminal_agent_max_steps: int = Field(12,ge=1,le=30)
     terminal_agent_timeout_seconds: int = Field(600,ge=30,le=1800)
+    mcp_servers_json: str = '[]'
+    mcp_secrets_json: SecretStr = SecretStr('{}')
+    assistant_ca_bundle: str|None = None
+    knowledge_enabled: bool = True
+    knowledge_worker_enabled: bool = True
+    knowledge_max_upload_bytes: int = Field(10*1024*1024,ge=1024,le=20*1024*1024)
+    knowledge_max_documents: int = Field(100,ge=1,le=1000)
+    knowledge_max_user_bytes: int = Field(64*1024*1024,ge=1024*1024,le=1024*1024*1024)
+    knowledge_embedding_provider: Literal['disabled','vllm','ollama'] = 'disabled'
+    knowledge_embedding_url: str = ''
+    knowledge_embedding_model: str = ''
+    knowledge_embedding_key: SecretStr = SecretStr('')
+    knowledge_vector_store: Literal['sqlite','qdrant'] = 'sqlite'
+    knowledge_qdrant_url: str = ''
+    knowledge_qdrant_key: SecretStr = SecretStr('')
+    knowledge_rerank_url: str = ''
+    knowledge_rerank_model: str = ''
+    knowledge_rerank_key: SecretStr = SecretStr('')
     refresh_token_days: int = Field(14, validation_alias=AliasChoices('REFRESH_TOKEN_DAYS', 'REFRESH_TOKEN_EXPIRE_DAYS'), ge=1)
     registration_rate_limit_attempts: int = Field(30, alias='REGISTRATION_RATE_LIMIT_ATTEMPTS', ge=1, le=1000)
     registration_rate_limit_window_seconds: int = Field(600, alias='REGISTRATION_RATE_LIMIT_WINDOW_SECONDS', ge=10, le=86400)

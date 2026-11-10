@@ -304,3 +304,27 @@ test("workspace proxy isolates internal credentials and validates mutation origi
   const response=await fetch(`${origin}/api/workspaces/${id}/tools`,{method:'POST',headers:{...csrf,authorization:'Bearer owner'},body:JSON.stringify({name:'repo_map',arguments:{}})});
   assert.equal(response.status,200);assert.equal(received.path,`/workspaces/${id}/tools`);
 });
+
+test('knowledge multipart proxy preserves bytes, isolates cookies, and enforces origin and path limits',async()=>{
+  mode='tokens';const id='12345678-1234-1234-1234-123456789abc';
+  assert.equal((await fetch(`${origin}/api/knowledge/documents`,{method:'POST',body:'{}'})).status,403);
+  assert.equal((await fetch(`${origin}/api/knowledge/internal/credentials`,{method:'POST',headers:csrf,body:'{}'})).status,404);
+  const form=new FormData();form.set('conversation_id',id);form.set('file',new Blob(['문서 원문']), 'manual.md');
+  const r=await fetch(`${origin}/api/knowledge/documents`,{method:'POST',headers:{...csrf,authorization:'Bearer owner',cookie:'secret=cookie'},body:form});
+  assert.equal(r.status,200);assert.equal(received.path,'/knowledge/documents');
+  assert.match(received.headers['content-type'],/^multipart\/form-data; boundary=/);
+  assert.match(received.body,/문서 원문/);assert.equal(received.headers.cookie,undefined);
+  assert.equal(received.headers.authorization,'Bearer owner');
+  await fetch(`${origin}/api/knowledge/documents/${id}/chunks/${id}`,{headers:{authorization:'Bearer owner'}});
+  assert.equal(received.path,`/knowledge/documents/${id}/chunks/${id}`);
+});
+
+test('assistant proxy protects registry mutations and preserves upstream authorization failures',async()=>{
+  mode='403';const endpoint='/api/assistant/mcp/servers/browser';
+  assert.equal((await fetch(origin+endpoint,{method:'PUT',body:'{}'})).status,403);
+  const response=await fetch(origin+endpoint,{method:'PUT',headers:{...csrf,authorization:'Bearer user'},body:'{}'});
+  assert.equal(response.status,403);assert.equal(received.path,'/assistant/mcp/servers/browser');
+  assert.equal(received.headers.authorization,'Bearer user');
+  assert.equal((await fetch(origin+'/api/assistant/admin/secrets',{headers:csrf})).status,404);
+  assert.equal((await fetch(origin+'/api/assistant/preferences',{method:'PUT',headers:csrf,body:'x'.repeat(65537)})).status,413);
+});

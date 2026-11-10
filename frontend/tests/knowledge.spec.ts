@@ -1,0 +1,34 @@
+import {expect,test} from '@playwright/test';
+
+test('문서 첨부와 지식 선택이 질문 초안을 유지하고 답변에 출처를 표시한다',async({page},info)=>{
+  await page.goto('/user/signup');
+  const username=`knowledge_${info.project.name}_${Date.now()}`;
+  await page.getByLabel('표시 이름',{exact:true}).fill('지식 사용자');
+  await page.getByLabel('사용자명',{exact:true}).fill(username);
+  await page.getByLabel('이메일',{exact:true}).fill(`${username}@example.com`);
+  await page.getByLabel('비밀번호',{exact:true}).fill('KnowledgeBrowserPass123!');
+  await page.getByLabel('비밀번호 확인',{exact:true}).fill('KnowledgeBrowserPass123!');
+  await page.getByRole('checkbox').check();await page.getByRole('button',{name:'회원가입',exact:true}).click();
+  await expect(page.getByRole('heading',{name:'무엇을 함께 해볼까요?'})).toBeVisible();
+  await page.getByLabel('메시지',{exact:true}).fill('연차 휴가 규정을 알려줘');
+  await page.getByRole('button',{name:'파일·지식',exact:true}).click();
+  const modal=page.getByRole('dialog',{name:'자료·앱·개인 설정'});
+  await modal.locator('input[type=file]').setInputFiles({name:'manual.md',mimeType:'text/markdown',buffer:Buffer.from('연차 휴가 규정: 연간 15일을 사용할 수 있습니다.')});
+  await expect(modal.getByText(/검색 준비됨/)).toBeVisible({timeout:30000});
+  await modal.getByRole('button',{name:'대화에 적용',exact:true}).click();
+  await expect(page.getByLabel('메시지',{exact:true})).toHaveValue('연차 휴가 규정을 알려줘');
+  await expect(page.locator('.cw-assistant-selection')).toContainText('첨부 1');
+  await page.getByRole('button',{name:'메시지 전송',exact:true}).click();
+  await expect(page.getByRole('button',{name:'답변 복사',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:/\[KS1\] manual.md/}).click();
+  const source=page.getByRole('dialog',{name:'답변 출처'});
+  await expect(source).toContainText('15일');
+  await source.getByRole('button',{name:'닫기',exact:true}).click();
+  await page.getByLabel('메시지',{exact:true}).fill('다음 질문');
+  await page.getByRole('button',{name:'파일·지식',exact:true}).click();
+  await modal.getByRole('button',{name:'맞춤 설정',exact:true}).click();
+  await modal.getByLabel('답변 방식과 내 정보').fill('한국어로 간결하게 답변해줘');
+  await modal.getByRole('button',{name:'맞춤 설정 저장',exact:true}).click();
+  await modal.getByRole('button',{name:'닫기',exact:true}).click();
+  await expect(page.getByLabel('메시지',{exact:true})).toHaveValue('다음 질문');
+});

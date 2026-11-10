@@ -211,3 +211,16 @@ def test_internal_broker_and_model_permissions_are_not_public(client,account,wor
         db.add(ConnectionSetting(id='no-tools',configuration=value.model_dump_json(),revision=1));db.commit()
     response=send(client,headers,conversation,connection_id='no-tools',model='local',apps=[{'app':'gitlab','connection_id':connection,'project_id':7,'ref':'main','paths':[],'mode':'workspace'}])
     assert response.status_code==422
+
+
+def test_repository_and_general_knowledge_compose_in_one_turn(client,account,workspace_stack):
+    from test_knowledge import base,upload,index
+    headers=auth(account());connection=connect(client,headers);conversation=create(client,headers)
+    kb=base(client,headers);upload(client,headers,base_id=kb);index(client)
+    response=send(client,headers,conversation,content='login 함수와 연차 휴가 규정을 함께 확인해줘',
+        apps=[{'app':'gitlab','connection_id':connection,'project_id':7,'ref':'main','paths':[],'mode':'workspace'}],
+        assistant={'base_ids':[kb]})
+    assert events(response)[-1][0]=='done',response.text[-2000:]
+    saved=client.get(f'/chat/conversations/{conversation}',headers=headers).json()['messages'][-1]
+    ids={s['id'] for s in saved['sources']}
+    assert {'KS1','GL1'}<=ids and '[GL1]' in saved['content']

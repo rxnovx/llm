@@ -16,6 +16,7 @@ from app.db.session import create_db_engine, get_db
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("UPLOAD_DIRECTORY", str(tmp_path / "avatars"))
+    monkeypatch.setenv("KNOWLEDGE_WORKER_ENABLED", "false")
     monkeypatch.setenv("EMAIL_PROVIDER", "disabled")
     monkeypatch.setenv("EMAIL_VERIFICATION_REQUIRED", "false")
     monkeypatch.setenv("EXPOSE_AUTH_TOKENS_IN_RESPONSE", "false")
