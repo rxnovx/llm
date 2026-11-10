@@ -47,6 +47,7 @@ def test_standalone_setup_generates_private_service_files(project):
     assert len(keys)==1 and len(base64.urlsafe_b64decode(keys[0]))==32
     assert keys[0] not in result.stdout+result.stderr
     assert 'INTEGRATIONS_ENCRYPTION_KEYS' not in web
+    assert len(api['TERMINAL_SHARED_SECRET'])==64 and api['TERMINAL_SHARED_SECRET'] not in result.stdout+result.stderr
     assert web["APP_URL"] == "http://localhost:3000"
     assert web["APP_ALLOWED_ORIGINS"] == "http://127.0.0.1:3000"
     for value in (api["JWT_SECRET_KEY"], api["AUTH_PROXY_SECRET"]):

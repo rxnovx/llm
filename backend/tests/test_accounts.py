@@ -247,9 +247,10 @@ def test_google_does_not_auto_link_matching_email(client, account, monkeypatch):
     assert client.post("/auth/google", json=data).status_code == 409
 
 
-def test_only_account_routes_are_registered(client):
-    for path in ["/notes", "/calendar", "/chat", "/blogs", "/workspaces", "/auth/register/trial"]:
+def test_unrelated_note_routes_are_not_registered(client):
+    for path in ["/notes", "/calendar", "/chat", "/blogs", "/auth/register/trial"]:
         assert client.get(path).status_code == 404
+    assert client.get('/workspaces').status_code==401
 
 
 def test_production_configuration():

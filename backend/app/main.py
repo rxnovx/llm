@@ -18,6 +18,7 @@ from app.modules.users.router import router as users_router
 from app.modules.chat.router import router as chat_router
 from app.modules.admin.router import router as admin_router
 from app.modules.integrations.router import router as apps_router
+from app.modules.workspaces.router import router as workspaces_router
 from app.modules.chat.models import SchedulerLock
 from sqlalchemy.exc import IntegrityError
 
@@ -51,7 +52,7 @@ app.add_middleware(CORSMiddleware, allow_origins=[h.strip() for h in settings.co
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request, error):
-    if request.url.path.startswith(('/admin/connections', '/apps')):
+    if request.url.path.startswith(('/admin/connections', '/apps', '/workspaces')):
         return JSONResponse(status_code=422, content={'detail': [
             {key: item[key] for key in ('loc', 'msg', 'type')} for item in error.errors()]})
     return await request_validation_exception_handler(request, error)
@@ -82,3 +83,4 @@ app.include_router(users_router)
 app.include_router(chat_router)
 app.include_router(admin_router)
 app.include_router(apps_router)
+app.include_router(workspaces_router)

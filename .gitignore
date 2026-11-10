@@ -12,3 +12,4 @@
 **/*.tsbuildinfo
 test-results/
 playwright-report/
+terminal-data/

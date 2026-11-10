@@ -38,7 +38,7 @@ def gitlab(client,monkeypatch):
         if path=='/oauth/token':
             number = len([call for call in calls if call[1]=='/oauth/token'])
             return {'access_token':f'local-access-{number}','refresh_token':f'local-refresh-{number}',
-                    'token_type':'Bearer','scope':'read_user read_api','expires_in':7200}
+                    'token_type':'Bearer','scope':'read_user read_api read_repository','expires_in':7200}
         if path=='/oauth/revoke':
             return {}
         if path=='/api/v4/user':
@@ -95,7 +95,7 @@ def test_catalog_requires_auth_and_empty_config_needs_no_crypto(client,account,m
 def test_oauth_pkce_browser_binding_encryption_and_replay(client,account,gitlab):
     headers = auth(account())
     query,value = begin(client,headers,popup=True)
-    assert query['scope']==['read_user read_api'] and query['code_challenge_method']==['S256']
+    assert query['scope']==['read_user read_api read_repository'] and query['code_challenge_method']==['S256']
     assert query['redirect_uri']==['http://localhost:3000/apps/gitlab/callback']
     assert 'secret' not in value['authorize_url']
     with client.db_factory() as db:

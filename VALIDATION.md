@@ -2,6 +2,24 @@
 
 검증일: 2026-11-10. Node.js 24.22.1, Python 3.12.14. 이 저장소의 루트 경로와 LLM 서비스 식별자로 다시 검증했습니다. GitHub Actions는 실행하지 않았습니다.
 
+## Terminal MCP·프로젝트 분석 추가 검증
+
+PR #4의 GitLab OAuth 구성에 Terminal MCP, 사용자·대화별 저장소, 모델 도구 호출 루프, 작업공간 모달을 추가했습니다. 아래 기록은 이전 GitLab/계정 검증 표보다 최신입니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 백엔드 전체 `python -m pytest -q` | 127개 통과. 기존 104개와 terminal/agent/실제 Git HTTP·MCP·broker 흐름 23개 포함 |
+| Terminal MCP | 공식 Python SDK 2.3.0 클라이언트로 현대 프로토콜의 HTTP·stdio 도구 조회/호출, 전용 audience/만료·소유권·경로·symlink·UTF-8·Python AST·JS/TS Tree-sitter·내용 해시 캐시 검증 |
+| 실행 워커 | 개인 개발용 프로세스에서 stdout/stderr/stdin, 한글 출력, 앱 비밀 환경 변수 미상속, 종료 코드, 시간 초과, 중지, 출력 제한 검증. Docker 실행 인자의 권한·네트워크·자원 제한은 계약 검사 |
+| 통합 분석 흐름 | 로컬 git-http-backend로 실제 shallow fetch, 실제 MCP HTTP 서버와 내부 broker HTTP를 연결해 작업공간 생성·재사용, 코드·출처 저장, 도구 추론 재호출, 실행 중 GPU 허가 반납, 취소 시 프로세스 정리, GitLab 연결 해제 시 사본 정리 검증. GitLab 계정 API와 모델 응답은 대역 사용 |
+| 프론트엔드 Node 테스트 | 64개 통과. 새 workspace BFF 출처·본문 크기·내부 broker 차단과 작업공간/activity SSE 이벤트 포함 |
+| 프론트엔드 타입·린트·빌드 | 통과. 프로젝트 모드·작업 기록·작업공간 모달·모델 도구 지원 설정 포함 |
+| 기존 별도 실행 smoke | 실제 Python main.py와 빌드한 Next.js로 계정·대화·운영·GitLab OAuth/조회·출처·해제 HTTP 흐름 통과 |
+
+Chromium으로 `tests/apps.spec.ts`를 실행했으나 `process_singleton_posix.cc: socket() failed: Operation not permitted`, `ptrace: Operation not permitted`로 브라우저 시작이 차단되었습니다. `tests/workspaces.spec.ts`도 추가했지만 화면·팝업·포커스·모바일/IME와 스크린샷은 미검증입니다.
+
+이 환경에는 Docker CLI/daemon이 없어 이미지 빌드·Compose 실행·실제 컨테이너 격리는 미검증입니다. 실제 Termux, 사설 CA·폐쇄망 연결, 사용자 GitLab OAuth 및 실제 vLLM/Ollama 모델의 도구 선택 정확도도 미검증입니다. vLLM/Ollama 요청 형식은 HTTP 대역으로 검사했습니다. 분석기는 구문·텍스트 후보를 제공하며 완전한 LSP 의미 참조·런타임 호출 그래프·벡터 검색은 구현 범위에 포함하지 않습니다. 설정·모드·현재 제한은 [TERMINAL_MCP.md](TERMINAL_MCP.md)에 기록합니다.
+
 ## GitLab OAuth·앱 멘션 추가 검증
 
 기존 PR #3을 main에 병합한 뒤 별도 `feat/gitlab-oauth-mentions-20261110` 브랜치에서 구현했습니다. 아래는 GitLab 연동을 추가한 현재 변경의 검증이며, 뒤의 표는 이전 기반 구현 기록입니다.

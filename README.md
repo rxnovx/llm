@@ -178,6 +178,8 @@ npx playwright test
 
 GitLab 계정 연결과 `@GitLab` 코드 조회는 [GITLAB_APPS.md](GITLAB_APPS.md)를 참고하세요. 사용자별 OAuth 승인과 서버 환경 설정이 필요하며, 설정은 앱 연결 모달에서 사용합니다. 기본 SQLite·개별 실행·Compose 구성을 그대로 사용합니다.
 
+프로젝트 전체 다운로드·자동 코드 탐색·명령 실행·작업공간 관리는 [TERMINAL_MCP.md](TERMINAL_MCP.md)에 정리했습니다. MCP는 별도 서비스이며 개인별 저장소 권한과 실행 모드를 적용합니다. 기존 연결은 `read_repository` 권한 추가 후 다시 인증해야 합니다.
+
 ## Termux 실행 명령어
 
 ``` bash

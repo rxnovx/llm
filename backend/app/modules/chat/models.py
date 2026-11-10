@@ -6,6 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.modules.integrations.models import MessageContext
+from app.modules.workspaces.models import ToolTrace
 
 
 class Conversation(Base):
@@ -42,6 +43,7 @@ class Message(Base):
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     source_record = relationship(MessageContext, uselist=False, lazy='selectin',
                                  cascade='all, delete-orphan', passive_deletes=True)
+    tool_traces = relationship(ToolTrace,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True,order_by=ToolTrace.created_at)
 
 
 class GenerationRun(Base):

@@ -118,6 +118,8 @@ PSYCOPG_IMPL=python python main.py
 
 ## 참고 근거
 
+원격 MCP와 프로젝트 분석을 사용하는 경우 [TERMINAL_MCP.md](TERMINAL_MCP.md)를 참고하세요. Termux에서 API만 실행할 때는 `requirements-mcp-client.txt`, 같은 환경에서 분석 서버도 실행할 때는 `requirements-terminal.txt`를 사용합니다. 원격 Linux 워커가 명령을 수행하도록 구성하면 Termux에 Docker를 설치할 필요가 없습니다. 개인 개발용 `trusted_local`은 OS 계정에서 직접 실행하는 모드입니다.
+
 - [Psycopg 설치 방식과 libpq 요구 사항](https://www.psycopg.org/psycopg3/docs/basic/install.html)
 - [Next.js CLI의 Webpack 옵션](https://nextjs.org/docs/app/api-reference/cli/next)
 - 설치 버전 Next.js 16.2.12의 `build/swc/index.js`는 Android를 WASM 우선 대상으로 분류합니다. `scripts/prepare-next-wasm.mjs`는 그 버전의 캐시 위치를 준비하며 Next.js 코드를 수정하지 않습니다.

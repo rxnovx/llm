@@ -82,7 +82,7 @@ def token_values(value):
         scopes = set(value['scope'].split())
         if (not isinstance(access,str) or not 1<=len(access)<=16000 or not isinstance(refresh,str)
                 or not 1<=len(refresh)<=16000 or not 30<=ttl<=86400*30
-                or not set(config.SCOPES.split()).issubset(scopes) or scopes - {'read_user','read_api'}
+                or not set(config.SCOPES.split()).issubset(scopes) or scopes - set(config.SCOPES.split())
                 or value.get('token_type','').lower() != 'bearer'):
             raise ValueError()
         return access,refresh,int(time.time())+ttl
@@ -257,6 +257,8 @@ class GitlabClient:
 
 
 async def disconnect(bind,user_id,connection_id):
+    from app.modules.workspaces.service import close_copies
+    await close_copies(bind,user_id,connection_id=str(connection_id))
     with Session(bind) as db:
         row = owned(db,user_id,connection_id)
         try:

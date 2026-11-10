@@ -1,2 +1,2 @@
--r requirements-gitlab.txt
+-r requirements-terminal.txt
 pytest==9.0.3

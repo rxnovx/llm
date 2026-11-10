@@ -17,12 +17,14 @@ export async function readChatStream(stream: ReadableStream<Uint8Array>, onEvent
         if (line.startsWith("event:")) name = line.slice(6).trim();
         else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
         else if (!line) {
-          if (data.length && ["start", "queue", "context", "tool", "sources", "delta", "done", "error", "cancelled"].includes(name)) {
+          if (data.length && ["start", "queue", "context", "tool", "sources", "activity", "workspace", "delta", "done", "error", "cancelled"].includes(name)) {
             const payload = JSON.parse(data.join("\n"));
             if (!payload || typeof payload !== "object") throw new Error("응답 형식이 올바르지 않습니다.");
             if (name === "delta" && typeof payload.content !== "string") throw new Error("응답 형식이 올바르지 않습니다.");
             if (name === "tool" && (payload.app !== "gitlab" || payload.status !== "reading" || typeof payload.detail !== "string")) throw new Error("앱 응답 형식이 올바르지 않습니다.");
-            if (name === "sources" && (!Array.isArray(payload.sources) || payload.sources.length > 5 || payload.sources.some((source: Record<string, unknown>) =>
+            if (name === "activity" && (typeof payload.name !== "string" || typeof payload.detail !== "string" || !["running","complete","error"].includes(payload.status) || !Number.isSafeInteger(payload.step))) throw new Error("도구 진행 응답이 올바르지 않습니다.");
+            if (name === "workspace" && (typeof payload.id !== "string" || typeof payload.status !== "string")) throw new Error("작업공간 응답이 올바르지 않습니다.");
+            if (name === "sources" && (!Array.isArray(payload.sources) || payload.sources.length > 30 || payload.sources.some((source: Record<string, unknown>) =>
               !source || typeof source.path !== "string" || typeof source.url !== "string" || !/^https?:\/\//i.test(source.url) || typeof source.commit !== "string"
               || typeof source.id !== "string" || !Number.isSafeInteger(source.start_line) || !Number.isSafeInteger(source.end_line)))) throw new Error("출처 응답 형식이 올바르지 않습니다.");
             if (name === "queue" && (!["queued", "running"].includes(payload.status) || !Number.isSafeInteger(payload.position) || payload.position < 0)) throw new Error("대기열 응답 형식이 올바르지 않습니다.");

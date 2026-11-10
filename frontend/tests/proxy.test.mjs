@@ -291,3 +291,16 @@ test("app routes enforce CSRF, callback origin, bounded bodies and path boundari
   assert.equal(received.headers.cookie,undefined);
   assert.equal(received.headers.authorization,"Bearer alice");
 });
+
+test("workspace proxy isolates internal credentials and validates mutation origins and body size",async()=>{
+  mode='tokens';
+  const id='12345678-1234-1234-1234-123456789abc';
+  assert.equal((await fetch(`${origin}/api/workspaces/internal/checkout`,{method:'POST',headers:csrf,body:'{}'})).status,404);
+  assert.equal((await fetch(`${origin}/api/workspaces/${id}/tools`,{method:'POST',body:'{}'})).status,403);
+  assert.equal((await fetch(`${origin}/api/workspaces/${id}/tools`,{method:'POST',headers:csrf,body:'x'.repeat(65537)})).status,413);
+  await fetch(`${origin}/api/workspaces?conversation_id=${id}`,{headers:{authorization:'Bearer owner',cookie:'private=value'}});
+  assert.equal(received.path,`/workspaces?conversation_id=${id}`);assert.equal(received.headers.cookie,undefined);
+  assert.equal(received.headers.authorization,'Bearer owner');
+  const response=await fetch(`${origin}/api/workspaces/${id}/tools`,{method:'POST',headers:{...csrf,authorization:'Bearer owner'},body:JSON.stringify({name:'repo_map',arguments:{}})});
+  assert.equal(response.status,200);assert.equal(received.path,`/workspaces/${id}/tools`);
+});

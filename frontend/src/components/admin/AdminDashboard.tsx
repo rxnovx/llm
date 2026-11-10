@@ -12,7 +12,7 @@ import { ConnectionManager } from "./ConnectionManager";
 
 type Tab = "overview" | "connections" | "requests" | "users" | "audit";
 const tabs: [Tab, string][] = [["overview", "개요"], ["connections", "모델 관리"], ["requests", "생성 요청"], ["users", "사용자"], ["audit", "감사 기록"]];
-const labels: Record<RunStatus, string> = { complete: "완료", error: "실패", cancelled: "취소", queued: "대기 중", running: "진행 중", interrupted: "중단" };
+const labels: Record<RunStatus, string> = { complete: "완료", error: "실패", cancelled: "취소", queued: "대기 중", running: "진행 중", interrupted: "중단",tool_waiting:"도구 작업 중" };
 const milliseconds = (value: number | null) => value === null ? "—" : value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(1)}초`;
 const timestamp = (value: number | null, zone: string) => value === null ? "—" : new Date(value * 1000).toLocaleString("ko-KR", {
   timeZone: zone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,

@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.config import get_settings
 
-SCOPES = 'read_user read_api'
+SCOPES = 'read_user read_api read_repository'
 
 
 class GitlabInstance(BaseModel):

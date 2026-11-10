@@ -19,6 +19,7 @@ import { backupOAuthDraft, takeOAuthDraft, OAUTH_LEAVING, type GitlabSelection }
 import { appMentionAt, removeAppMention } from "@/lib/app-mentions";
 import { GitlabScopeDialog } from "./GitlabScopeDialog";
 import { MessageSources } from "./MessageSources";
+import { WorkspaceDialog } from "./WorkspaceDialog";
 
 const starters: { icon: IconName; title: string; prompt: string }[] = [
   { icon: "idea", title: "아이디어 정리", prompt: "떠오른 아이디어를 실행 가능한 계획으로 정리하고 싶어요. 먼저 어떤 내용을 알려드리면 좋을까요?" },
@@ -64,6 +65,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const [appSelections, setAppSelections] = useState<GitlabSelection[]>([]);
   const [mention, setMention] = useState<ReturnType<typeof appMentionAt>>(null);
   const [scopeOpen, setScopeOpen] = useState(false), [toolStatus, setToolStatus] = useState("");
+  const [terminal,setTerminal]=useState({enabled:false,execution_enabled:false}),[workspaceOpen,setWorkspaceOpen]=useState(false);
   const [menu, setMenu] = useState("");
   const [accountOpen, setAccountOpen] = useState(false);
   const [action, setAction] = useState<{ type: "rename" | "delete"; item: Conversation } | null>(null);
@@ -103,10 +105,11 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     if (!subject) return;
     const abort = new AbortController();
     void Promise.all([
-      chatJson<{ connections: Connection[] }>("/config", { signal: abort.signal }),
+      chatJson<{ connections: Connection[]; terminal?:{enabled:boolean;execution_enabled:boolean} }>("/config", { signal: abort.signal }),
       chatJson<{ items: Conversation[]; has_more: boolean }>("/conversations", { signal: abort.signal }),
     ]).then(async ([config, list]) => {
       setConnections(config.connections); setConversations(list.items); setHasMore(list.has_more);
+      if(config.terminal)setTerminal(config.terminal);
       setSelected(config.connections[0]?.id ?? ""); setModel(config.connections[0]?.default_model ?? "");
       const id = new URLSearchParams(window.location.search).get("chat");
       // A callback tab has no chat query yet; keep the fallback draft for the return navigation.
@@ -115,6 +118,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       if (id && /^[a-f0-9-]{36}$/.test(id)) {
         const detail = await chatJson<ConversationDetail>(`/conversations/${id}`, { signal: abort.signal });
         setActive(detail.conversation); setMessages(detail.messages);
+        const previousApp=detail.messages.at(-1)?.apps?.[0];
+        if(previousApp?.mode==='workspace'||previousApp?.mode==='execute')setAppSelections([previousApp]);
         setQueue(detail.generation ?? null);
         generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
         setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
@@ -129,8 +134,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     const abort = new AbortController();
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
-      void chatJson<{ connections: Connection[] }>("/config", { signal: AbortSignal.any([abort.signal, AbortSignal.timeout(6000)]) })
-        .then((value) => { if (!abort.signal.aborted) setConnections(value.connections); }).catch(() => {});
+      void chatJson<{ connections: Connection[];terminal?:{enabled:boolean;execution_enabled:boolean} }>("/config", { signal: AbortSignal.any([abort.signal, AbortSignal.timeout(6000)]) })
+        .then((value) => { if (!abort.signal.aborted) {setConnections(value.connections);if(value.terminal)setTerminal(value.terminal);} }).catch(() => {});
     };
     if (settingsOpen) refresh();
     window.addEventListener("focus", refresh);
@@ -219,7 +224,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       setContextReport(null); setQueue(detail.generation ?? null); setContextOpen(false);
       generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
       setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
-      setAppSelections([]); setMention(null); setToolStatus("");
+      const previousApp=detail.messages.at(-1)?.apps?.[0];
+      setAppSelections(previousApp?.mode==='workspace'||previousApp?.mode==='execute'?[previousApp]:[]);setMention(null);setToolStatus("");
       replaceConversationLocation(item.id);
     } catch (caught) { if (!abort.signal.aborted) setError(errorText(caught)); }
     finally { if (!abort.signal.aborted) setLoading(false); }
@@ -254,7 +260,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           const { user_message: human, assistant_message: assistant, conversation, context } = event.data;
           if (context) setContextReport(context);
           assistantId = assistant.id;
-          if (!retry) setAppSelections([]);
+          if (!retry && (!usedApps[0]?.mode || usedApps[0].mode==='files')) setAppSelections([]);
           setMessages((old) => [...old.filter((item) => item.id !== human.id && item.id !== assistant.id), human, assistant]);
           setActive(conversation); updateConversation(conversation);
           requestAnimationFrame(() => editor.current?.focus());
@@ -269,6 +275,12 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         } else if (event.event === "sources") {
           setToolStatus("");
           setMessages((old) => old.map((item) => item.id === assistantId ? { ...item, sources: event.data.sources } : item));
+        } else if(event.event==='activity') {
+          setToolStatus(event.data.status==='running'?event.data.detail:'');
+          setMessages(old=>old.map(item=>item.id===assistantId?{...item,tools:[...(item.tools??[]),event.data].slice(-150)}:item));
+        } else if(event.event==='workspace') {
+          setMessages(old=>old.map(item=>item.id===assistantId?{...item,apps:item.apps?.map(selection=>({...selection,workspace_id:event.data.id}))}:item));
+          if(!retry)setAppSelections(old=>old.map(selection=>selection.connection_id===usedApps[0]?.connection_id&&selection.project_id===event.data.project_id?{...selection,workspace_id:event.data.id}:selection));
         } else {
           setQueue(null);
           setMessages((old) => old.map((item) => item.id === event.data.message.id ? event.data.message : item));
@@ -335,7 +347,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   };
   const visible = conversations.filter((item) => item.title.toLocaleLowerCase().includes(search.toLocaleLowerCase().trim()));
   const composer = <form className={`cw-composer ${streaming ? "is-streaming" : ""}`} onSubmit={(event) => { event.preventDefault(); void send(); }}>
-    {!!appSelections.length && <div className="cw-app-selection">{appSelections.map((selection) => <div key={selection.connection_id}><Icon name="code" size={15} /><span>GitLab · {selection.ref} · {selection.paths.length}개 파일</span>
+    {!!appSelections.length && <div className="cw-app-selection">{appSelections.map((selection) => <div key={selection.connection_id}><Icon name="code" size={15} /><span>GitLab · {selection.ref} · {selection.mode==='execute'?'분석·실행':selection.mode==='workspace'?'프로젝트 분석':`${selection.paths.length}개 파일`}</span>
       <button type="button" className="cw-icon-button" aria-label="GitLab 파일 선택 제거" onClick={() => setAppSelections([])}><Icon name="close" size={13} /></button></div>)}</div>}
     {mention && <div className="cw-app-mention" id="chat-app-options" role="listbox" aria-label="사용할 앱"><button id="chat-app-gitlab" type="button" role="option" aria-selected="true"
       onMouseDown={(e) => e.preventDefault()} onClick={selectGitlab}><Icon name="code" size={20} /><span><strong>GitLab</strong><small>내 프로젝트에서 파일 가져오기</small></span><kbd>↵</kbd></button></div>}
@@ -360,6 +372,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       <Icon name={connection?.is_test ? "chat" : "server"} size={16} /><span>{connection?.is_test ? connection.name : model || connection?.name || "모델 연결"}</span><Icon name="chevron" size={14} /></button>
       <button type="button" className="cw-context-button" aria-label="앱 추가" disabled={busy} onClick={() => { const caret = editor.current?.selectionStart ?? draft.length; setMention({ start: caret, end: caret, query: "" }); editor.current?.focus(); }}>@ 앱</button>
       {active && <button className="cw-context-button" type="button" disabled={busy || !connection} onClick={() => setContextOpen(true)}>문맥</button>}
+      {active&&terminal.enabled&&<button className="cw-context-button" type="button" onClick={()=>setWorkspaceOpen(true)}>작업공간</button>}
       <span className="cw-enter-hint">Shift + Enter 줄바꿈</span>
       {busy ? <button type="button" onClick={stop} className="cw-send" aria-label={queue?.status === "queued" ? "대기 취소" : "응답 중지"}><span className="cw-stop-square" /></button>
         : <button className="cw-send" disabled={!draft.trim() || !canSend} aria-label="메시지 전송"><Icon name="arrow" size={20} /></button>}</div>
@@ -412,7 +425,9 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           : <div className="cw-transcript" aria-label="대화 내용">{messages.map((message, index) => <article key={message.id} className={`cw-message cw-message-${message.role}`} aria-label={message.role === "user" ? "내 메시지" : "모델 답변"}>
             {message.role === "assistant" && <div className="cw-assistant-label"><Wordmark small /><span>{message.is_test ? "테스트 모델" : message.model}</span>{message.is_test && <small>예시 답변</small>}</div>}
             {message.role === "user" ? <div className="cw-human-text">{message.content}</div> : <>
-              {!!message.apps?.length && <p className="cw-message-app">GitLab · {message.apps[0].paths.join(", ")}</p>}
+              {!!message.apps?.length && <p className="cw-message-app">GitLab · {message.apps[0].mode==='execute'?'프로젝트 분석·실행':message.apps[0].mode==='workspace'?'프로젝트 자동 분석':message.apps[0].paths.join(", ")}
+                {message.apps[0].workspace_id&&<button type="button" className="cw-text-button" onClick={()=>setWorkspaceOpen(true)}>작업공간 열기</button>}</p>}
+              {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {tool.name} · {tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}
               {message.content ? <MessageContent content={message.content} /> : message.status === "pending" ? toolStatus ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
               <MessageSources sources={message.sources ?? []} />
               {message.status === "error" && <p className="cw-message-error" role="alert">{message.error || "응답이 중단되었습니다. 다시 시도해 주세요."}</p>}
@@ -430,7 +445,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         {composer}<p className="cw-composer-caption">{active?.busy && !streaming ? "진행 중인 요청을 불러오고 있습니다…" : connection?.is_test ? "테스트 모드 · 예시 답변이며 실제 모델을 호출하지 않습니다." : "모델의 답변은 부정확할 수 있습니다. 중요한 내용은 확인해 주세요."}</p></div>}
       {error && <div className="cw-error-toast" role="alert"><span>{error}</span><button className="cw-icon-button" aria-label="오류 알림 닫기" onClick={() => setError("")}><Icon name="close" size={16} /></button></div>}
     </main>
-    {scopeOpen && <GitlabScopeDialog onClose={() => { setScopeOpen(false); editor.current?.focus(); }} onSelect={(selection) => { setAppSelections([selection]); setScopeOpen(false); editor.current?.focus(); }} />}
+    {scopeOpen && <GitlabScopeDialog terminal={terminal} onClose={() => { setScopeOpen(false); editor.current?.focus(); }} onSelect={(selection) => { setAppSelections([selection]); setScopeOpen(false); editor.current?.focus(); }} />}
+    {workspaceOpen&&active&&<WorkspaceDialog conversationId={active.id} onClose={()=>setWorkspaceOpen(false)}/>}
     {contextOpen && active && <ContextDialog key={active.id} conversationId={active.id} connectionId={selected} model={model} content={draft}
       onClose={() => setContextOpen(false)} onSaved={setContextReport} />}
     <ConnectionsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} connections={connections} selected={selected} model={model} disabled={busy}

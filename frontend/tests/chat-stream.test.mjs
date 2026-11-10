@@ -70,7 +70,16 @@ test("app reading and bounded source events arrive before a terminal answer", as
   await readChatStream(stream(encoder.encode(value),1),(event) => received.push(event));
   assert.deepEqual(received.map((item) => item.event),["tool","sources","start","delta","done"]);
   assert.equal(received[1].data.sources[0].path,"app/main.py");
-  for (const invalid of [null,[{...source,url:"javascript:alert(1)"}],Array(6).fill(source)]) {
+  for (const invalid of [null,[{...source,url:"javascript:alert(1)"}],Array(31).fill(source)]) {
     await assert.rejects(() => readChatStream(stream(encoder.encode(`event: sources\ndata: ${JSON.stringify({sources:invalid})}\n\n`)),() => {}),/출처/);
   }
+});
+
+test("workspace and tool activity events remain distinct from answer text", async()=>{
+  const value='event: workspace\ndata: {"id":"workspace-one","status":"ready"}\n\n'
+    +'event: activity\ndata: {"name":"repo_map","status":"complete","detail":"파일 조회","step":1}\n\n'+events;
+  const received=[];
+  await readChatStream(stream(encoder.encode(value),2),event=>received.push(event));
+  assert.deepEqual(received.map(event=>event.event),['workspace','activity','start','delta','done']);
+  assert.equal(received[1].data.detail,'파일 조회');
 });

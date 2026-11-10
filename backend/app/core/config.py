@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     integrations_encryption_keys: SecretStr = SecretStr('[]')
     gitlab_ca_bundle: str | None = None
     gitlab_timeout_seconds: int = Field(10, ge=1, le=30)
+    terminal_mcp_url: str = ''
+    terminal_shared_secret: SecretStr = SecretStr('')
+    terminal_execution_enabled: bool = False
+    terminal_agent_max_steps: int = Field(12,ge=1,le=30)
+    terminal_agent_timeout_seconds: int = Field(600,ge=30,le=1800)
     refresh_token_days: int = Field(14, validation_alias=AliasChoices('REFRESH_TOKEN_DAYS', 'REFRESH_TOKEN_EXPIRE_DAYS'), ge=1)
     registration_rate_limit_attempts: int = Field(30, alias='REGISTRATION_RATE_LIMIT_ATTEMPTS', ge=1, le=1000)
     registration_rate_limit_window_seconds: int = Field(600, alias='REGISTRATION_RATE_LIMIT_WINDOW_SECONDS', ge=10, le=86400)

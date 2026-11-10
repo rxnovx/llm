@@ -45,7 +45,7 @@ class GitlabDouble(BaseHTTPRequestHandler):
         if url.path=='/oauth/authorize':
             query = parse_qs(url.query)
             type(self).challenge = query['code_challenge'][0]
-            assert query['scope']==['read_user read_api']
+            assert query['scope']==['read_user read_api read_repository']
             self.send_response(302)
             self.send_header('Location',query['redirect_uri'][0]+'?'+urlencode({'state':query['state'][0],'code':'wire-gitlab-code'}))
             self.end_headers();return
@@ -75,7 +75,7 @@ class GitlabDouble(BaseHTTPRequestHandler):
             assert form['refresh_token']==[f'wire-gitlab-refresh-{self.generation}']
         type(self).generation += 1
         self.reply({'access_token':f'wire-gitlab-access-{self.generation}','refresh_token':f'wire-gitlab-refresh-{self.generation}',
-            'token_type':'Bearer','scope':'read_user read_api','expires_in':30 if self.generation==1 else 7200})
+            'token_type':'Bearer','scope':'read_user read_api read_repository','expires_in':30 if self.generation==1 else 7200})
 
 
 def gitlab_apps_smoke(client,access):

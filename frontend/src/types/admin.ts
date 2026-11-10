@@ -1,7 +1,7 @@
 import type { Connection } from "./chat";
 
 export type OpsMode = "all" | "live" | "test";
-export type RunStatus = "complete" | "error" | "cancelled" | "queued" | "running" | "interrupted";
+export type RunStatus = "complete" | "error" | "cancelled" | "queued" | "running" | "interrupted" | "tool_waiting";
 export type RunCounts = Record<RunStatus | "total", number> & { average_ms: number | null; success_rate: number | null };
 export type OpsOverview = {
   generated_at: number; time_zone: string; mode: OpsMode;

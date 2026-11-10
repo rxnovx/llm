@@ -6,7 +6,7 @@ from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator,model_validator
 
 from .config import source_file, validate_path
 from .service import GitlabClient
@@ -19,7 +19,14 @@ class GitlabSelection(BaseModel):
     connection_id: UUID
     project_id: int = Field(ge=1)
     ref: str = Field('HEAD',min_length=1,max_length=200)
-    paths: list[str] = Field(min_length=1,max_length=5)
+    paths: list[str] = Field(default_factory=list,max_length=5)
+    mode: Literal['files','workspace','execute'] = 'files'
+    workspace_id: UUID | None = None
+
+    @model_validator(mode='after')
+    def has_files(self):
+        if self.mode=='files' and not self.paths:raise ValueError('파일을 선택하세요.')
+        return self
 
     @field_validator('ref')
     @classmethod

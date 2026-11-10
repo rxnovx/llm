@@ -1,5 +1,7 @@
 # GitLab 앱 연결
 
+프로젝트 분석·터미널 확장에서는 `read_repository`를 추가로 요청하므로 GitLab OAuth 앱에 `read_user read_api read_repository`를 등록한 뒤 기존 연결을 재인증하세요. 파일 조회 모드 외에 프로젝트 자동 탐색·분석·실행 모드를 제공하며 상세 구성과 현재 범위는 [TERMINAL_MCP.md](TERMINAL_MCP.md)를 참고하세요. 아래의 파일 조회 설명은 기존 파일 모드에 해당합니다.
+
 앱 설정 모달에서 각 사용자가 자기 GitLab 계정을 OAuth로 연결하고, 채팅 입력창의 `@GitLab` 또는 `@ 앱` 버튼에서 프로젝트·브랜치·파일을 선택합니다. 한 질문에 한 연결, 텍스트 소스 파일 최대 5개를 지정합니다. 선택한 파일을 읽은 뒤 현재 vLLM/Ollama 모델에 발췌 자료와 질문을 함께 전달합니다. 모델의 도구 호출 기능은 필수가 아닙니다.
 
 GitLab 주소만 등록하면 모든 사용자에게 공유되는 토큰이 생기는 구조가 아닙니다. 서버의 OAuth 앱 등록과 각 사용자의 GitLab 승인이 모두 필요합니다. GitLab 연결은 이 서비스에 로그인하는 기능과도 별개입니다.
@@ -13,7 +15,7 @@ GitLab 주소만 등록하면 모든 사용자에게 공유되는 토큰이 생�
 | Name | 조직에서 식별할 수 있는 이름, 예: LLM |
 | Redirect URI | `https://llm.example.internal/apps/gitlab/callback` |
 | Confidential | 사용 |
-| Scopes | `read_user`, `read_api`만 선택 |
+| Scopes | `read_user`, `read_api`, `read_repository` 선택 |
 
 로컬 Termux에서는 예를 들어 `http://localhost:3000/apps/gitlab/callback`을 등록합니다. GitLab 인증 후 돌아오는 브라우저에서 해당 주소에 접근할 수 있어야 합니다. 등록된 redirect URI와 백엔드 `FRONTEND_URL + /apps/gitlab/callback`이 정확히 같아야 합니다.
 

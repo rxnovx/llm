@@ -1,0 +1,33 @@
+# Optional private MCP service. API/web still run independently without this file.
+services:
+  api:
+    environment:
+      TERMINAL_MCP_URL: http://terminal:8010/mcp
+      TERMINAL_SHARED_SECRET: ${TERMINAL_SHARED_SECRET:?Generate TERMINAL_SHARED_SECRET}
+  terminal:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.terminal
+    init: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    env_file: .env
+    environment:
+      APP_ENV: production
+      TERMINAL_HOST: 0.0.0.0
+      TERMINAL_DATA_DIRECTORY: /app/terminal-data
+      TERMINAL_BROKER_URL: http://api:8000
+      TERMINAL_EXECUTION_MODE: disabled
+      TERMINAL_SHARED_SECRET: ${TERMINAL_SHARED_SECRET:?Generate TERMINAL_SHARED_SECRET}
+    volumes: [terminal-data:/app/terminal-data]
+    ports: ["127.0.0.1:${TERMINAL_PORT:-8010}:8010"]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD,python,-c,"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+volumes:
+  terminal-data:
