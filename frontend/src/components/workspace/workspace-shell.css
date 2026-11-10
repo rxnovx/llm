@@ -62,3 +62,10 @@
   .app-modal input,.app-modal textarea,.app-modal select { font-size:16px; }.ops-dashboard-embedded .ops-body { padding:20px 15px; }
   .app-modal-auth { max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px); border-radius:13px; }.auth-modal-content { padding:25px 23px 20px; }
 }
+.settings-app-intro,.settings-app-empty,.settings-app-footnote { color:var(--fg-muted); font-size:12px; line-height:1.9; margin:20px 0; }
+.settings-app-intro strong { font-weight:500; color:var(--fg); }.settings-app-heading { display:flex; align-items:center; gap:10px; font-size:14px; font-weight:600; padding:10px 0 15px; border-bottom:1px solid var(--border); }
+.settings-app-heading span { color:var(--fg-muted); font-size:10px; font-weight:400; padding:3px 6px; border:1px solid var(--border); border-radius:4px; }
+.settings-app-card { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:20px 0; border-bottom:1px solid var(--border); }.settings-app-card>div:first-child { min-width:0; }
+.settings-app-card strong { display:block; font-size:13px; font-weight:500; }.settings-app-card small { display:block; color:var(--fg-muted); font-size:11px; margin-top:6px; overflow-wrap:anywhere; }.settings-app-card p { color:var(--fg-muted); font-size:11px; line-height:1.7; margin:7px 0 0; }
+.settings-app-actions { display:flex; align-items:center; gap:12px; flex-shrink:0; }.settings-app-footnote { margin-top:25px; font-size:11px; }
+@media(max-width:600px) { .settings-app-card { flex-wrap:wrap; gap:12px; }.settings-app-actions { width:100%; justify-content:flex-end; } }

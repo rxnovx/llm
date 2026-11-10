@@ -18,6 +18,9 @@ from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
 from app.modules.chat.models import Admission, ContextNote, Conversation, GenerationRun, Message
 from app.modules.chat import context as context_budget, providers, scheduler
+from app.modules.integrations.models import MessageContext
+from app.modules.integrations.tools import GitlabSelection, read_context
+from app.modules.integrations.transport import GitlabError
 
 router = APIRouter(prefix='/chat', tags=['chat'])
 Database = Annotated[Session, Depends(get_db)]
@@ -38,6 +41,7 @@ class TurnInput(ConversationInput):
     content: str = Field(min_length=1, max_length=16000)
     request_id: UUID
     retry: bool = False
+    apps: list[GitlabSelection] | None = Field(None,max_length=1)
 
 
 class CancelInput(BaseModel):
@@ -61,7 +65,9 @@ def conversation_data(item: Conversation):
 
 
 def message_data(item: Message):
-    return {key: getattr(item, key) for key in ('id', 'role', 'content', 'status', 'model', 'is_test', 'error', 'created_at')}
+    record = item.source_record
+    return {key: getattr(item, key) for key in ('id', 'role', 'content', 'status', 'model', 'is_test', 'error', 'created_at')} | {
+        'apps':json.loads(record.apps_json) if record else [], 'sources':json.loads(record.sources_json) if record else []}
 
 
 def owned(db: Session, conversation_id: UUID, user_id: str) -> Conversation:
@@ -264,6 +270,14 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         assistant = Message(conversation_id=item.id, position=position + 1, role='assistant', content='',
             status='pending', model=model, is_test=connection.provider == 'test')
         db.add_all([user_message, assistant])
+    apps = [app.model_dump(mode='json') for app in data.apps] if data.apps is not None else (
+        json.loads(assistant.source_record.apps_json) if data.retry and assistant.source_record else [])
+    if apps and context_budget.reference_budget(db,item.id,connection,model,content)<2000:
+        raise HTTPException(422,'GitLab 파일을 담을 문맥 예산이 부족합니다. 질문·요약 메모를 줄이거나 더 큰 문맥의 모델을 선택하세요.')
+    if assistant.source_record is None:
+        assistant.source_record = MessageContext(apps_json=json.dumps(apps),sources_json='[]')
+    else:
+        assistant.source_record.apps_json,assistant.source_record.sources_json = json.dumps(apps),'[]'
     try:
         history, report = context_budget.plan(db, item.id, connection, model, content)
     except providers.ProviderError as error:
@@ -324,6 +338,7 @@ async def guarded_parts(iterator, cancelled):
 
 @router.post('/conversations/{conversation_id}/messages')
 def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Database):
+    user_id = context.user.id
     connection = connection_for(data.connection_id, db, context.user)
     turn = prepare(db, conversation_id, context.user.id, data, connection)
     settings, bind = get_settings(), db.get_bind()
@@ -332,6 +347,7 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
         text, status, error = '', 'cancelled', None
         first_token_ms, error_code = None, 'cancelled'
         saved = None
+        sources = []
         def cancelled():
             with Session(bind) as session:
                 active = session.get(Conversation, turn.conversation_id)
@@ -356,8 +372,22 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                 raise TimeoutError('queue')
             if state == 'running':
                 yield event('queue', {'status': 'running', 'position': 0, 'request_id': turn.request_id})
-                yield event('context', report)
                 async with asyncio.timeout(settings.llm_timeout_seconds):
+                    apps = turn.start['assistant_message']['apps']
+                    if apps:
+                        yield event('tool', {'app':'gitlab','status':'reading','detail':'선택한 GitLab 파일을 읽고 있습니다.'})
+                        with Session(bind) as session:
+                            budget = context_budget.reference_budget(session,turn.conversation_id,admitted,
+                                turn.start['conversation']['model'],data.content.strip())
+                        async def fetch_sources():
+                            yield await read_context(bind,user_id,GitlabSelection.model_validate(apps[0]),data.content,budget)
+                        async with aclosing(guarded_parts(fetch_sources(),cancelled)) as results:
+                            async for reference,sources in results:
+                                with Session(bind) as session:
+                                    turn.history,report = context_budget.plan(session,turn.conversation_id,admitted,
+                                        turn.start['conversation']['model'],data.content.strip(),extra_context=reference)
+                        yield event('sources',{'sources':sources})
+                    yield event('context', report)
                     iterator = providers.stream_reply(admitted, turn.start['conversation']['model'], turn.history, settings)
                     async with aclosing(guarded_parts(iterator, cancelled)) as parts:
                         async for part in parts:
@@ -374,10 +404,10 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
             pass
         except asyncio.CancelledError:
             raise
-        except (providers.ProviderError, TimeoutError) as caught:
+        except (providers.ProviderError, GitlabError, TimeoutError) as caught:
             status = 'error'
-            error_code = 'provider_error' if isinstance(caught, providers.ProviderError) else 'queue_timeout' if str(caught) == 'queue' else 'timeout'
-            error = str(caught) if isinstance(caught, providers.ProviderError) else '대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.' if str(caught) == 'queue' else '응답 시간이 초과되었습니다. 다시 시도해 주세요.'
+            error_code = 'gitlab_error' if isinstance(caught,GitlabError) else 'provider_error' if isinstance(caught, providers.ProviderError) else 'queue_timeout' if str(caught) == 'queue' else 'timeout'
+            error = str(caught) if isinstance(caught, (providers.ProviderError,GitlabError)) else '대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.' if str(caught) == 'queue' else '응답 시간이 초과되었습니다. 다시 시도해 주세요.'
         except HTTPException as caught:
             status, error, error_code = 'error', str(caught.detail), 'context_limit'
         except Exception:
@@ -400,11 +430,16 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                 scheduler.finish(session, turn.request_id, status)
                 if item and message:
                     message.content, message.status, message.error = text, status, error
+                    if message.source_record:
+                        message.source_record.sources_json = json.dumps(sources,ensure_ascii=False)
                     # A failed/cancelled regeneration must not destroy a good answer.
                     if status != 'complete' and turn.previous_message:
                         previous = turn.previous_message
                         message.content, message.status, message.error = previous['content'], previous['status'], previous['error']
                         message.model, message.is_test = previous['model'], previous['is_test']
+                        if message.source_record:
+                            message.source_record.apps_json = json.dumps(previous['apps'])
+                            message.source_record.sources_json = json.dumps(previous['sources'],ensure_ascii=False)
                         item.connection_id, item.model = turn.previous_connection, previous['model']
                     item.generation_id, item.generation_until, item.cancel_requested = None, 0, False
                     item.updated_at = int(time.time())

@@ -100,6 +100,13 @@ class RefreshSession(Base):
     user: Mapped[User] = relationship(back_populates="refresh_sessions")
 
 
+class SessionFamily(Base):
+    """Stable browser-login identity across refresh-token rotation (additive table)."""
+    __tablename__ = 'auth_session_families'
+    session_id: Mapped[str] = mapped_column(ForeignKey('refresh_sessions.id', ondelete='CASCADE'), primary_key=True)
+    family_id: Mapped[str] = mapped_column(String(36), index=True)
+
+
 class OneTimeToken(Base):
     __tablename__ = "auth_one_time_tokens"
     __table_args__ = (

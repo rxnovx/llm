@@ -1,4 +1,6 @@
 import os
+import json
+import base64
 from pathlib import Path
 import shutil
 import stat
@@ -41,6 +43,10 @@ def test_standalone_setup_generates_private_service_files(project):
     assert len(api["JWT_SECRET_KEY"]) == 64
     assert api["JWT_SECRET_KEY"] != api["AUTH_PROXY_SECRET"]
     assert api["AUTH_PROXY_SECRET"] == web["AUTH_PROXY_SECRET"]
+    keys = json.loads(api['INTEGRATIONS_ENCRYPTION_KEYS'])
+    assert len(keys)==1 and len(base64.urlsafe_b64decode(keys[0]))==32
+    assert keys[0] not in result.stdout+result.stderr
+    assert 'INTEGRATIONS_ENCRYPTION_KEYS' not in web
     assert web["APP_URL"] == "http://localhost:3000"
     assert web["APP_ALLOWED_ORIGINS"] == "http://127.0.0.1:3000"
     for value in (api["JWT_SECRET_KEY"], api["AUTH_PROXY_SECRET"]):

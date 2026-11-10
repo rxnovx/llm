@@ -19,6 +19,8 @@ python main.py
 
 개발 테스트가 필요하면 `python -m pip install -r requirements-dev.txt`를 사용합니다. 기존 가상환경을 계속 사용할 수 있습니다.
 
+GitLab 계정 연결과 `@GitLab` 파일 조회도 사용할 경우 `python -m pip install -r requirements-gitlab.txt`를 추가로 설치합니다. 암호화 모듈을 기본 채팅 의존성과 분리했으며 [GITLAB_APPS.md](GITLAB_APPS.md)에 OAuth 등록·각 서비스 환경 변수·키 생성 방법을 정리했습니다. `FRONTEND_URL`은 이메일 링크뿐 아니라 GitLab OAuth callback 주소에도 사용하므로 프론트엔드 `APP_URL`과 일치시킵니다.
+
 ## 처음 설치하는 경우
 
 프로젝트는 Termux 홈 아래에 둡니다. 예시 경로는 `~/workspace/llm`입니다. Python 3.12 이상과 Node.js 22.13 이상을 사용합니다.

@@ -1,5 +1,7 @@
 """Create shared or standalone environment files without overwriting existing files."""
 import argparse
+import base64
+import json
 import os
 from pathlib import Path
 import secrets
@@ -29,7 +31,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.standalone and args.postgres:
         parser.error("--postgres is for shared .env setup; configure DATABASE_URL in backend/.env for standalone PostgreSQL")
-    values = {"JWT_SECRET_KEY": secrets.token_hex(32), "AUTH_PROXY_SECRET": secrets.token_hex(32)}
+    values = {"JWT_SECRET_KEY": secrets.token_hex(32), "AUTH_PROXY_SECRET": secrets.token_hex(32),
+              "INTEGRATIONS_ENCRYPTION_KEYS": json.dumps([base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()])}
     if args.standalone:
         create_env(root, "backend/.env.example", "backend/.env", values)
         create_env(root, "frontend/.env.example", "frontend/.env.local", values)

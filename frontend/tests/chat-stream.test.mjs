@@ -61,3 +61,16 @@ test("invalid queue positions and states fail and release the reader", async () 
     assert.equal(source.locked, false);
   }
 });
+
+test("app reading and bounded source events arrive before a terminal answer", async () => {
+  const source = { id:"GL1",path:"app/main.py",url:"https://gitlab.example/team/app/-/blob/abc/app/main.py",commit:"abc",start_line:1,end_line:4 };
+  const value = 'event: tool\ndata: {"app":"gitlab","status":"reading","detail":"파일을 읽는 중"}\n\n'
+    + `event: sources\ndata: ${JSON.stringify({sources:[source]})}\n\n`+events;
+  const received=[];
+  await readChatStream(stream(encoder.encode(value),1),(event) => received.push(event));
+  assert.deepEqual(received.map((item) => item.event),["tool","sources","start","delta","done"]);
+  assert.equal(received[1].data.sources[0].path,"app/main.py");
+  for (const invalid of [null,[{...source,url:"javascript:alert(1)"}],Array(6).fill(source)]) {
+    await assert.rejects(() => readChatStream(stream(encoder.encode(`event: sources\ndata: ${JSON.stringify({sources:invalid})}\n\n`)),() => {}),/출처/);
+  }
+});

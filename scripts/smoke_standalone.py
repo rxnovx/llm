@@ -3,6 +3,8 @@
 Run with backend/.venv/bin/python scripts/smoke_standalone.py after npm run build.
 """
 import io
+import base64
+import hashlib
 import json
 import os
 import re
@@ -13,6 +15,7 @@ import sys
 import tempfile
 import time
 import uuid
+from urllib.parse import parse_qs, urlencode, urlsplit
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
@@ -24,6 +27,99 @@ root = Path(__file__).resolve().parents[1]
 web = root / "frontend"
 backend = root / "backend"
 python = Path(sys.executable)
+
+
+class GitlabDouble(BaseHTTPRequestHandler):
+    """Local HTTP protocol double. No external GitLab or user credentials."""
+    challenge = ''
+    generation = 0
+    def log_message(self,*_):
+        pass
+    def reply(self,value,code=200,raw=False):
+        self.send_response(code)
+        self.send_header('Content-Type','text/plain' if raw else 'application/json')
+        self.end_headers()
+        self.wfile.write((value if raw else json.dumps(value)).encode())
+    def do_GET(self):
+        url = urlsplit(self.path)
+        if url.path=='/oauth/authorize':
+            query = parse_qs(url.query)
+            type(self).challenge = query['code_challenge'][0]
+            assert query['scope']==['read_user read_api']
+            self.send_response(302)
+            self.send_header('Location',query['redirect_uri'][0]+'?'+urlencode({'state':query['state'][0],'code':'wire-gitlab-code'}))
+            self.end_headers();return
+        assert self.headers.get('Authorization')==f'Bearer wire-gitlab-access-{self.generation}'
+        assert not self.headers.get('Cookie')
+        if url.path=='/api/v4/user':return self.reply({'id':77,'username':'wire-user','name':'HTTP GitLab'})
+        if url.path=='/api/v4/projects':return self.reply([{'id':7,'path_with_namespace':'team/service','default_branch':'main'}])
+        if url.path=='/api/v4/projects/7':return self.reply({'id':7,'path_with_namespace':'team/service'})
+        if url.path.endswith('/branches'):return self.reply([{'name':'main'}])
+        if url.path.endswith('/tree'):return self.reply([{'name':'main.py','path':'main.py','type':'blob'}])
+        if '/commits/' in url.path:return self.reply({'id':'a'*40})
+        if url.path.endswith('/raw'):
+            assert parse_qs(url.query)['ref']==['a'*40]
+            return self.reply('def login(user):\n    return user.is_active\n',raw=True)
+        self.reply({},404)
+    def do_POST(self):
+        form = parse_qs(self.rfile.read(int(self.headers['Content-Length'])).decode())
+        assert form['client_id']==['wire-client'] and form['client_secret']==['wire-test-secret']
+        assert not self.headers.get('Cookie')
+        if self.path=='/oauth/revoke':return self.reply({})
+        assert self.path=='/oauth/token'
+        if form['grant_type']==['authorization_code']:
+            challenge = base64.urlsafe_b64encode(hashlib.sha256(form['code_verifier'][0].encode()).digest()).rstrip(b'=').decode()
+            assert challenge==self.challenge and form['code']==['wire-gitlab-code']
+            assert form['redirect_uri']==['http://127.0.0.1:3100/apps/gitlab/callback']
+        else:
+            assert form['refresh_token']==[f'wire-gitlab-refresh-{self.generation}']
+        type(self).generation += 1
+        self.reply({'access_token':f'wire-gitlab-access-{self.generation}','refresh_token':f'wire-gitlab-refresh-{self.generation}',
+            'token_type':'Bearer','scope':'read_user read_api','expires_in':30 if self.generation==1 else 7200})
+
+
+def gitlab_apps_smoke(client,access):
+    catalog = client.get('/api/apps/catalog',headers=access)
+    assert catalog.status_code==200 and catalog.json()['apps'][0]['providers'][0]['ready']
+    started = client.post('/api/apps/gitlab/wire/authorize',headers=access,json={'popup':False})
+    assert started.status_code==200,started.text
+    assert 'cookie_key' not in started.json() and 'HttpOnly' in started.headers['set-cookie']
+    with httpx.Client(trust_env=False,follow_redirects=False) as browser:
+        approved = browser.get(started.json()['authorize_url'])
+    assert approved.status_code==302
+    callback = approved.headers['location']
+    page = client.get(callback)
+    assert page.status_code==200 and page.headers['referrer-policy']=='no-referrer'
+    query = parse_qs(urlsplit(callback).query)
+    # AuthInitializer in an actual callback tab rotates the app's refresh token.
+    refreshed = client.post('/api/auth/refresh')
+    assert refreshed.status_code==200
+    access = {'authorization':'Bearer '+refreshed.json()['access_token']}
+    completed = client.post('/api/apps/gitlab/oauth/complete',headers=access,json={
+        'state':query['state'][0],'code':query['code'][0]})
+    assert completed.status_code==200,completed.text
+    assert 'Max-Age=0' in completed.headers['set-cookie']
+    connection = completed.json()['connection']['id']
+    path = f'/api/apps/connections/{connection}'
+    assert client.get(path+'/projects',headers=access).json()['items'][0]['id']==7
+    assert GitlabDouble.generation==2, 'Expiring access token was not refreshed through HTTP'
+    assert client.get(path+'/projects/7/branches',headers=access).json()['items'][0]['name']=='main'
+    assert client.get(path+'/projects/7/tree',headers=access).json()['items'][0]['selectable']
+    conversation = client.post('/api/chat/conversations',headers=access,json={}).json()['id']
+    chat = '/api/chat/conversations/'+conversation
+    selection = {'app':'gitlab','connection_id':connection,'project_id':7,'ref':'main','paths':['main.py']}
+    response = client.post(chat+'/messages',headers=access,json={'content':'login 함수를 설명해 줘',
+        'request_id':str(uuid.uuid4()),'apps':[selection]})
+    assert 'event: sources' in response.text and 'event: done' in response.text,response.text
+    saved = client.get(chat,headers=access).json()['messages'][-1]
+    assert saved['apps']==[selection] and saved['sources'][0]['commit']=='a'*40
+    assert saved['sources'][0]['path']=='main.py' and saved['is_test']
+    assert 'wire-gitlab-access' not in response.text and 'wire-test-secret' not in response.text
+    removed = client.delete(path,headers=access)
+    assert removed.status_code==200 and removed.json()['remote_revoked'] is True
+    assert client.get(path+'/projects',headers=access).status_code==404
+    assert client.get(chat,headers=access).json()['messages'][-1]['sources']==saved['sources']
+    return access
 
 
 def model_controls_smoke(client, access):
@@ -95,6 +191,9 @@ shutil.copytree(web / ".next/static", web / ".next/standalone/.next/static", dir
 shutil.copytree(web / "public", web / ".next/standalone/public", dirs_exist_ok=True)
 
 processes = []
+gitlab_server = ThreadingHTTPServer(('127.0.0.1',0),GitlabDouble)
+gitlab_thread = threading.Thread(target=gitlab_server.serve_forever,daemon=True)
+gitlab_thread.start()
 with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
     scratch = Path(temporary)
     logs = []
@@ -108,6 +207,11 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             "EMAIL_PROVIDER": "disabled", "EMAIL_VERIFICATION_REQUIRED": "false",
             "GOOGLE_OAUTH_ENABLED": "false", "PUBLIC_REGISTRATION_ENABLED": "true",
             "LLM_TEST_MODE": "true", "LLM_CONNECTIONS_JSON": "[]",
+            "FRONTEND_URL":"http://127.0.0.1:3100",
+            "GITLAB_INSTANCES_JSON":json.dumps([{'id':'wire','name':'HTTP GitLab','base_url':f'http://127.0.0.1:{gitlab_server.server_port}',
+                'client_id':'wire-client','secret_ref':'wire'}]),
+            "GITLAB_CLIENT_SECRETS_JSON":json.dumps({'wire':'wire-test-secret'}),
+            "INTEGRATIONS_ENCRYPTION_KEYS":json.dumps([base64.urlsafe_b64encode(os.urandom(32)).decode()]),
         }
         web_env = os.environ | {"APP_URL": "http://127.0.0.1:3100", "PORT": "3100", "HOSTNAME": "127.0.0.1",
             "AUTH_SERVER_URL": "http://127.0.0.1:8100", "AUTH_COOKIE_SECURE": "false"}
@@ -133,6 +237,7 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             modal_paths = {
                 '/login':'auth','/user/signup':'auth','/user/reset-password':'auth','/user/verify-email':'auth','/user/recover':'auth',
                 '/user/profile':'settings','/user/profile/edit':'settings','/user/settings':'settings','/admin':'admin',
+                '/user/settings/apps':'settings','/apps/gitlab/callback':'auth',
             }
             for page_path,kind in modal_paths.items():
                 page=client.get(page_path,params={'chat':'12345678-1234-1234-1234-123456789abc'})
@@ -249,6 +354,7 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             assert not any(row['id']=='smoke-local' for row in client.get('/api/chat/config',headers=access).json()['connections'])
             assert client.get('/api/admin/connections',headers=access).json()['items'][0]['enabled'] is False
             model_controls_smoke(client,access)
+            access = gitlab_apps_smoke(client,access)
             assert client.get('/api/admin/overview').status_code == 401
             assert client.get('/admin').status_code == 200
             response = client.post("/api/auth/refresh")
@@ -262,7 +368,7 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             assert client.get("/api/account/users/me", headers=access).status_code == 401
             assert client.get("/login").status_code == 200
             assert all(process.poll() is None for process in processes), 'A test server exited during validation'
-            print("PASS: chat-first HTML, all modal deep links, accounts, streaming, operator controls, context summaries and queued cancellation")
+            print("PASS: chat-first HTML, modal routes, accounts, streaming, operator controls, context/queue and GitLab OAuth/refresh/read/sources/disconnect over HTTP")
     except Exception:
         for handle in logs:
             handle.flush()
@@ -271,6 +377,7 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             print((scratch / name).read_text()[-3000:])
         raise
     finally:
+        gitlab_server.shutdown();gitlab_server.server_close();gitlab_thread.join(timeout=2)
         for process in reversed(processes):
             if process.poll() is None:
                 process.terminate()

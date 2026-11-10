@@ -2,6 +2,22 @@
 
 검증일: 2026-11-10. Node.js 24.22.1, Python 3.12.14. 이 저장소의 루트 경로와 LLM 서비스 식별자로 다시 검증했습니다. GitHub Actions는 실행하지 않았습니다.
 
+## GitLab OAuth·앱 멘션 추가 검증
+
+기존 PR #3을 main에 병합한 뒤 별도 `feat/gitlab-oauth-mentions-20261110` 브랜치에서 구현했습니다. 아래는 GitLab 연동을 추가한 현재 변경의 검증이며, 뒤의 표는 이전 기반 구현 기록입니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 백엔드 전체 `python -m pytest -q` | 104개 통과: 기존 77개 + GitLab 27개. OAuth state/nonce/PKCE, 계정·로그인 세션 격리와 앱 토큰 회전, 중도 로그아웃, 암호화 키 교체, 동시 refresh, 401 재시도·403 권한 거절, 경로/크기/전체 시간 제한, 출처·재생성 복구·중지·연결 해제·대기열 회수 포함 |
+| 프론트엔드 Node 테스트 | 총 62개: 세션 5 + BFF 20 + 환경 3 + SSE 8 + Markdown 10 + API 4 + 모달 경로 8 + WASM 1 + 앱 멘션/팝업/작성 내용 복원 3 |
+| `npm run typecheck`, `npm run lint`, `npm run build` | 통과. 새 앱 설정·콜백 모달 및 BFF 경로 포함, 새 프론트엔드 의존성 없음 |
+| `backend/.venv-portable/bin/python scripts/smoke_standalone.py` | 실제 `python main.py`와 빌드한 Next.js 별도 프로세스, 격리 SQLite, 로컬 HTTP GitLab/모델 응답 서버 사용. 인증 시작 → PKCE 교환 → 앱 세션 갱신 → GitLab 토큰 갱신 → 프로젝트/브랜치/파일 조회 → SSE 출처와 저장 → 연결 해제/원격 철회 통과. 기존 계정·운영·모달·채팅 검증도 함께 실행 |
+| Playwright UI 실행 시도 | 기본 다운로드 브라우저가 없어 설치된 `/usr/bin/chromium`으로도 시도했으나 `process_singleton_posix.cc: socket() failed: Operation not permitted`, `ptrace: Operation not permitted`로 브라우저 시작 자체가 차단됨 |
+
+`tests/apps.spec.ts`에 GitLab API 응답 대역을 이용하는 데스크톱/모바일용 파일 선택·출처·채팅 유지 시나리오를 추가했습니다. 실제 브라우저 UI·키보드/IME·화면 크기·팝업 복귀의 동작 및 스크린샷은 이 환경에서 검증하지 못했습니다. Node 테스트는 입력 범위와 팝업/저장소 로직을 검증하며 실제 브라우저 검증을 대체하지 않습니다.
+
+사용자 GitLab URL·OAuth 앱 인증 정보는 제공되지 않았으므로 **실제 GitLab 서버에서의 로그인과 권한 동작은 미검증**입니다. 실제 Termux/Android, Docker 이미지 빌드·Compose 실행, Nginx 런타임, 사설 CA, PostgreSQL도 이번 검증에 포함하지 않았습니다. GitLab OAuth 암호화는 별도 `requirements-gitlab.txt`로 제공하고 Docker 이미지에는 포함합니다. 일반 SQLite·채팅의 기본 의존성은 유지했습니다. 설정은 [GITLAB_APPS.md](GITLAB_APPS.md)를 참고하세요.
+
 ## 통과
 
 | 검증 | 결과 |

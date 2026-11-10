@@ -24,7 +24,7 @@ def completed_history(rows):
     return history
 
 
-def plan(db, conversation_id, connection, model, content='', *, retry=False, strict=True):
+def plan(db, conversation_id, connection, model, content='', *, retry=False, strict=True, extra_context=''):
     profile = connection.profile(model)
     rows = list(db.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.position)))
     history = completed_history(rows[:-1] if retry else rows)
@@ -32,7 +32,10 @@ def plan(db, conversation_id, connection, model, content='', *, retry=False, str
     summary = [{'role': 'system', 'content': '사용자가 작성한 이전 대화 요약 메모:\n' + note.summary}] if note and note.summary.strip() else []
     covered = [turn for turn in history if summary and turn[0] <= note.through_position]
     available = [turn for turn in history if not summary or turn[0] > note.through_position]
-    question = [{'role': 'user', 'content': content}] if content else []
+    # Source data stays in the user's question, never a privileged system message.
+    # One user message also supports strict alternating-role model templates.
+    question_text = content + ('\n\n'+extra_context if extra_context else '')
+    question = [{'role': 'user', 'content': question_text}] if question_text else []
     budget = profile.context_window - profile.max_output_tokens - 256
     required = estimate(summary + question)
     too_large = required > budget
@@ -55,3 +58,10 @@ def plan(db, conversation_id, connection, model, content='', *, retry=False, str
         'revision': note.revision if note else 0,
         'last_complete_position': history[-1][0] if history else -1}
     return messages, report
+
+
+def reference_budget(db,conversation_id,connection,model,content):
+    note = db.get(ContextNote,conversation_id)
+    summary = [{'content':'사용자가 작성한 이전 대화 요약 메모:\n'+note.summary}] if note and note.summary.strip() else []
+    profile = connection.profile(model)
+    return max(0,profile.context_window-profile.max_output_tokens-256-estimate(summary+[{'content':content}])-32)

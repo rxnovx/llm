@@ -12,12 +12,14 @@ import type { AccountSession } from "@/types/auth";
 import { Icon, type IconName } from "@/components/chat/Icons";
 import { UserAvatar } from "@/components/shared/UserAvatar";
 import { workspaceHref } from "@/lib/workspace-navigation";
+import { AppConnections } from "./AppConnections";
 
-type Section = "general" | "profile" | "security" | "sessions" | "account";
+type Section = "general" | "profile" | "security" | "sessions" | "account" | "apps";
 const sections: { id: Section; label: string; title: string; icon: IconName }[] = [
   { id: "general", label: "일반", title: "일반 설정", icon: "settings" },
   { id: "profile", label: "프로필", title: "프로필 설정", icon: "user" },
   { id: "security", label: "보안", title: "계정 및 보안", icon: "lock" },
+  { id: "apps", label: "앱 연결", title: "앱 연결", icon: "code" },
   { id: "sessions", label: "로그인 기기", title: "로그인 기기", icon: "devices" },
   { id: "account", label: "계정", title: "계정 관리", icon: "user" },
 ];
@@ -68,6 +70,7 @@ export function AccountPage({ initialSection = "general" }: { initialSection?: S
         <div className="settings-row"><div><h3>로그인 기기</h3><p>연결된 기기를 확인하고 로그인 세션을 해제합니다.</p></div><button type="button" className="settings-text-button" onClick={() => { setSessionsLoading(true); setTab("sessions"); }}>기기 관리</button></div></div>}
       {tab === "profile" && <><AvatarSection key={`avatar-${user.subject}`} user={user} onSuccess={success} onError={fail} />
         <ProfileSection key={`profile-${user.subject}`} user={user} onSuccess={success} onError={fail} /></>}
+      {tab === "apps" && <AppConnections />}
       {tab === "security" && <>
         <EmailVerificationSection user={user} onSuccess={setMessage} onError={fail} />
         <EmailChangeSection user={user} onSuccess={setMessage} onError={fail} />
