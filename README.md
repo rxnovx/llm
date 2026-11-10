@@ -167,3 +167,9 @@ npx playwright test
 ```
 
 브라우저 검증은 개발용 DB에 고유한 테스트 계정을 생성합니다. 운영 서버를 대상으로 실행하지 않습니다. 기본 주소는 `http://localhost:3000`이며 `ACCOUNTS_BASE_URL`로 바꿀 수 있습니다. 설치된 Chromium을 사용하려면 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`를 지정합니다. 검증 결과와 환경 제한은 [VALIDATION.md](VALIDATION.md)에 기록합니다.
+
+## Termux 실행 명령어
+``` bash
+LD_PRELOAD="$PREFIX/lib/libpython3.13.so${LD_PRELOAD:+:$LD_PRELOAD}" \
+python main.py
+```
