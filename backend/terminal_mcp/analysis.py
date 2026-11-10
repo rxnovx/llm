@@ -1,8 +1,6 @@
 """Bounded source discovery and per-content symbol caches. Repository text is never executed."""
-import ast
 from collections import Counter
 import hashlib
-import json
 import os
 from pathlib import Path
 import re
@@ -90,56 +88,6 @@ def secure_fd(root,path,flags,*,create_directories=False):
     finally:os.close(directory)
 
 
-def python_symbols(text):
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError,RecursionError):
-        return [],'python_ast_parse_error'
-    symbols=[]
-    for node in ast.walk(tree):
-        if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef)):
-            calls=[]
-            if not isinstance(node,ast.ClassDef):
-                for value in ast.walk(node):
-                    if isinstance(value,ast.Call):
-                        calls.append(ast.unparse(value.func)[:150])
-            symbols.append({'name':node.name,'kind':'class' if isinstance(node,ast.ClassDef) else 'function',
-                'start_line':node.lineno,'end_line':node.end_lineno,'references':sorted(set(calls))[:100],
-                'resolution':'syntax_only'})
-        elif isinstance(node,(ast.Import,ast.ImportFrom)):
-            symbols.append({'name':ast.unparse(node),'kind':'import','start_line':node.lineno,'end_line':node.end_lineno,
-                'references':[],'resolution':'syntax_only'})
-    return symbols,'python_ast'
-
-
-def js_symbols(text,suffix):
-    try:
-        from tree_sitter import Language,Parser
-        if suffix in {'.ts','.tsx'}:
-            import tree_sitter_typescript as grammar
-            language = Language(grammar.language_tsx() if suffix=='.tsx' else grammar.language_typescript())
-        else:
-            import tree_sitter_javascript as grammar
-            language = Language(grammar.language())
-        raw = text.encode()
-        root = Parser(language).parse(raw).root_node
-        found=[]
-        stack=[root]
-        while stack:
-            node=stack.pop()
-            stack.extend(reversed(node.named_children))
-            if node.type in {'function_declaration','class_declaration','method_definition','variable_declarator','import_statement'}:
-                name = node.child_by_field_name('name')
-                if node.type=='variable_declarator' and not any(c.type in {'arrow_function','function_expression'} for c in node.named_children):
-                    continue
-                label = raw[name.start_byte:name.end_byte].decode() if name else raw[node.start_byte:node.end_byte].decode()[:150]
-                found.append({'name':label,'kind':node.type,'start_line':node.start_point.row+1,'end_line':node.end_point.row+1,
-                              'references':[],'resolution':'syntax_only'})
-        return found,'tree_sitter'+('_parse_error' if root.has_error else '')
-    except ImportError:
-        return [],'parser_not_installed'
-
-
 class Analyzer:
     def __init__(self,store,settings):
         self.store,self.settings=store,settings
@@ -175,32 +123,16 @@ class Analyzer:
         return {'matches':found,'truncated':omitted,'resolution':'text_matches'}
 
     def symbols(self,workspace_id,path):
-        text=read_text(self.store.repo(workspace_id),path,self.settings)
-        # Hash the current working copy too: local edits never reuse stale symbols.
-        digest=hashlib.sha256(('parser-v1\0'+text).encode()).hexdigest()
-        with self.store.db() as db:
-            cached=db.execute('SELECT hash,symbols FROM file_index WHERE workspace=? AND path=?',(workspace_id,path)).fetchone()
-        if cached and cached['hash']==digest:
-            return json.loads(cached['symbols'])|{'cached':True}
-        suffix=Path(path).suffix
-        if suffix=='.py':
-            symbols,parser=python_symbols(text)
-        elif suffix in {'.ts','.tsx','.js','.jsx','.mjs','.cjs'}:
-            symbols,parser=js_symbols(text,suffix)
-        else:
-            symbols,parser=[],'text_only'
-        result={'path':path,'symbols':symbols[:500],'parser':parser,'truncated':len(symbols)>500,
-                'content_hash':digest,'resolution':'syntax_only; dynamic targets are not resolved'}
-        with self.store.db() as db:
-            db.execute('INSERT OR REPLACE INTO file_index VALUES(?,?,?,?)',(workspace_id,path,digest,json.dumps(result)))
-        return result|{'cached':False}
+        from .codeintel import CodeIndex
+        result=CodeIndex(self.store,self.settings).outline(workspace_id,path)
+        return {k:v for k,v in result.items() if k not in {'uses','bindings','exports'}}
 
     def read(self,workspace_id,path,start_line=1,end_line=160):
         if start_line<1 or end_line<start_line or end_line-start_line>=300:
             raise ValueError('한 번에 최대 300줄을 읽을 수 있습니다.')
-        lines=read_text(self.store.repo(workspace_id),path,self.settings).splitlines()
-        chosen=lines[start_line-1:end_line]
+        content=read_text(self.store.repo(workspace_id),path,self.settings)
+        lines=content.splitlines();chosen=lines[start_line-1:end_line]
         text='\n'.join(f'{start_line+i}: {line}' for i,line in enumerate(chosen))
-        if len(text.encode())>24000:
-            raise ValueError('선택한 코드 범위가 큽니다. 줄 범위를 줄이세요.')
-        return {'path':path,'start_line':start_line,'end_line':min(len(lines),end_line),'content':text,'total_lines':len(lines)}
+        if len(text.encode())>24000:raise ValueError('선택한 코드 범위가 큽니다. 줄 범위를 줄이세요.')
+        return {'path':path,'start_line':start_line,'end_line':min(len(lines),end_line),'content':text,'total_lines':len(lines),
+                'content_hash':hashlib.sha256(content.encode()).hexdigest()}

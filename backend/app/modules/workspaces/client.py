@@ -9,12 +9,19 @@ from app.core.config import get_settings
 from terminal_mcp.auth import issue
 
 MODEL_TOOLS={'repo_map','code_search','symbol_lookup','find_references','workspace_read_file','workspace_diff','terminal_jobs',
-             'workspace_write_file','terminal_exec','terminal_read','terminal_input','terminal_cancel'}
+             'workspace_write_file','terminal_exec','terminal_read','terminal_input','terminal_cancel',
+             'repository_index','code_definition','code_references','call_hierarchy','dependency_graph','code_context'}
 EXECUTION_TOOLS={'workspace_write_file','terminal_exec','terminal_input'}
 # The host waits for jobs and handles cancellation. Advertising polling/stdin
 # controls to the same synchronous model loop wastes context and cannot unblock
 # a command waiting for input; those controls remain available in the modal/API.
 HOST_CONTROLS={'terminal_read','terminal_jobs','terminal_input','terminal_cancel'}
+HOST_BOOTSTRAP={'repository_index','symbol_lookup','find_references'}
+
+def lean_schema(value):
+    if isinstance(value,list):return [lean_schema(v) for v in value]
+    if isinstance(value,dict):return {k:lean_schema(v) for k,v in value.items() if k not in {'title','$schema'}}
+    return value
 
 
 def enabled():
@@ -64,11 +71,11 @@ async def manifest(workspace):
         for item in result.tools:
             value=item.model_dump(by_alias=True)
             name=value['name']
-            if name not in MODEL_TOOLS or name in HOST_CONTROLS or name in EXECUTION_TOOLS and not workspace.allow_execution:continue
+            if name not in MODEL_TOOLS or name in HOST_CONTROLS|HOST_BOOTSTRAP or name in EXECUTION_TOOLS and not workspace.allow_execution:continue
             if name.startswith('terminal_') and not workspace.allow_execution:continue
             schema=dict(value.get('inputSchema') or value.get('input_schema'))
             schema['properties']={k:v for k,v in schema.get('properties',{}).items() if k!='workspace_id'}
             schema['required']=[k for k in schema.get('required',[]) if k!='workspace_id']
-            tools.append({'type':'function','function':{'name':name,'description':value.get('description',''),
-                'parameters':schema}})
+            tools.append({'type':'function','function':{'name':name,'description':value.get('description','')[:120],
+                'parameters':lean_schema(schema)}})
         return tools

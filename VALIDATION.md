@@ -154,3 +154,48 @@ URL 테스트 8개는 앱 내 이동 시 대화 ID 보존, 현재 모달을 닫�
 - 실제 Android/Termux 단말에서 설치·개발 서버·운영 빌드·화면 동작은 미검증입니다. Termux용 네이티브 Python/CSS 모듈은 단말에서 추가 확인이 필요합니다.
 
 FastAPI 테스트 실행 시 상위 Starlette의 httpx 및 HTTP 422 상수에 관한 deprecation 경고 3건이 출력됐으나 테스트 실패는 없었습니다.
+
+
+## 2026-11-10 추가 변경: 자동 판단·근거 점검·코드 관계 분석
+
+**상태: 이번 변경은 실행 미검증.** 작업 실행 환경이 unavailable 상태여서 Python/Node 실행·타입 검사·린트·빌드·브라우저 검증을 수행하지 못했습니다. 이 문서 앞부분의 성공 기록은 이전 커밋의 결과입니다. GitHub Actions는 실행하지 않았습니다.
+
+추가한 테스트 범위:
+- 수동 선택 없는 질문 → 연결된 프로젝트 조회 → 실제 Git HTTP clone·MCP 색인·출처·저장
+- 연결 누락·동명 프로젝트의 대상 확인, 서버용 토큰이 판단 메타데이터에 없는지 확인
+- 내 자료·공유 자료·현재 대화 첨부의 자동 범위와 만료·공유 해제
+- 불확실한 초안 비노출, 검색어 재작성·재검색·재생성, 없는 인용 거부·최대 시도 후 보류
+- 터미널 명령 중복 실행 방지, 실패한 재생성의 기존 답변·출처·판단 복구
+- vLLM/Ollama의 구조화 출력 요청 계약
+- Python import 별칭·상대 경로·중첩 스코프·파라미터 가림·클래스 참조
+- TS 기본 export·재수출·상대 import·파라미터 가림, 실제 MCP 도구·권한 경계
+- 내용 해시 캐시 갱신·실제 소스 문맥·파싱 오류·외부 의존성·분석 제한 표시
+- 자동 workspace 선택과 최종 routing의 SSE 전달
+
+비실행 검토에서 Python 파일의 문자열/괄호 쌍과 예시 환경 변수의 누락·중복을 확인했습니다. 이것은 Python 컴파일·타입 검사·실행 테스트를 대체하지 않습니다.
+
+재현 명령:
+
+```bash
+cd backend
+python -m pip install -r requirements-dev.txt
+python -m pytest tests/test_automatic_assistant.py tests/test_codeintel.py -q
+python -m pytest -q
+cd ../frontend
+npm ci
+npm run typecheck
+npm run lint
+npm run build
+npm run test:chat
+npm run test:session
+npm run test:api
+npm run test:env
+npm run test:apps
+npm run test:markdown
+npm run test:navigation
+npm run test:portable
+npm run test:proxy
+npm run test:browser
+```
+
+실제 연결에서는 GitLab OAuth·Terminal MCP를 준비하고 대화 도구 선택 없이 그룹/프로젝트 분석을 요청합니다. 문서를 준비한 뒤 일반 질문·사내 규정 질문·자동 검색 끄기/항상·검색 실패·공유 해제·취소를 확인합니다. 실제 모델의 JSON schema·도구 parser·근거 점검 품질과 실제 Qdrant/임베딩·Termux·Docker는 별도 검증 대상입니다.

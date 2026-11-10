@@ -38,6 +38,12 @@ export function AssistantDialog({conversationId,value,onSelect,onClose,admin}:{c
   const pending=documents.some(d=>(selection.document_ids.includes(d.id)||!!base&&selection.base_ids.includes(base))&&(d.status!=='ready'||d.needs_reindex));
   return <dialog ref={ref} className="cw-dialog cw-knowledge-dialog" aria-labelledby="assistant-dialog-title" onCancel={e=>{e.preventDefault();onClose();}}>
     <header className="cw-dialog-header"><div><span className="cw-overline">대화 도구</span><h2 id="assistant-dialog-title">자료·앱·개인 설정</h2></div><button className="cw-small-button" onClick={onClose}>닫기</button></header>
+    <section className="cw-knowledge-section" aria-label="자동 처리 설정">
+      <label className="cw-knowledge-app"><input type="checkbox" checked={selection.automatic} onChange={e=>setSelection(v=>({...v,automatic:e.target.checked}))}/><span>질문에 따라 자동으로 자료·GitLab 사용<small>연결된 내 계정과 접근 가능한 자료를 사용합니다. GitLab 자동 분석은 읽기 전용입니다.</small></span></label>
+      <label className="cw-scope-field">자동 문서 검색<select value={selection.rag_mode} disabled={!selection.automatic} onChange={e=>setSelection(v=>({...v,rag_mode:e.target.value as AssistantSelection['rag_mode']}))}>
+        <option value="auto">필요할 때 검색 · 근거 부족 시 재검색</option><option value="always">답변 전에 항상 검색</option><option value="off">자동 문서 검색 끄기</option>
+      </select></label><p className="cw-dialog-description">자료를 직접 선택하면 해당 범위를 우선 사용합니다. 자동 검색은 색인이 준비된 내 자료·공유받은 자료와 현재 대화 첨부를 대상으로 합니다. 근거 점검은 오류 가능성을 완전히 없애지는 못합니다.</p>
+    </section>
     <nav className="cw-knowledge-tabs" aria-label="설정 종류">{[['knowledge','파일·지식'],['apps','앱'],['memory','맞춤 설정'],...(admin?[['operations','운영']]:[])].map(([id,label])=><button key={id} className={tab===id?'is-active':''} onClick={()=>setTab(id)} aria-pressed={tab===id}>{label}</button>)}</nav>
     {error&&<p className="cw-inline-error" role="alert">{error}</p>}
     {tab==='knowledge'&&<section className="cw-knowledge-section">

@@ -12,7 +12,7 @@ export type ToolActivity = { name: string; step: number; status: "running"|"comp
 export type Workspace = { id: string; conversation_id: string; status: string; allow_execution: boolean; ref: string; project_id: number; source: {project?:string;commit?:string} };
 export type Conversation = { id: string; title: string; connection_id: string; model: string; created_at: number; updated_at: number; busy: boolean };
 export type ChatMessage = { id: string; role: "user" | "assistant"; content: string; status: "pending" | "complete" | "cancelled" | "error";
-  model: string; is_test: boolean; error: string | null; created_at: number; apps?: GitlabSelection[]; sources?: MessageSource[]; tools?: ToolActivity[];assistant?:AssistantSelection };
+  model: string; is_test: boolean; error: string | null; created_at: number; apps?: GitlabSelection[]; sources?: MessageSource[]; tools?: ToolActivity[];assistant?:AssistantSelection;routing?:{automatic?:boolean;automatic_project?:boolean;route?:string;status?:string;rounds?:number;grounding?:{verdict:string;issues_count:number}} };
 export type ConversationDetail = { conversation: Conversation; messages: ChatMessage[]; generation?: QueueState | null };
 export type ChatEvent =
   | { event: "start"; data: { conversation: Conversation; user_message: ChatMessage; assistant_message: ChatMessage; context?: ContextReport } }
@@ -21,6 +21,6 @@ export type ChatEvent =
   | { event: "tool"; data: { app: "gitlab"; status: "reading"; detail: string } }
   | { event: "sources"; data: { sources: MessageSource[] } }
   | { event: "activity"; data: ToolActivity }
-  | { event: "workspace"; data: Workspace }
+  | { event: "workspace"; data: Workspace & {selection?:GitlabSelection;automatic?:boolean} }
   | { event: "delta"; data: { content: string } }
   | { event: "done" | "error" | "cancelled"; data: { conversation: Conversation; message: ChatMessage; detail?: string | null } };

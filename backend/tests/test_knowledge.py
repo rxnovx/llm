@@ -93,7 +93,7 @@ def test_rag_also_works_with_non_tool_model_and_enforces_input_budget(client,acc
     async def stream(connection,model,history,settings):
         payloads.append(history);yield '연차는 15일입니다. [KS1]'
     monkeypatch.setattr(chat_providers,'stream_reply',stream)
-    response=send(client,headers,conversation,content='연차 규정?',connection_id='plain',model='plain',assistant={'base_ids':[kb]})
+    response=send(client,headers,conversation,content='연차 규정?',connection_id='plain',model='plain',assistant={'base_ids':[kb],'automatic':False})
     assert events(response)[-1][0]=='done',response.text[-1500:]
     assert '15일' in payloads[0][-1]['content'] and 'Retrieved evidence' in payloads[0][-1]['content']
 

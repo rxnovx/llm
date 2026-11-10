@@ -160,3 +160,10 @@ Python은 표준 AST로 함수·클래스·import·문법상 호출 표현을 �
 `requirements-dev.txt`를 설치한 뒤 전체 `pytest`를 실행합니다. `tests/test_terminal.py`는 공식 SDK의 MCP HTTP/stdio, 소유권·경로·암호화 자격·검색·심볼 캐시·명령 stdout/stdin·시간 초과·취소·출력 제한을 검증합니다. `tests/test_workspace_flow.py`는 실제 Git HTTP backend, MCP HTTP 서버와 내부 broker HTTP를 띄워 clone → 분석 → 출처 → 실행 → 중지 → 연결 해제 흐름을 확인합니다. GitLab 계정 API와 모델 추론 응답은 로컬 대역을 사용합니다. Docker/Termux/실제 모델 및 브라우저 화면 검증 여부는 [VALIDATION.md](VALIDATION.md)를 확인하세요.
 
 공식 문서: [MCP Python SDK](https://py.sdk.modelcontextprotocol.io/), [GitLab OAuth](https://docs.gitlab.com/api/oauth2/), [vLLM 도구 호출](https://docs.vllm.ai/en/latest/features/tool_calling/), [Ollama 도구 호출](https://docs.ollama.com/capabilities/tool-calling), [Tree-sitter](https://tree-sitter.github.io/tree-sitter/).
+
+
+## 정적 코드 관계 분석
+
+repository_index·code_definition·code_references·call_hierarchy·dependency_graph·code_context를 추가했습니다. Python AST 및 JS/TS Tree-sitter의 스코프·import 바인딩으로 관계 후보를 찾고 실제 소스 구간을 반환합니다. 동적 호출·외부 모듈·지원하지 않는 바인딩은 미해석으로 남깁니다. 정의 id는 파일·줄·한정 이름이며 내용 해시는 편집 시 캐시 무효화에 사용합니다.
+
+자동 GitLab 분석은 기존 사용자·대화별 워크스페이스와 일회용 브로커를 사용하며 실행 권한을 요청하거나 승격하지 않습니다. 도구·범위 제한·질문 기반 연결 방법은 [AUTOMATIC_ASSISTANT.md](AUTOMATIC_ASSISTANT.md)를 참고하세요. 이번 추가 도구의 실행 검증은 아직 수행하지 못했습니다.

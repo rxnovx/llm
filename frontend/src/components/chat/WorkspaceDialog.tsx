@@ -15,6 +15,8 @@ export function WorkspaceDialog({conversationId,onClose}:{conversationId:string;
   const [items,setItems]=useState<Workspace[]>([]),[selected,setSelected]=useState("");
   const [error,setError]=useState(""),[busy,setBusy]=useState(false),[result,setResult]=useState("");
   const [query,setQuery]=useState(""),[path,setPath]=useState(""),[command,setCommand]=useState("");
+  const [definitions,setDefinitions]=useState<{id:string;name:string;path:string;start_line:number}[]>([]),[symbol,setSymbol]=useState('');
+  const [depth,setDepth]=useState(1);
   const [jobs,setJobs]=useState<Job[]>([]),[job,setJob]=useState<string|null>(null),[output,setOutput]=useState("");
   const [jobState,setJobState]=useState(""),[refresh,setRefresh]=useState(0);
   const workspace=items.find((item)=>item.id===selected);
@@ -53,19 +55,31 @@ export function WorkspaceDialog({conversationId,onClose}:{conversationId:string;
   };
   return <dialog ref={dialog} className="cw-dialog cw-workspace-dialog" aria-labelledby="workspace-title" onCancel={e=>{e.preventDefault();onClose();}}>
     <header className="cw-dialog-header"><div><span className="cw-overline">현재 대화</span><h2 id="workspace-title">프로젝트 작업공간</h2></div><button type="button" className="cw-icon-button" aria-label="작업공간 닫기" onClick={onClose}><Icon name="close"/></button></header>
-    <p className="cw-dialog-description">@GitLab에서 프로젝트 자동 분석을 선택하고 질문을 보내면 작업공간이 만들어집니다. 같은 작업공간의 소스와 수정 사항을 이어서 사용할 수 있습니다.</p>
+    <p className="cw-dialog-description">GitLab 계정을 연결한 뒤 그룹/프로젝트 분석을 요청하면 자동으로 작업공간을 만듭니다. @GitLab에서 직접 선택할 수도 있습니다. 같은 작업공간의 소스와 수정 사항을 이어서 사용할 수 있습니다.</p>
     {error&&<p role="alert" className="cw-inline-error">{error}</p>}
     {!items.length&&<p className="cw-dialog-description">이 대화에 연결된 작업공간이 없습니다.</p>}
-    {!!items.length&&<label className="cw-scope-field">작업공간<select value={selected} onChange={e=>{setSelected(e.target.value);setResult("");setJob(null);setOutput("");setError("");}}>
+    {!!items.length&&<label className="cw-scope-field">작업공간<select value={selected} onChange={e=>{setSelected(e.target.value);setResult("");setDefinitions([]);setSymbol("");setJob(null);setOutput("");setError("");}}>
       {items.map(item=><option key={item.id} value={item.id}>{item.source.project??item.id} · {item.ref} · {item.status}</option>)}</select></label>}
     {workspace?.status==='ready'&&<><p className="cw-workspace-meta">{workspace.source.commit?.slice(0,12)} · {workspace.allow_execution?'분석·실행':'분석 전용'}</p>
       <div className="cw-workspace-actions"><button type="button" disabled={busy} className="cw-small-button" onClick={()=>void tool('repo_map')}>저장소 지도</button>
+        <button type="button" disabled={busy} className="cw-small-button" onClick={()=>void tool('repository_index')}>분석 색인</button>
         <button type="button" disabled={busy} className="cw-small-button" onClick={()=>void tool('workspace_diff')}>변경 내용</button></div>
       <div className="cw-workspace-fields"><label className="cw-scope-field">코드 검색<input value={query} maxLength={200} onChange={e=>setQuery(e.target.value)} placeholder="함수명 또는 검색어"/></label>
         <button type="button" disabled={busy||!query.trim()} className="cw-small-button" onClick={()=>void tool('code_search',{query})}>검색</button></div>
       <div className="cw-workspace-fields"><label className="cw-scope-field">파일 경로<input value={path} maxLength={600} onChange={e=>setPath(e.target.value)} placeholder="예: backend/app/main.py"/></label>
         <button type="button" disabled={busy||!path} className="cw-small-button" onClick={()=>void tool('workspace_read_file',{path})}>코드 읽기</button>
         <button type="button" disabled={busy||!path} className="cw-small-button" onClick={()=>void tool('symbol_lookup',{path})}>함수·클래스</button></div>
+      <div className="cw-workspace-actions"><button type="button" disabled={busy||!query.trim()} className="cw-small-button" onClick={()=>void tool('code_definition',{name:query,...(path?{path}:{})}).then(value=>{
+        const values=Array.isArray(value?.definitions)?value.definitions.filter((v):v is {id:string;name:string;path:string;start_line:number}=>!!v&&typeof v==='object'&&typeof v.id==='string'&&typeof v.name==='string'&&typeof v.path==='string'&&typeof v.start_line==='number'):[];
+        setDefinitions(values);setSymbol(values[0]?.id??'');
+      })}>정의 찾기</button><button type="button" disabled={busy||!query.trim()} className="cw-small-button" onClick={()=>void tool('code_context',{query})}>관련 코드</button>
+      <button type="button" disabled={busy} className="cw-small-button" onClick={()=>void tool('dependency_graph',{path,direction:'imports',depth})}>import 관계</button><button type="button" disabled={busy||!path} className="cw-small-button" onClick={()=>void tool('dependency_graph',{path,direction:'dependents',depth})}>이 파일을 참조하는 곳</button></div>
+      {!!definitions.length&&<><label className="cw-scope-field">분석할 정의<select value={symbol} onChange={e=>setSymbol(e.target.value)}>{definitions.map(d=><option key={d.id} value={d.id}>{d.name} · {d.path}:{d.start_line}</option>)}</select></label>
+      <div className="cw-workspace-actions"><button type="button" disabled={busy||!symbol} className="cw-small-button" onClick={()=>void tool('code_references',{symbol_id:symbol})}>참조</button>
+      <button type="button" disabled={busy||!symbol} className="cw-small-button" onClick={()=>void tool('call_hierarchy',{symbol_id:symbol,direction:'callers',depth})}>이 정의를 호출하는 곳</button>
+      <button type="button" disabled={busy||!symbol} className="cw-small-button" onClick={()=>void tool('call_hierarchy',{symbol_id:symbol,direction:'callees',depth})}>이 정의가 호출하는 곳</button></div></>}
+      <label className="cw-scope-field">관계 탐색 깊이<select value={depth} onChange={e=>setDepth(Number(e.target.value))}>{[1,2,3].map(n=><option key={n} value={n}>{n}단계</option>)}</select></label>
+      <p className="cw-dialog-description">Python·JavaScript·TypeScript의 정적 관계를 확인합니다. 동적 호출, 외부 모듈, 해석하지 못한 대상과 범위 제한은 결과에 표시됩니다.</p>
       {result&&<pre className="cw-workspace-output" tabIndex={0} aria-label="도구 조회 결과">{result}</pre>}
       {workspace.allow_execution&&<form className="cw-terminal-command" onSubmit={e=>{e.preventDefault();void tool('terminal_exec',{argv:['sh','-lc',command],timeout_seconds:120}).then(value=>{if(value?.job_id){setJob(String(value.job_id));setOutput("");setJobState('running');setRefresh(r=>r+1);}});}}>
         <label className="cw-scope-field">터미널 명령<input value={command} maxLength={4000} onChange={e=>setCommand(e.target.value)} placeholder="예: cd backend && python -m pytest -q"/></label>

@@ -1,5 +1,7 @@
 import json
 from uuid import UUID
+from typing import Literal
+from app.core.config import get_settings
 from fastapi import HTTPException
 from pydantic import BaseModel,ConfigDict,Field,field_validator
 from sqlalchemy import select
@@ -13,6 +15,8 @@ class Selection(BaseModel):
     document_ids: list[UUID]=Field(default_factory=list,max_length=10)
     mcp_ids: list[str]=Field(default_factory=list,max_length=5)
     allow_writes: bool=False
+    automatic: bool=True
+    rag_mode: Literal['auto','always','off']='auto'
 
     @field_validator('mcp_ids')
     @classmethod
@@ -39,6 +43,12 @@ def personal(db,user_id):
     # Keep memory overhead bounded; the full list remains visible in settings.
     return '\n\n'.join(parts).encode()[:6000].decode(errors='ignore')
 
-def active(db,user_id,selection):
+def active(db,user_id,selection,*,question='',conversation_id='',connection=None):
     row=db.get(Preference,user_id)
-    return bool(selection.get('base_ids') or selection.get('document_ids') or selection.get('mcp_ids') or row and (row.instructions or row.memory_enabled))
+    if selection.get('base_ids') or selection.get('document_ids') or selection.get('mcp_ids') or row and (row.instructions or row.memory_enabled):
+        return True
+    if not get_settings().assistant_automatic_enabled or not selection.get('automatic',True):return False
+    from .routing import connection_catalog,project_hint
+    if project_hint(question) or selection.get('rag_mode')=='always':return True
+    if selection.get('rag_mode','auto')!='off' and knowledge.automatic_available(db,user_id,conversation_id):return True
+    return bool(connection and connection.provider!='test' and connection_catalog(db,user_id))

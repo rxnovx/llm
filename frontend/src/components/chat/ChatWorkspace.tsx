@@ -132,7 +132,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         setActive(detail.conversation); setMessages(detail.messages);
         const previousApp=detail.messages.at(-1)?.apps?.[0];
         setAssistantSelection({...emptySelection(),...detail.messages.at(-1)?.assistant});
-        if(previousApp?.mode==='workspace'||previousApp?.mode==='execute')setAppSelections([previousApp]);
+        setAppSelections(!detail.messages.at(-1)?.routing?.automatic_project&&(previousApp?.mode==='workspace'||previousApp?.mode==='execute')?[previousApp]:[]);
         setQueue(detail.generation ?? null);
         generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
         setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
@@ -240,7 +240,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
       const previousApp=detail.messages.at(-1)?.apps?.[0];
       setAssistantSelection({...emptySelection(),...detail.messages.at(-1)?.assistant});
-      setAppSelections(previousApp?.mode==='workspace'||previousApp?.mode==='execute'?[previousApp]:[]);setMention(null);setToolStatus("");
+      setAppSelections(!detail.messages.at(-1)?.routing?.automatic_project&&(previousApp?.mode==='workspace'||previousApp?.mode==='execute')?[previousApp]:[]);setMention(null);setToolStatus("");
       replaceConversationLocation(item.id);
     } catch (caught) { if (!abort.signal.aborted) setError(errorText(caught)); }
     finally { if (!abort.signal.aborted) setLoading(false); }
@@ -295,8 +295,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           setToolStatus(event.data.status==='running'?event.data.detail:'');
           setMessages(old=>old.map(item=>item.id===assistantId?{...item,tools:[...(item.tools??[]),event.data].slice(-150)}:item));
         } else if(event.event==='workspace') {
-          setMessages(old=>old.map(item=>item.id===assistantId?{...item,apps:item.apps?.map(selection=>({...selection,workspace_id:event.data.id}))}:item));
-          if(!retry)setAppSelections(old=>old.map(selection=>selection.connection_id===usedApps[0]?.connection_id&&selection.project_id===event.data.project_id?{...selection,workspace_id:event.data.id}:selection));
+          setMessages(old=>old.map(item=>item.id===assistantId?{...item,apps:event.data.selection?[event.data.selection]:item.apps?.map(selection=>({...selection,workspace_id:event.data.id}))}:item));
+          if(!retry&&!event.data.automatic)setAppSelections(old=>old.map(selection=>selection.connection_id===usedApps[0]?.connection_id&&selection.project_id===event.data.project_id?{...selection,workspace_id:event.data.id}:selection));
         } else {
           setQueue(null);
           setMessages((old) => old.map((item) => item.id === event.data.message.id ? event.data.message : item));
@@ -445,6 +445,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
             {message.role === "user" ? <div className="cw-human-text">{message.content}</div> : <>
               {!!message.apps?.length && <p className="cw-message-app">GitLab · {message.apps[0].mode==='execute'?'프로젝트 분석·실행':message.apps[0].mode==='workspace'?'프로젝트 자동 분석':message.apps[0].paths.join(", ")}
                 {message.apps[0].workspace_id&&<button type="button" className="cw-text-button" onClick={()=>setWorkspaceOpen(true)}>작업공간 열기</button>}</p>}
+              {(message.routing?.automatic||message.routing?.status==='unverified')&&<p className="cw-message-app">{message.routing.status==='unverified'?'근거 확인 보류':message.routing.route==='knowledge'?'자동 문서 검색':message.routing.route==='gitlab'?'자동 소스 분석':message.routing.route==='both'?'소스·문서 함께 확인':'질문 자동 처리'}</p>}
               {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {tool.name} · {tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}
               {message.content ? <MessageContent content={message.content} /> : message.status === "pending" ? toolStatus ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
               <MessageSources sources={message.sources ?? []} />

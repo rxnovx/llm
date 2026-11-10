@@ -205,6 +205,8 @@ async def tool_reply(connection,model,history,tools,settings):
         names={t['function']['name'] for t in tools}
         if 'repo_map' not in names:
             return {'role':'assistant','content':'테스트 모드에서 선택한 자료와 앱 연결 흐름을 확인했습니다. '+('[KS1]' if any('[KS1]' in m.get('content','') for m in history) else '')+'\n\n실제 모델이 작성한 분석은 아닙니다. 실제 연결을 선택하면 자료 검색과 도구 호출을 사용해 답변합니다.','tool_calls':[]}
+        if any('[GL1]' in m.get('content','') for m in history):
+            return {'role':'assistant','content':'테스트 모드에서 저장소 색인과 실제 소스 구간 조회를 완료했습니다. [GL1]\n\n실제 모델의 코드 분석 답변은 아닙니다. 실제 모델 연결로 분석 품질을 확인하세요.','tool_calls':[]}
         results=[item for item in history if item['role']=='tool']
         if not results:
             return {'role':'assistant','content':'','tool_calls':[{'id':'demo-map','type':'function','function':{'name':'repo_map','arguments':{'limit':20}}}]}
@@ -252,3 +254,32 @@ async def tool_reply(connection,model,history,tools,settings):
     except ProviderError:raise
     except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError):
         raise ProviderError('모델 도구 응답을 처리하지 못했습니다. 도구 호출을 지원하는 모델과 parser 설정을 확인하세요.') from None
+
+async def structured_reply(connection,model,messages,schema,settings):
+    """Bounded JSON decision; never executes tools or accepts a server URL from the model."""
+    profile=connection.profile(model)
+    vllm=connection.provider=='vllm'
+    payload={'model':model,'messages':messages,'stream':False}
+    if vllm:
+        payload.update(max_tokens=min(1024,profile.max_output_tokens),temperature=0,
+            response_format={'type':'json_schema','json_schema':{'name':'assistant_decision','schema':schema,'strict':True}})
+    else:
+        payload.update(format=schema,options={'temperature':0,'num_predict':min(1024,profile.max_output_tokens),'num_ctx':profile.context_window})
+    try:
+        async with client(connection,settings.llm_timeout_seconds) as session:
+            async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=payload) as response:
+                if not response.is_success:raise ProviderError('자동 판단 요청이 거절되었습니다. 모델 서버의 구조화 출력 지원을 확인하세요.')
+                raw=bytearray()
+                async for part in response.aiter_bytes():
+                    raw.extend(part)
+                    if len(raw)>65536:raise ProviderError('자동 판단 응답이 너무 큽니다.')
+        value=json.loads(raw)
+        message=value['choices'][0]['message'] if vllm else value['message']
+        content=message.get('content','')
+        if not isinstance(content,str):raise ValueError()
+        result=json.loads(content)
+        if not isinstance(result,dict):raise ValueError()
+        return result
+    except ProviderError:raise
+    except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError,AttributeError):
+        raise ProviderError('자동 판단 응답을 처리하지 못했습니다. 구조화 출력 설정을 확인하세요.') from None

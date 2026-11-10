@@ -1,6 +1,6 @@
 import { authenticatedFetch } from './authenticated-fetch';
-export type AssistantSelection={base_ids:string[];document_ids:string[];mcp_ids:string[];allow_writes:boolean};
-export const emptySelection=():AssistantSelection=>({base_ids:[],document_ids:[],mcp_ids:[],allow_writes:false});
+export type AssistantSelection={base_ids:string[];document_ids:string[];mcp_ids:string[];allow_writes:boolean;automatic:boolean;rag_mode:'auto'|'always'|'off'};
+export const emptySelection=():AssistantSelection=>({base_ids:[],document_ids:[],mcp_ids:[],allow_writes:false,automatic:true,rag_mode:'auto'});
 export type KnowledgeSource={id:string;app:'knowledge';document_id:string;chunk_id:string;filename:string;location:string;sha256:string;revision:number};
 export type KnowledgeBase={id:string;name:string;owned:boolean};
 export type KnowledgeDocument={id:string;base_id:string|null;conversation_id:string|null;filename:string;status:string;error:string|null;chunk_count:number;search_mode:string;needs_reindex:boolean};

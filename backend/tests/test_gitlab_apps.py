@@ -45,8 +45,8 @@ def gitlab(client,monkeypatch):
             return {'id':42,'username':'alice-gl','name':'Alice GitLab'}
         if path=='/api/v4/projects':
             return [{'id':7,'path_with_namespace':'team/service','default_branch':'main'}]
-        if path=='/api/v4/projects/7':
-            return {'id':7,'path_with_namespace':'team/service','web_url':'https://untrusted.example/ignored'}
+        if path in {'/api/v4/projects/7','/api/v4/projects/team%2Fservice'}:
+            return {'id':7,'path_with_namespace':'team/service','default_branch':'main','web_url':'https://untrusted.example/ignored'}
         if '/repository/commits/' in path:
             return {'id':SHA}
         if path.endswith('/branches'):

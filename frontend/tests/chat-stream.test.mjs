@@ -90,3 +90,15 @@ test('knowledge sources preserve document version and location without an extern
   const stream=new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(`event: sources\ndata: ${JSON.stringify({sources:[source]})}\n\nevent: done\ndata: {}\n\n`));controller.close();}});
   await readChatStream(stream,event=>events.push(event));assert.deepEqual(events[0].data.sources,[source]);
 });
+
+test('automatic workspace selection and final routing survive split SSE data',async()=>{
+  const selection={app:'gitlab',connection_id:'account',project_id:7,ref:'main',paths:[],mode:'workspace',workspace_id:'workspace'};
+  const value='event: workspace\ndata: '+JSON.stringify({id:'workspace',status:'ready',automatic:true,selection})+'\n\n'
+    +'event: activity\ndata: '+JSON.stringify({name:'evidence_review',status:'running',detail:'근거 점검',step:0})+'\n\n'
+    +'event: done\ndata: '+JSON.stringify({message:{routing:{automatic:true,automatic_project:true,route:'gitlab',status:'complete'}}})+'\n\n';
+  const received=[];
+  await readChatStream(stream(encoder.encode(value),1),event=>received.push(event));
+  assert.deepEqual(received[0].data.selection,selection);
+  assert.equal(received[0].data.automatic,true);
+  assert.equal(received.at(-1).data.message.routing.automatic_project,true);
+});

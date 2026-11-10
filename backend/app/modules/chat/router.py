@@ -74,6 +74,7 @@ def message_data(item: Message):
     return {key: getattr(item, key) for key in ('id', 'role', 'content', 'status', 'model', 'is_test', 'error', 'created_at')} | {
         'apps':json.loads(record.apps_json) if record else [], 'sources':json.loads(record.sources_json) if record else [],
         'assistant':json.loads(item.assistant_context.data_json) if item.assistant_context else {},
+        'routing':json.loads(item.decision_record.data_json) if item.decision_record else {},
         'tools':[{'name':trace.name,'step':trace.step,'status':trace.status,'detail':trace.detail} for trace in item.tool_traces[-80:]]}
 
 
@@ -304,6 +305,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         assistant.source_record = MessageContext(apps_json=json.dumps(apps),sources_json='[]')
     else:
         assistant.source_record.apps_json,assistant.source_record.sources_json = json.dumps(apps),'[]'
+    if assistant.decision_record:assistant.decision_record.data_json='{}'
     options=data.assistant.model_dump(mode='json') if data.assistant is not None else (
         json.loads(assistant.assistant_context.data_json) if data.retry and assistant.assistant_context else {})
     assistant_context.validate(db,user_id,item.id,options,connection,model)
@@ -407,7 +409,7 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                 apps = turn.start['assistant_message']['apps']
                 workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute'})
                 options=turn.start['assistant_message']['assistant']
-                with Session(bind) as session:general_mode=assistant_context.active(session,user_id,options)
+                with Session(bind) as session:general_mode=assistant_context.active(session,user_id,options,question=data.content.strip(),conversation_id=turn.conversation_id,connection=admitted)
                 async with asyncio.timeout(settings.terminal_agent_timeout_seconds if workspace_mode or general_mode else settings.llm_timeout_seconds):
                     if workspace_mode or general_mode:
                         workspace_selection=GitlabSelection.model_validate(apps[0]) if workspace_mode else None
@@ -419,6 +421,8 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                                     if len(text)>200000:raise providers.ProviderError('분석 답변 길이 제한을 초과했습니다.')
                                     if first_token_ms is None:first_token_ms=max(0,int((time.monotonic()-turn.started_clock)*1000))
                                 elif kind=='sources':sources=payload['sources']
+                                elif kind=='workspace' and payload.get('selection'):
+                                    workspace_selection=GitlabSelection.model_validate(payload['selection'])
                                 yield event(kind,payload)
                     elif apps:
                         yield event('tool', {'app':'gitlab','status':'reading','detail':'선택한 GitLab 파일을 읽고 있습니다.'})
@@ -484,6 +488,10 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                             updated=json.loads(message.source_record.apps_json)
                             updated[0]['workspace_id']=str(workspace_selection.workspace_id)
                             message.source_record.apps_json=json.dumps(updated)
+                    if message.decision_record:
+                        routing_data=json.loads(message.decision_record.data_json)
+                        if status!='complete':routing_data['status']=status
+                        message.decision_record.data_json=json.dumps(routing_data,ensure_ascii=False)
                     # A failed/cancelled regeneration must not destroy a good answer.
                     if status != 'complete' and turn.previous_message:
                         previous = turn.previous_message
@@ -493,6 +501,7 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                             message.source_record.apps_json = json.dumps(previous['apps'])
                             message.source_record.sources_json = json.dumps(previous['sources'],ensure_ascii=False)
                         if message.assistant_context:message.assistant_context.data_json=json.dumps(previous.get('assistant',{}))
+                        if message.decision_record:message.decision_record.data_json=json.dumps(previous.get('routing',{}),ensure_ascii=False)
                         item.connection_id, item.model = turn.previous_connection, previous['model']
                     item.generation_id, item.generation_until, item.cancel_requested = None, 0, False
                     item.updated_at = int(time.time())

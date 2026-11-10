@@ -27,3 +27,8 @@ class Memory(Base):
     user_id: Mapped[str]=mapped_column(ForeignKey('users.id',ondelete='CASCADE'),index=True)
     content: Mapped[str]=mapped_column(String(600))
     created_at: Mapped[int]=mapped_column(Integer,default=now)
+
+class TurnDecision(Base):
+    __tablename__='assistant_turn_decisions'
+    message_id: Mapped[str]=mapped_column(ForeignKey('chat_messages.id',ondelete='CASCADE'),primary_key=True)
+    data_json: Mapped[str]=mapped_column(Text,default='{}')

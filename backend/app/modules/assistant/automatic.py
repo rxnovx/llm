@@ -1,0 +1,153 @@
+"""Route -> authorized tools -> draft review -> bounded retrieval/regeneration."""
+import asyncio
+from contextlib import aclosing
+import json
+import re
+import time
+
+from fastapi import HTTPException
+from sqlalchemy.orm import Session
+
+from app.modules.chat import providers,scheduler
+from app.modules.chat.models import Message
+from app.modules.workspaces.models import ToolTrace
+from . import engine,routing
+from .models import TurnDecision
+
+ABSTAIN='현재 확인 가능한 근거로는 질문의 사실 관계를 충분히 검증하지 못했습니다. 확실하지 않은 내용을 단정하지 않겠습니다. 관련 자료를 추가하거나 질문 범위를 좁혀 주세요.'
+
+
+async def stream(bind,user_id,turn,selection,connection,settings,cancelled,options=None):
+    options=dict(options or {})
+    deadline=int(time.time())+settings.terminal_agent_timeout_seconds+15
+    model=turn.start['conversation']['model'];question=turn.history[-1]['content']
+    enabled=settings.assistant_automatic_enabled and options.get('automatic',True)
+    manual_knowledge=bool(options.get('base_ids') or options.get('document_ids'))
+    explicit=bool(selection or manual_knowledge or options.get('mcp_ids') or turn.start['assistant_message']['apps'])
+    decision={'automatic':enabled and not explicit}
+    if selection and (turn.previous_message or {}).get('routing',{}).get('automatic_project'):decision['automatic_project']=True
+
+    def record(name,status,detail):
+        detail=detail.encode()[:2200].decode(errors='ignore')
+        with Session(bind) as db:
+            db.add(ToolTrace(message_id=turn.assistant_id,step=0,name=name,status=status,detail=detail));db.commit()
+        return {'name':name,'step':0,'status':status,'detail':detail}
+
+    def save():
+        with Session(bind) as db:
+            row=db.get(TurnDecision,turn.assistant_id)
+            if not row:row=TurnDecision(message_id=turn.assistant_id);db.add(row)
+            row.data_json=json.dumps(decision,ensure_ascii=False);db.commit()
+
+    async def release():
+        with Session(bind) as db:scheduler.release_for_tools(db,turn.request_id,deadline);db.commit()
+
+    async def acquire():
+        nonlocal connection
+        with Session(bind) as db:scheduler.requeue(db,turn.request_id,settings);db.commit()
+        while True:
+            if cancelled():raise engine.AnalysisCancelled()
+            with Session(bind,expire_on_commit=False) as db:
+                state,_,current=scheduler.poll(db,turn.request_id,settings,providers.resolve);db.commit()
+            if state=='running':connection=current;return
+            if state!='queued':raise HTTPException(409,'자동 처리의 모델 대기가 중단되었습니다.')
+            await asyncio.sleep(.25)
+
+    await release()
+    available=routing.resources(bind,user_id,turn.conversation_id,options)
+    plan=routing.Plan(route='gitlab' if selection else 'direct',needs_review=bool(manual_knowledge or selection and selection.mode=='workspace'))
+    if enabled and not explicit:
+        yield 'activity',record('route_decision','running','질문에 필요한 앱과 문서 검색을 판단하고 있습니다.')
+        await acquire()
+        try:
+            async with asyncio.timeout(settings.llm_timeout_seconds):plan=await routing.decide(connection,model,question,available,settings)
+        finally:await release()
+        hint=routing.project_hint(question)
+        if hint and plan.route in {'gitlab','both'} and not plan.project:plan.project=hint
+        if hint and plan.route=='direct':plan.needs_review=True
+        if plan.uncertain and available['retrieval_allowed'] and available['knowledge_ready'] and plan.route=='direct':plan.route='knowledge'
+        decision.update(route=plan.route,uncertain=plan.uncertain,status='running');save()
+        label={'direct':'일반 답변','knowledge':'문서 검색','gitlab':'GitLab 소스 분석','both':'GitLab 분석과 문서 검색','clarify':'대상 확인'}[plan.route]
+        yield 'activity',record('route_decision','complete',label+' 경로를 선택했습니다.')
+        if plan.route=='clarify':
+            decision['status']='clarification';save()
+            yield 'delta',{'content':plan.clarification or '분석할 프로젝트나 필요한 자료 범위를 알려 주세요.'}
+            return
+        if plan.route in {'gitlab','both'}:
+            if connection.provider!='test' and not connection.profile(model).supports_tools:
+                raise HTTPException(422,'자동 소스 분석에는 도구 호출을 지원하도록 설정된 모델이 필요합니다.')
+            yield 'activity',record('gitlab_resolve','running','연결된 내 계정에서 프로젝트 경로와 접근 권한을 확인하고 있습니다.')
+            selection=await routing.resolve_project(bind,user_id,plan,available['gitlab_connections'])
+            decision['automatic_project']=True
+            turn.start['assistant_message']['apps']=[selection.model_dump(mode='json')]
+            with Session(bind) as db:
+                message=db.get(Message,turn.assistant_id)
+                message.source_record.apps_json=json.dumps(turn.start['assistant_message']['apps']);db.commit()
+            yield 'activity',record('gitlab_resolve','complete','프로젝트를 확인했습니다. 읽기 전용 작업공간을 준비합니다.')
+
+    auto_knowledge=enabled and available['retrieval_allowed'] and available['knowledge_ready']
+    if auto_knowledge and not manual_knowledge and (plan.route in {'knowledge','both'} or options.get('rag_mode')=='always'):
+        options['_auto_scope']=True
+    if plan.route in {'knowledge','both'} and not manual_knowledge and not auto_knowledge:
+        decision['retrieval_notice']='자동 검색이 꺼져 있거나 검색할 준비된 자료가 없습니다. 자료의 업로드·색인 상태를 확인하세요.'
+        yield 'activity',record('knowledge_scope','complete',decision['retrieval_notice'])
+    options['_query']=plan.query or question
+    decision.setdefault('route',plan.route);decision['status']='running';save()
+    hold=enabled and bool(plan.needs_review or plan.uncertain or manual_knowledge or auto_knowledge or selection and selection.mode=='workspace')
+    # Never replay execution or external writes merely because an answer needs more evidence.
+    replay_safe=not options.get('allow_writes') and not (selection and selection.mode=='execute')
+    attempts=settings.assistant_max_retrieval_rounds if enabled and replay_safe else 1
+
+    for attempt in range(attempts):
+        if cancelled():raise engine.AnalysisCancelled()
+        decision['rounds']=attempt+1
+        text='';sources=[]
+        async with aclosing(engine.stream(bind,user_id,turn,selection,connection,settings,cancelled,options=options)) as iterator:
+            async for kind,payload in iterator:
+                if kind=='delta':
+                    text+=payload['content']
+                    if len(text)>200000:raise providers.ProviderError('자동 답변 길이 제한을 초과했습니다.')
+                    if not hold:yield kind,payload
+                else:
+                    if kind=='sources':sources=payload['sources']
+                    if kind=='workspace':
+                        payload=dict(payload,selection=selection.model_dump(mode='json'),automatic=bool(decision.get('automatic_project')))
+                    yield kind,payload
+        missing=routing.invalid_citations(text,sources)
+        uncertain=bool(re.search(r'잘 모르|알 수 없|확인할 수 없|확실하지|추측|모르겠습니다|not sure|do not know|cannot verify',text,re.I))
+        review=routing.Review(verdict='supported')
+        wants_review=hold and settings.assistant_grounding_review and bool(plan.needs_review or plan.uncertain or uncertain or sources or auto_knowledge and not explicit)
+        if wants_review:
+            yield 'activity',record('evidence_review','running','초안의 사실 주장과 실제 조회한 근거를 점검하고 있습니다.')
+            snippets=await routing.evidence(bind,user_id,turn.conversation_id,selection,sources,text)
+            await acquire()
+            try:
+                async with asyncio.timeout(settings.llm_timeout_seconds):review=await routing.assess(connection,model,question,text,snippets,settings)
+            finally:await release()
+        # A revoked source must not be carried into a new model request as retry feedback.
+        await routing.verify(bind,user_id,turn.conversation_id,selection,sources)
+        if hold and (missing or selection and selection.mode=='workspace' and not any(s.get('app')=='gitlab' for s in sources)
+                or plan.route in {'knowledge','both'} and not sources):
+            review=routing.Review(verdict='needs_search',query=review.query or plan.query or question[:400],unsupported_claims=['조회되지 않은 출처 또는 요청한 자료의 실제 근거 누락'])
+        if hold:
+            decision['grounding']={'verdict':review.verdict,'issues_count':len(review.unsupported_claims)}
+            if wants_review:
+                label={'supported':'근거 점검을 마쳤습니다.','needs_search':'추가 근거가 필요합니다.','insufficient':'현재 근거로는 사실 관계를 확인하기 어렵습니다.'}[review.verdict]
+                yield 'activity',record('evidence_review','complete',label)
+        if review.verdict=='supported':
+            await routing.verify(bind,user_id,turn.conversation_id,selection,sources)
+            decision['status']='complete';save()
+            if hold:
+                for start in range(0,len(text),120):yield 'delta',{'content':text[start:start+120]}
+            return
+        if attempt+1<attempts and (manual_knowledge or auto_knowledge):
+            if not manual_knowledge:options['_auto_scope']=True
+            decision.setdefault('initial_route',decision['route']);decision['route']='both' if selection else 'knowledge'
+            options['_query']=review.query or plan.query or question[:400]
+            options['_review_feedback']={'query':options['_query'],'unsupported_claims':review.unsupported_claims[:5]}
+            yield 'activity',record('knowledge_retry','running','불확실한 초안은 보류하고 관련 문서를 찾아 다시 작성합니다.')
+            continue
+        await routing.verify(bind,user_id,turn.conversation_id,selection,sources)
+        decision['status']='unverified';save()
+        yield 'delta',{'content':ABSTAIN+('\n\n'+decision['retrieval_notice'] if decision.get('retrieval_notice') else '')}
+        return

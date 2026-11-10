@@ -120,6 +120,7 @@ async def worker(bind,stop):
         except TimeoutError:pass
 
 def selected_documents(db,user_id,selection,conversation_id):
+    if selection.get('_auto_scope'):return automatic_documents(db,user_id,conversation_id)
     bases=list(dict.fromkeys(selection.get('base_ids',[])))
     ids=list(dict.fromkeys(selection.get('document_ids',[])))
     if len(bases)>5 or len(ids)>10:raise HTTPException(422,'지식베이스 5개, 첨부 10개까지 선택할 수 있습니다.')
@@ -189,3 +190,35 @@ async def search(bind,user_id,selection,conversation_id,query,limit=8):
         current={d.id:(d.revision,d.sha256) for d in selected_documents(db,user_id,selection,conversation_id)}
     candidates=[c for c in candidates if current.get(c['document_id'])==(c['revision'],c['sha256'])]
     return {'matches':candidates[:max(1,min(10,limit))],'mode':'hybrid' if dense else 'lexical','reranked':bool(s.knowledge_rerank_url)}
+
+def automatic_query(user_id,conversation_id):
+    shared=select(KnowledgeMember.base_id).where(KnowledgeMember.user_id==user_id)
+    bases=select(KnowledgeBase.id).join(User,User.id==KnowledgeBase.owner_id).where(
+        User.is_active.is_(True),User.registration_status=='approved',
+        or_(KnowledgeBase.owner_id==user_id,KnowledgeBase.id.in_(shared)))
+    return select(Document).where(Document.status=='ready',Document.index_profile==providers.profile(),or_(
+        Document.base_id.in_(bases),
+        (Document.base_id.is_(None))&(Document.owner_id==user_id)&(Document.conversation_id==conversation_id)&(Document.expires_at>int(time.time()))))
+
+def automatic_available(db,user_id,conversation_id):
+    if not get_settings().knowledge_enabled:return False
+    return db.scalar(automatic_query(user_id,conversation_id).with_only_columns(Document.id).limit(1)) is not None
+
+def automatic_documents(db,user_id,conversation_id):
+    user=db.get(User,user_id)
+    if not user or not user.is_active or user.registration_status!='approved':raise HTTPException(403,'자료 검색 권한을 확인하세요.')
+    documents=list(db.scalars(automatic_query(user_id,conversation_id).order_by(Document.id).limit(201)))
+    if len(documents)>200:raise HTTPException(422,'자동 검색 범위가 큽니다. 사용할 지식베이스를 직접 선택하세요.')
+    return documents
+
+def verify_sources(bind,user_id,conversation_id,sources):
+    with Session(bind) as db:
+        user=db.get(User,user_id)
+        if not user or not user.is_active or user.registration_status!='approved':raise HTTPException(403,'자료 검색 권한이 변경되었습니다.')
+        for source in sources:
+            if source.get('app')!='knowledge':continue
+            doc=document_access(db,user_id,source['document_id'],conversation_id=conversation_id)
+            chunk=db.get(Chunk,source['chunk_id'])
+            if (not chunk or chunk.document_id!=doc.id or doc.status!='ready' or doc.index_profile!=providers.profile()
+                    or doc.revision!=source['revision'] or doc.sha256!=source['sha256']):
+                raise HTTPException(409,'답변 중 자료 또는 색인이 변경되었습니다. 다시 질문하세요.')
