@@ -1,7 +1,8 @@
 .env
 .env.*
 !.env.example
-**/.venv/
+**/.venv*/
+**/venv/
 **/node_modules/
 **/.next/
 **/data/

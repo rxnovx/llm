@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -17,9 +18,9 @@ from PIL import Image
 root = Path(__file__).resolve().parents[1]
 web = root / "frontend"
 backend = root / "backend"
-python = backend / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-if not python.is_file() or not (web / ".next/standalone/server.js").is_file():
-    raise SystemExit("Install backend dev dependencies and run frontend npm run build first.")
+python = Path(sys.executable)
+if not (web / ".next/standalone/server.js").is_file():
+    raise SystemExit("Install backend dev dependencies in the active venv and run frontend npm run build first.")
 
 # Assemble the same static assets that the frontend Dockerfile copies.
 shutil.copytree(web / ".next/static", web / ".next/standalone/.next/static", dirs_exist_ok=True)

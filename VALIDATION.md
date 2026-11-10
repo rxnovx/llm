@@ -6,17 +6,20 @@
 
 | 검증 | 결과 |
 | --- | --- |
-| `backend/.venv/bin/python -m pytest -q` | 25개 통과 |
+| `cd backend && python -m pytest -q` | PostgreSQL 드라이버 없는 새 가상환경에서 27개 통과 |
 | `npm run test:session` | 5개 통과 |
 | `npm run test:proxy` | 11개 통과 |
+| `npm run test:portable` | Next.js WASM 바인딩으로 TypeScript 변환·실행 1개 통과 |
 | `npm run typecheck` | 통과 |
 | `npm run lint` | 오류·경고 없이 통과 |
-| `npm run build` | Next.js 프로덕션 빌드·정적 페이지 생성 통과 |
-| `backend/.venv/bin/python scripts/smoke_standalone.py` | 실제 Python + Next.js 독립 프로세스의 전체 계정 API 연동 통과 |
+| `npm run build` | Webpack 프로덕션 빌드·정적 페이지 생성 통과 |
+| `NEXT_TEST_WASM=1 npm run build` | 강제 WASM 바인딩의 Webpack 프로덕션 빌드 통과 |
+| `backend/.venv-portable/bin/python scripts/smoke_standalone.py` | PostgreSQL 없는 Python + WASM으로 빌드한 Next.js의 전체 계정 API 연동 통과 |
 | `python -m pip check` | 의존성 충돌 없음 |
 | SQLite Compose 구성 | 공식 Compose JSON Schema 검증 통과 |
 | PostgreSQL Compose 병합 구성 | 공식 Compose JSON Schema 검증 통과 |
 | 환경 설정 생성 | 기존 `.env`·비밀값 보존, 새 파일 권한 0600 확인 |
+| PostgreSQL 선택 의존성 | `requirements-postgres.txt` 설치 및 psycopg 3.3.4 엔진 생성 통과; 실제 DB 연결은 미검증 |
 
 백엔드 테스트는 중복 가입·비밀번호 강도·가입 제한·로그인 속도 제한·갱신 토큰 회전/재사용·회전 실패 롤백·로그아웃·다른 사용자의 세션 보호·비밀번호 변경·이메일 인증/변경/복구·사진 형식/크기/삭제·Google 계정 연결 정책을 확인합니다. Google 자격 증명 검증과 메일 발송은 테스트 대역을 사용합니다.
 
@@ -28,11 +31,20 @@
 
 Compose 스키마 출처: `compose-spec/compose-spec`의 `schema/compose-spec.json`, 파일 SHA `44bbc2710502200b78a3e7793369a771d1ed7356`. YAML 파싱·서비스 연결·Dockerfile 경로를 함께 확인했습니다.
 
+## Termux 대응 검증
+
+첨부 로그의 `psycopg-binary==3.3.4` 설치 실패에 대응해 기본 SQLite 의존성에서 PostgreSQL 바이너리를 분리했습니다. 새 가상환경에 `requirements-dev.txt`만 설치한 뒤 `psycopg` 미설치를 확인하고 백엔드 27개 테스트를 실행했습니다. PostgreSQL import를 차단한 새 프로세스에서도 가입·로그인·프로필 조회가 성공하며, 시스템 시간대 DB를 비운 프로세스에서도 `tzdata`로 `Asia/Seoul`을 검증합니다.
+
+프론트엔드는 Webpack으로 바꾸고, Next.js와 동일 버전의 SWC WASM 패키지를 고정했습니다. Android 준비 스크립트는 해당 패키지를 Next.js WASM 캐시에 연결합니다. 생성 캐시를 비운 뒤 준비 스크립트를 실행했고, 접근 불가능한 npm registry를 지정한 상태에서도 실제 Next.js WASM 로더가 TypeScript를 변환했습니다. Next.js의 강제 WASM 테스트 모드로 전체 프로덕션 빌드와 독립 실행 API 연동도 통과했습니다. 이 강제 플래그는 검증에만 사용하며 앱 실행 설정에는 넣지 않았습니다.
+
+합계 44개 테스트가 통과했습니다. 이 결과는 Linux에서 확인한 SQLite 의존성·WASM 경로 검증이며 Android ABI, Termux의 실제 패키지 빌드, 파일 감시, 휴대전화 브라우저 동작을 검증했다는 의미는 아닙니다.
+
 ## 환경 제한으로 미검증
 
 - Docker 실행 파일과 데몬이 없어 이미지 빌드·`docker compose up`·컨테이너 준비 상태·볼륨 영속성을 실제로 확인하지 못했습니다.
 - Nginx 실행 파일이 없어 `nginx -t`와 실제 Nginx 경유 HTTPS를 확인하지 못했습니다.
 - 시스템 Chromium 실행은 Unix 소켓 생성 권한 오류로 중단되었습니다. Playwright headless shell 설치도 유효한 ZIP을 받지 못해 실패했습니다. 데스크톱·모바일 브라우저 E2E와 화면 캡처는 통과로 기록하지 않습니다. `tests/accounts.spec.ts`와 실행 명령은 함께 제공합니다.
 - 실제 PostgreSQL 서버, SMTP 메일 발송, Google 콘솔과 실제 Google 계정 로그인은 검증하지 못했습니다.
+- 실제 Android/Termux 단말에서 설치·개발 서버·운영 빌드·화면 동작은 미검증입니다. Termux용 네이티브 Python/CSS 모듈은 단말에서 추가 확인이 필요합니다.
 
 FastAPI 테스트 실행 시 상위 Starlette의 httpx 및 HTTP 422 상수에 관한 deprecation 경고 3건이 출력됐으나 테스트 실패는 없었습니다.

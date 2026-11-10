@@ -1,0 +1,3 @@
+# Linux/macOS/Windows PostgreSQL deployment; optional for the SQLite default.
+-r requirements.txt
+psycopg[binary]==3.3.4

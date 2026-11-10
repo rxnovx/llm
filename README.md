@@ -19,6 +19,8 @@
 
 필수 환경: Node.js 22.13 이상, Python 3.12 이상. 다음 명령은 저장소 루트에서 시작합니다.
 
+Termux(Android arm64)의 설치 순서와 현재 `psycopg-binary` 오류 복구 방법은 [TERMUX.md](TERMUX.md)에 정리했습니다. 기본 SQLite 설치에는 PostgreSQL 드라이버가 필요하지 않습니다.
+
 ```bash
 python scripts/init_env.py
 ```
@@ -81,6 +83,8 @@ docker compose -f compose.yaml -f compose.postgres.yaml up -d --build
 
 이 명령은 새 PostgreSQL DB를 사용합니다. 기존 SQLite 데이터를 자동으로 이관하지 않습니다. 개별 실행에서는 `DATABASE_URL=postgresql+psycopg://사용자:암호@호스트:5432/DB명`을 지정합니다.
 
+Linux/macOS/Windows에서 PostgreSQL을 개별 실행으로 사용할 때는 백엔드 가상환경에서 `python -m pip install -r requirements-postgres.txt`로 선택 드라이버를 설치합니다. Docker 이미지는 이 드라이버를 포함합니다. Termux에서 PostgreSQL을 사용할 경우에는 [Termux용 순서](TERMUX.md#postgresql을-사용하는-경우)를 따릅니다.
+
 ## Nginx / HTTPS
 
 Compose는 [deploy/nginx.conf](deploy/nginx.conf)를 바로 마운트합니다. 모든 브라우저 요청을 Next.js로 보내므로 인증 쿠키와 API 출처가 일치합니다. 파일 업로드 상한은 multipart 여유를 포함해 6MB이며 API에서 실제 이미지 5MB를 다시 검사합니다.
@@ -124,6 +128,7 @@ npm run lint
 npm run build
 npm run test:session
 npm run test:proxy
+npm run test:portable
 ```
 
 실제 백엔드와 빌드한 프론트엔드를 함께 실행해 가입·프로필·업로드·갱신·로그아웃을 검증하려면 다음을 실행합니다. 임시 DB와 이미지 디렉터리를 사용하며 실행 후 두 프로세스를 종료합니다.
