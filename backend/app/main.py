@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import time
 
 from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,12 +13,14 @@ from app.db.session import engine, get_db
 from app.modules.auth.router import router as auth_router
 from app.modules.users.router import router as users_router
 from app.modules.chat.router import router as chat_router
+from app.modules.admin.router import router as admin_router
 
 settings = get_settings()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    app.state.started_at = int(time.time())
     # Additive account and chat tables; existing account data stays in place.
     Base.metadata.create_all(engine)
     settings.avatar_upload_path.mkdir(parents=True, exist_ok=True)
@@ -56,3 +59,4 @@ def ready(db: Session = Depends(get_db)):
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(chat_router)
+app.include_router(admin_router)

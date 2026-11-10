@@ -32,3 +32,5 @@ Termux 지원을 위해 기본 SQLite 의존성에서 PostgreSQL 바이너리를
 개별 실행용으로 `backend/.env.example`과 `frontend/.env.example`을 제공하며 `init_env.py --standalone`은 기존 파일을 보존하면서 각 로컬 설정을 생성합니다. 프론트엔드는 기본 `APP_URL` 외에 `APP_ALLOWED_ORIGINS`의 정확한 출처를 추가로 검사합니다. 이를 통해 Termux의 localhost·루프백 IP 접속을 명시적으로 지원하며, 외부 출처·다른 포트·위조된 전달 헤더로 허용 범위가 확장되지는 않습니다.
 
 계정 기반 PR 병합 후 LLM 대화 워크스페이스를 추가했습니다. 원본 메신저를 가져온 것이 아니라 독립적인 텍스트 대화 모듈이며, `chat_conversations`·`chat_messages` 테이블을 추가합니다. 기존 계정 테이블과 데이터를 재생성하지 않습니다. vLLM·Ollama와 로컬 테스트 응답은 어댑터로 분리하고, 기존 인증·출처 검사·BFF·배포 구성을 이어서 사용합니다. 디자인 근거는 `DESIGN.md`, 추론 서버 연결 규약은 `LLM_CONNECTIONS.md`에 있습니다.
+
+다음 단계에서 Markdown 수식·코드 강조·각주 처리를 강화하고 별도의 운영 대시보드를 추가했습니다. 원본 관리자 콘솔을 이관한 것이 아니며, 기존 `is_global_admin` 역할과 새 생성 요청 메타데이터 테이블을 사용합니다. 역할 부여는 로컬 CLI로 명시적으로 수행합니다. 관리 API는 대화 본문·서버 비밀값을 반환하지 않습니다. 제목 변경은 기존 API를 보완해 상단에서 접근할 수 있게 하고 자동 제목과의 덮어쓰기를 방지합니다.

@@ -6,7 +6,8 @@
 
 | 구분 | 기능 |
 | --- | --- |
-| 대화 | 스트리밍 답변, 중지·다시 생성·복사, Markdown, 저장된 대화 재개·이름 변경·삭제 |
+| 대화 | 스트리밍 답변, 중지·다시 생성·복사, Markdown·수식·코드 강조, 저장된 대화 재개·이름 변경·삭제 |
+| 운영 | 운영자 전용 사용자·세션·요청·응답 시간·모델 사용량·연결 확인·감사 기록 |
 | 모델 연결 | 등록된 vLLM·Ollama 서버 선택·조회·해제, 외부 요청 없는 랜덤 테스트 모드 |
 | 계정 | 회원가입, 사용자명/이메일 로그인, 로그아웃, 모든 기기 로그아웃 |
 | 프로필 | 표시 이름, 프로필 이미지 업로드·링크·삭제, 사용자명 고정 |
@@ -18,6 +19,8 @@
 원본의 사용자 기능과 보안 로직을 재사용하되 앱별 설정, 체험, 관리자 콘솔, PAT, 법적 권리행사 워크플로는 이 초기 앱에 포함하지 않았습니다. 가입 화면의 계정 생성 동의는 원본 서비스의 약관을 LLM에 적용한다는 뜻이 아닙니다. 이관 범위와 수정 근거는 [PORTING.md](PORTING.md)에 기록했습니다.
 
 로그인 후 `/`에서 대화를 시작합니다. 기본 `LLM_TEST_MODE=true`는 랜덤 예시 답변을 스트리밍하며 실제 모델에 접속하지 않습니다. 대화 기록은 기본 SQLite에 계정별로 저장됩니다. 실제 폐쇄망 서버를 연결하려면 [LLM_CONNECTIONS.md](LLM_CONNECTIONS.md)를 참고합니다. 서비스 10곳의 레퍼런스와 화면 구성 판단은 [DESIGN.md](DESIGN.md)에 기록했습니다.
+
+현재 대화의 상단 제목 옆 편집 버튼 또는 사이드바 대화 메뉴의 **이름 변경**으로 제목을 수정합니다. 직접 정한 제목은 첫 메시지의 자동 제목으로 덮어쓰지 않습니다. Markdown 범위는 [MARKDOWN.md](MARKDOWN.md), 최초 운영자 지정과 `/admin` 사용법은 [OPERATIONS.md](OPERATIONS.md)에 있습니다.
 
 ## Docker 없이 실행
 
@@ -144,6 +147,8 @@ npm run test:session
 npm run test:proxy
 npm run test:env
 npm run test:chat
+npm run test:markdown
+npm run test:api
 npm run test:portable
 ```
 

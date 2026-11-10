@@ -61,6 +61,7 @@ function Workspace({ user }: { user: AuthUser }) {
   const searchInput = useRef<HTMLInputElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const actionDialog = useRef<HTMLDialogElement>(null);
+  const titleEditor = useRef<HTMLInputElement>(null);
   const controller = useRef<AbortController | null>(null);
   const loadController = useRef<AbortController | null>(null);
   const generation = useRef<{ id: string; conversation: string } | null>(null);
@@ -115,6 +116,7 @@ function Workspace({ user }: { user: AuthUser }) {
   useEffect(() => {
     if (action && !actionDialog.current?.open) actionDialog.current?.showModal();
     else if (!action) actionDialog.current?.close();
+    if (action?.type === "rename") requestAnimationFrame(() => { titleEditor.current?.focus(); titleEditor.current?.select(); });
   }, [action]);
 
   useEffect(() => {
@@ -231,10 +233,11 @@ function Workspace({ user }: { user: AuthUser }) {
         setConversations((old) => old.filter((entry) => entry.id !== action.item.id));
         if (active?.id === action.item.id) { setActive(null); setMessages([]); setDraft(""); window.history.replaceState(null, "", "/"); }
       }
-      setAction(null);
+      setError(""); setAction(null);
     } catch (caught) { setError(errorText(caught)); }
     finally { setActionBusy(false); }
   };
+  const rename = (item: Conversation) => { setAction({ type: "rename", item }); setTitle(item.title); setMenu(""); setError(""); };
   const loadMore = async () => {
     if (loading) return;
     setLoading(true);
@@ -280,17 +283,20 @@ function Workspace({ user }: { user: AuthUser }) {
           <button className="cw-history-title" disabled={streaming} onClick={() => void openConversation(item)} aria-current={active?.id === item.id ? "page" : undefined}>
             <Icon name="chat" size={15} /><span>{item.title}</span></button>
           <button className="cw-history-more" aria-label={`${item.title} 메뉴`} aria-expanded={menu === item.id} disabled={busy} onClick={() => setMenu(menu === item.id ? "" : item.id)}><Icon name="more" size={16} /></button>
-          {menu === item.id && <div className="cw-row-menu"><button onClick={() => { setAction({ type: "rename", item }); setTitle(item.title); setMenu(""); setError(""); }}><Icon name="edit" size={14} />이름 변경</button>
+          {menu === item.id && <div className="cw-row-menu"><button onClick={() => rename(item)}><Icon name="edit" size={14} />이름 변경</button>
             <button className="cw-danger" onClick={() => { setAction({ type: "delete", item }); setMenu(""); setError(""); }}><Icon name="trash" size={14} />삭제</button></div>}</div>)}</nav>
         {hasMore && <button className="cw-load-more" disabled={loading} onClick={() => void loadMore()}>이전 대화 더 보기</button>}</div>
       <footer className="cw-sidebar-footer"><button className="cw-connection-link" onClick={() => setSettingsOpen(true)}><Icon name="settings" size={17} />모델 연결<span>{connections.length}</span></button>
-        <div className="cw-account-wrap">{accountOpen && <div className="cw-account-menu"><Link href="/user/profile"><Icon name="settings" size={15} />계정 설정</Link><ThemeToggle />
+        <div className="cw-account-wrap">{accountOpen && <div className="cw-account-menu"><Link href="/user/profile"><Icon name="settings" size={15} />계정 설정</Link>
+          {user.is_global_admin && <Link href="/admin"><Icon name="server" size={15} />운영 대시보드</Link>}<ThemeToggle />
           <button onClick={() => void logout()}><Icon name="logout" size={15} />로그아웃</button></div>}
           <button className="cw-account" aria-expanded={accountOpen} onClick={() => setAccountOpen(!accountOpen)}>
             <UserAvatar name={user.display_name || user.username} src={user.avatar_url} className="cw-user-avatar" /><span><strong>{user.display_name || user.username}</strong><small>개인 워크스페이스</small></span><Icon name="chevron" size={15} /></button></div></footer>
     </aside>
     <main className="cw-main"><header className="cw-topbar"><div className="cw-topbar-left"><button className="cw-icon-button cw-mobile-only" aria-label="사이드바 열기" onClick={() => setSidebar(true)}><Icon name="panel" /></button>
-      <span className="cw-topbar-workspace">워크스페이스</span><span className="cw-topbar-slash">/</span><span className="cw-topbar-title">{active?.title || "새 대화"}</span></div>
+      <span className="cw-topbar-workspace">워크스페이스</span><span className="cw-topbar-slash">/</span>
+      {active ? <button className="cw-title-button" disabled={busy || loading} aria-label="대화 이름 변경" title="대화 이름 변경" onClick={() => rename(active)}>
+        <span className="cw-topbar-title">{active.title}</span><Icon name="edit" size={13} /></button> : <span className="cw-topbar-title">새 대화</span>}</div>
       <button className={`cw-mode ${connection?.is_test ? "is-test" : ""}`} onClick={() => setSettingsOpen(true)}><span />{connection?.is_test ? "테스트 모드" : connection?.name || "연결 선택"}<Icon name="chevron" size={12} /></button></header>
       <div className={`cw-content ${messages.length ? "has-messages" : ""}`} ref={viewport} onScroll={() => {
         const element = viewport.current;
@@ -322,7 +328,8 @@ function Workspace({ user }: { user: AuthUser }) {
       onSelect={(id, nextModel) => { setSelected(id); setModel(nextModel); }} />
     <dialog ref={actionDialog} className="cw-dialog cw-action-dialog" aria-labelledby="conversation-action-title" onCancel={() => setAction(null)} onClose={() => setAction(null)}>
       <form onSubmit={(event) => void submitAction(event)}><h2 id="conversation-action-title">{action?.type === "delete" ? "이 대화를 삭제할까요?" : "대화 이름 변경"}</h2>
-        {action?.type === "delete" ? <p>대화와 메시지가 함께 삭제됩니다. 이 작업은 되돌릴 수 없습니다.</p> : <input autoFocus aria-label="대화 이름" value={title} onChange={(event) => setTitle(event.target.value)} required maxLength={120} />}
+        {action?.type === "delete" ? <p>대화와 메시지가 함께 삭제됩니다. 이 작업은 되돌릴 수 없습니다.</p> : <input ref={titleEditor} autoFocus aria-label="대화 이름" value={title} onChange={(event) => setTitle(event.target.value)} required maxLength={120}
+          onKeyDown={(event) => { if (event.key === "Enter" && (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)) event.preventDefault(); }} />}
         {error && <p className="cw-inline-error" role="alert">{error}</p>}
         <div className="cw-action-buttons"><button type="button" className="cw-small-button" disabled={actionBusy} onClick={() => setAction(null)}>취소</button>
           <button className={`cw-primary-button ${action?.type === "delete" ? "cw-delete-button" : ""}`} disabled={actionBusy || action?.type === "rename" && !title.trim()}>{actionBusy ? "처리 중…" : action?.type === "delete" ? "삭제" : "저장"}</button></div></form>

@@ -9,12 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
-from app.modules.chat.models import Conversation, Message
+from app.modules.chat.models import Conversation, GenerationRun, Message
 from app.modules.chat import providers
 
 router = APIRouter(prefix='/chat', tags=['chat'])
@@ -28,6 +29,7 @@ class ConversationInput(BaseModel):
 
 
 class TitleInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
     title: str = Field(min_length=1, max_length=120)
 
 
@@ -143,9 +145,11 @@ class Turn:
     start: dict
     previous_message: dict | None = None
     previous_connection: str | None = None
+    started_clock: float = 0
 
 
 def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, connection: providers.Connection) -> Turn:
+    started_clock = time.monotonic()
     item = owned(db, conversation_id, user_id)
     content = data.content.strip()
     if not content:
@@ -154,12 +158,18 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     if not model:
         raise HTTPException(422, '연결 설정에서 모델을 선택해 주세요.')
     now = int(time.time())
+    if db.get(GenerationRun, str(data.request_id)):
+        raise HTTPException(409, '이미 사용한 요청 ID입니다. 새 요청으로 다시 시도해 주세요.')
     claimed = db.execute(update(Conversation).where(Conversation.id == item.id,
         or_(Conversation.generation_id.is_(None), Conversation.generation_until <= now))
         .values(generation_id=str(data.request_id), generation_until=now + get_settings().llm_timeout_seconds + 30,
                 cancel_requested=False))
     if claimed.rowcount != 1:
         raise HTTPException(409, '이 대화에서 응답을 생성하고 있습니다. 잠시 후 다시 시도해 주세요.')
+    db.execute(update(GenerationRun).where(GenerationRun.conversation_id == item.id,
+        GenerationRun.status == 'running', GenerationRun.deadline_at <= now).values(
+            status='error', error_code='interrupted', finished_at=now,
+            duration_ms=(now - GenerationRun.started_at) * 1000))
     rows = list(db.scalars(select(Message).where(Message.conversation_id == item.id).order_by(Message.position)))
     for message in rows:
         if message.status == 'pending':
@@ -199,11 +209,21 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         history = history[2:]
     item.connection_id, item.model, item.updated_at = connection.id, model, now
     if not rows:
-        item.title = content.splitlines()[0][:60]
-    db.commit()
+        db.execute(update(Conversation).where(Conversation.id == item.id, Conversation.title == '새 대화')
+            .values(title=content.splitlines()[0][:60]))
+        db.refresh(item, attribute_names=['title'])
+    db.add(GenerationRun(id=str(data.request_id), user_id=user_id, conversation_id=item.id,
+        connection_id=connection.id, provider=connection.provider, model=model,
+        is_test=connection.provider == 'test', status='running', started_at=now,
+        deadline_at=now + get_settings().llm_timeout_seconds + 30))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, '동시에 처리된 요청입니다. 새 요청으로 다시 시도해 주세요.') from None
     return Turn(item.id, str(data.request_id), assistant.id, history,
         {'conversation': conversation_data(item), 'user_message': message_data(user_message),
-         'assistant_message': message_data(assistant) | {'content': ''}}, previous_message, previous_connection)
+         'assistant_message': message_data(assistant) | {'content': ''}}, previous_message, previous_connection, started_clock)
 
 
 def event(name: str, data: dict) -> str:
@@ -218,6 +238,7 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
 
     async def generate():
         text, status, error = '', 'cancelled', None
+        first_token_ms, error_code = None, 'cancelled'
         saved = None
         last_check = 0.0
         try:
@@ -233,23 +254,36 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                     if len(text) + len(part) > 200000:
                         raise providers.ProviderError('응답 길이 제한에 도달했습니다. 질문을 나눠서 보내 주세요.')
                     text += part
+                    if first_token_ms is None:
+                        first_token_ms = max(0, int((time.monotonic() - turn.started_clock) * 1000))
                     yield event('delta', {'content': part})
                 else:
                     if not text.strip():
                         raise providers.ProviderError('모델이 빈 응답을 보냈습니다. 다시 시도해 주세요.')
                     status = 'complete'
+                    error_code = None
         except asyncio.CancelledError:
             raise
         except (providers.ProviderError, TimeoutError) as caught:
             status = 'error'
+            error_code = 'provider_error' if isinstance(caught, providers.ProviderError) else 'timeout'
             error = str(caught) if isinstance(caught, providers.ProviderError) else '응답 시간이 초과되었습니다. 다시 시도해 주세요.'
         except Exception:
             status, error = 'error', '응답을 처리하지 못했습니다. 다시 시도해 주세요.'
+            error_code = 'internal_error'
         finally:
             with Session(bind, expire_on_commit=False) as session:
+                run = session.get(GenerationRun, turn.request_id)
                 item = session.scalar(select(Conversation).where(Conversation.id == turn.conversation_id,
                     Conversation.generation_id == turn.request_id))
                 message = session.get(Message, turn.assistant_id)
+                if item and item.cancel_requested and status == 'complete':
+                    status, error_code = 'cancelled', 'cancelled'
+                if run and run.status == 'running':
+                    run.status, run.error_code = status, error_code
+                    run.finished_at = int(time.time())
+                    run.duration_ms = max(0, int((time.monotonic() - turn.started_clock) * 1000))
+                    run.first_token_ms, run.output_chars = first_token_ms, len(text)
                 if item and message:
                     message.content, message.status, message.error = text, status, error
                     # A failed/cancelled regeneration must not destroy a good answer.
@@ -262,6 +296,8 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                     item.updated_at = int(time.time())
                     session.commit()
                     saved = {'conversation': conversation_data(item), 'message': message_data(message)}
+                else:
+                    session.commit()
         if saved:
             yield event('done' if status == 'complete' else status, saved | {'detail': error})
 

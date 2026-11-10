@@ -1,4 +1,4 @@
-# 계정 및 대화 워크스페이스 검증
+# 계정·대화·운영 기능 검증
 
 검증일: 2026-11-10. Node.js 24.22.1, Python 3.12.14. 이 저장소의 루트 경로와 LLM 서비스 식별자로 다시 검증했습니다. GitHub Actions는 실행하지 않았습니다.
 
@@ -6,17 +6,19 @@
 
 | 검증 | 결과 |
 | --- | --- |
-| `cd backend && python -m pytest -q` | PostgreSQL 드라이버 없는 가상환경에서 46개 통과 (기존 계정·환경 설정 33개 + 대화 13개) |
+| `cd backend && python -m pytest -q` | PostgreSQL 드라이버 없는 가상환경에서 61개 통과 (계정·설정 33개 + 대화 13개 + 운영·제목 15개) |
 | `npm run test:session` | 5개 통과 |
-| `npm run test:proxy` | 14개 통과 |
+| `npm run test:proxy` | 16개 통과 |
 | `npm run test:env` | 실제 Next.js 환경파일 로더로 우선순위 검증 3개 통과 |
 | `npm run test:chat` | UTF-8·CRLF·분할 SSE·중단·크기 제한 5개 통과 |
+| `npm run test:markdown` | 실제 렌더러의 CommonMark·GFM·코드·수식·각주·스트리밍·안전한 링크 10개 통과 |
+| `npm run test:api` | 인증 헤더·갱신·권한 오류·장애·스트림 재전송 금지 4개 통과 |
 | `npm run test:portable` | Next.js WASM 바인딩으로 TypeScript 변환·실행 1개 통과 |
 | `npm run typecheck` | 통과 |
 | `npm run lint` | 오류·경고 없이 통과 |
 | `npm run build` | Webpack 프로덕션 빌드·정적 페이지 생성 통과 |
 | `NEXT_TEST_WASM=1 npm run build` | 이전 Termux 대응에서 강제 WASM 프로덕션 빌드 통과; 이번 환경파일 변경은 일반 Webpack 빌드로 재검증 |
-| `backend/.venv-portable/bin/python scripts/smoke_standalone.py` | 실제 계정 API + 대화 스트리밍·저장·중지·재생성·페이지 조회·삭제 통과 |
+| `backend/.venv-portable/bin/python scripts/smoke_standalone.py` | 실제 계정·대화 + 운영 권한·통계·감사 + 로컬 역할 지정 + 수식 폰트 HTTP 제공 통과 |
 | `python -m pip check` | 의존성 충돌 없음 |
 | SQLite Compose 구성 | 공식 Compose JSON Schema 검증 통과 |
 | PostgreSQL Compose 병합 구성 | 공식 Compose JSON Schema 검증 통과 |
@@ -37,11 +39,11 @@ Compose 스키마 출처: `compose-spec/compose-spec`의 `schema/compose-spec.js
 
 ## Termux 대응 검증
 
-첨부 로그의 `psycopg-binary==3.3.4` 설치 실패에 대응해 기본 SQLite 의존성에서 PostgreSQL 바이너리를 분리했습니다. `requirements-dev.txt`만 설치한 가상환경에서 `psycopg` 미설치를 확인했으며, 이번 환경파일 변경 후 백엔드 33개 테스트가 통과했습니다. PostgreSQL import를 차단한 새 프로세스에서도 가입·로그인·프로필 조회가 성공하며, 시스템 시간대 DB를 비운 프로세스에서도 `tzdata`로 `Asia/Seoul`을 검증합니다.
+첨부 로그의 `psycopg-binary==3.3.4` 설치 실패에 대응해 기본 SQLite 의존성에서 PostgreSQL 바이너리를 분리했습니다. `requirements-dev.txt`만 설치한 가상환경에서 `psycopg` 미설치를 확인했으며, 환경파일 추가 단계에서 백엔드 33개 테스트가 통과했으며 이번 확장 후에는 61개가 통과했습니다. PostgreSQL import를 차단한 새 프로세스에서도 가입·로그인·프로필 조회가 성공하며, 시스템 시간대 DB를 비운 프로세스에서도 `tzdata`로 `Asia/Seoul`을 검증합니다.
 
 프론트엔드는 Webpack으로 바꾸고, Next.js와 동일 버전의 SWC WASM 패키지를 고정했습니다. Android 준비 스크립트는 해당 패키지를 Next.js WASM 캐시에 연결합니다. 생성 캐시를 비운 뒤 준비 스크립트를 실행했고, 접근 불가능한 npm registry를 지정한 상태에서도 실제 Next.js WASM 로더가 TypeScript를 변환했습니다. Next.js의 강제 WASM 테스트 모드로 전체 프로덕션 빌드와 독립 실행 API 연동도 통과했습니다. 이 강제 플래그는 검증에만 사용하며 앱 실행 설정에는 넣지 않았습니다.
 
-계정·설정·대화·프론트엔드 합계 74개 테스트가 통과했습니다. 이 결과는 Linux에서 확인한 설정·출처 검사·SQLite 의존성·WASM 경로 검증이며 Android ABI, Termux의 실제 패키지 빌드, 파일 감시, 휴대전화 브라우저 동작을 검증했다는 의미는 아닙니다. `LD_PRELOAD` 방식은 Termux 문서에 안내했으며 이 Linux 환경에서 해당 Android 심볼 오류의 해결을 검증한 것은 아닙니다.
+계정·설정·대화·운영·프론트엔드 합계 105개 테스트가 통과했습니다. 이 결과는 Linux에서 확인한 설정·출처 검사·SQLite 의존성·WASM 경로 검증이며 Android ABI, Termux의 실제 패키지 빌드, 파일 감시, 휴대전화 브라우저 동작을 검증했다는 의미는 아닙니다. `LD_PRELOAD` 방식은 Termux 문서에 안내했으며 이 Linux 환경에서 해당 Android 심볼 오류의 해결을 검증한 것은 아닙니다.
 
 ## LLM 대화 검증
 
@@ -53,7 +55,19 @@ vLLM과 Ollama는 공식 프로토콜 형식의 HTTP 테스트 대역으로 검�
 
 실제 Python + Next.js 통합 검증은 로컬 랜덤 답변의 첫 조각을 먼저 수신하고, 완료 후 SQLite 기록을 대조합니다. 두 번째 답변 도중 취소를 보내 잠금이 해제되고 부분 답변이 `cancelled`로 저장되는지 확인한 뒤, 같은 턴을 다시 생성해 메시지 중복이 없음을 검사합니다.
 
-브라우저 테스트 시나리오 `tests/chat.spec.ts`와 기존 계정 시나리오를 함께 제공합니다. 이번 브라우저 제어 환경에서는 준비된 `http://127.0.0.1:3100` 서버에도 `ERR_CONNECTION_REFUSED`가 발생해 화면을 확인하지 못했습니다. 데스크톱·모바일 레이아웃, Markdown 화면, 한글 IME, 화면 키보드와 실제 클릭 흐름은 통과로 기록하지 않습니다. 디자인은 공식 서비스 10곳의 자료를 검토해 구성했으며 판단과 자료 링크는 `DESIGN.md`에 있습니다.
+브라우저 테스트 시나리오 `tests/chat.spec.ts`와 기존 계정 시나리오를 함께 제공합니다. 이 환경의 앞선 브라우저 제어 시도에서는 준비된 `http://127.0.0.1:3100` 서버에도 `ERR_CONNECTION_REFUSED`가 발생해 화면을 확인하지 못했습니다. 데스크톱·모바일 레이아웃, Markdown 화면, 한글 IME, 화면 키보드와 실제 클릭 흐름은 통과로 기록하지 않습니다. 디자인은 공식 서비스 10곳의 자료를 검토해 구성했으며 판단과 자료 링크는 `DESIGN.md`에 있습니다.
+
+## Markdown·운영·제목 검증
+
+Markdown 테스트는 실제 `MessageContent`와 플러그인을 컴파일해 서버 렌더링 HTML을 확인합니다. 1–6단계 제목, 중첩 목록·인용·참조 링크, 표 정렬·체크리스트·각주, Python 강조·코드 복사용 텍스트, 알 수 없는 언어, 네 종류의 수식 구분자, 코드 내부 수식 변환 금지, 미완성 스트리밍 접두부, 원격 이미지 자동 로드 금지, 스크립트 URL·위험 TeX를 검사합니다. 여러 메시지에서 각주 ID가 겹치는 문제와 각주 링크가 새 탭으로 열리는 문제를 재현하고 수정했습니다. 수식 CSS에 선언된 WOFF2 자원이 앱의 HTTP 경로에서 모두 제공되는 것도 독립 실행 검증으로 확인했습니다.
+
+운영 테스트는 미로그인 401·일반 사용자 403, DB 역할 변경의 즉시 적용, 프로필 요청을 통한 권한 상승 금지, 실제/테스트 필터·평균·성공률·7일 집계, 만료 요청 표시, 잘못된 연결 설정에서도 기본 통계 유지, 대화 내용·비밀값 비노출을 확인합니다. 재생성 실패·취소·만료 회수·대화 삭제 이후에도 요청 메타데이터가 일관되게 남는지 검증했습니다. 로컬 권한 도구는 임시 DB에서만 실행해 기존 사용자 지정·권한 해제·마지막 운영자 보호·감사 기록을 확인했습니다.
+
+실제 Python + 새 Next.js 빌드에서도 일반 사용자 권한 거부 → 임시 계정에 로컬 CLI로 역할 지정 → 같은 로그인 세션으로 운영 조회, 요청 필터·모델 확인·사용자·감사 기록을 검증했습니다. 생성 요청 수가 3건(완료 2·취소 1)인 실제 테스트 흐름과 일치하는지 대조했습니다. 실제 사용자에게 운영자 권한을 부여하지 않았습니다.
+
+제목 변경은 상단 버튼과 기존 사이드바 메뉴에서 같은 저장 흐름을 사용합니다. 백엔드에서는 첫 메시지 자동 제목이 사용자 지정 제목을 덮어쓰지 않는지, 공백·길이·추가 필드 검증과 소유권을 확인했습니다. 독립 실행 검증으로 제목 저장·재조회도 확인하며, 데스크톱·모바일 브라우저 시나리오는 상단에서 수정 후 새로고침해 제목이 유지되는 경로로 보완했습니다.
+
+새 JS 의존성 26개가 추가됐으며 기존 의존성 버전은 바꾸지 않았습니다. Python 외부 의존성은 추가하지 않았습니다. 새 운영 통계 테이블은 추가 방식이며 기존 계정·대화 컬럼을 변경하지 않습니다. 브라우저에서의 실제 수식 폰트 표시, 클립보드, 모바일 표/코드 스크롤, 운영 화면 클릭, 한글 IME는 미검증입니다. 서버 HTML·HTTP 검증을 시각적 브라우저 검증으로 간주하지 않습니다.
 
 ## 환경 제한으로 미검증
 

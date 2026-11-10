@@ -38,3 +38,26 @@ class Message(Base):
     is_test: Mapped[bool] = mapped_column(Boolean, default=False)
     error: Mapped[str | None] = mapped_column(String(300), nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
+
+
+class GenerationRun(Base):
+    """Attempt metadata, retained independently of message text and regeneration."""
+    __tablename__ = 'chat_generation_runs'
+    __table_args__ = (Index('ix_generation_started_status', 'started_at', 'status'),
+                      Index('ix_generation_active', 'status', 'deadline_at'))
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey('chat_conversations.id', ondelete='SET NULL'), nullable=True, index=True)
+    connection_id: Mapped[str] = mapped_column(String(64))
+    provider: Mapped[str] = mapped_column(String(16))
+    model: Mapped[str] = mapped_column(String(200))
+    is_test: Mapped[bool] = mapped_column(Boolean)
+    status: Mapped[str] = mapped_column(String(16), default='running')
+    started_at: Mapped[int] = mapped_column(Integer, index=True)
+    deadline_at: Mapped[int] = mapped_column(Integer)
+    finished_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_chars: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)

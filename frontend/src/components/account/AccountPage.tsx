@@ -47,7 +47,7 @@ export function AccountPage() {
     <header className="mb-8 flex flex-wrap items-center justify-between gap-4 border-b border-[var(--border)] pb-6">
       <div><Link href="/" className="text-xs font-semibold tracking-widest text-[var(--fg-subtle)]">LLM</Link>
         <h1 className="mt-2 text-2xl font-bold">계정 설정</h1><p className="mt-2 text-sm text-[var(--fg-muted)]">{user.display_name || user.username} · {user.email}</p></div>
-      <div className="flex items-center gap-3"><ThemeToggle /><button disabled={loggingOut} onClick={() => void logout()} className="text-sm underline">로그아웃</button></div>
+      <div className="flex items-center gap-3">{user.is_global_admin && <Link href="/admin" className="text-sm underline">운영 대시보드</Link>}<ThemeToggle /><button disabled={loggingOut} onClick={() => void logout()} className="text-sm underline">로그아웃</button></div>
     </header>
     <nav aria-label="계정 설정" className="mb-6 flex gap-2">
       {([['profile','프로필'],['security','계정 및 보안']] as const).map(([id,label]) => <button key={id} aria-pressed={tab === id} onClick={() => setTab(id)}

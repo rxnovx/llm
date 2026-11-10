@@ -24,11 +24,13 @@ test("테스트 대화·새로고침·이름 변경·연결 해제", async ({ pa
   await page.reload();
   await expect(page.getByRole("article", { name: "내 메시지" })).toHaveText(question);
   await expect(page.getByRole("button", { name: "답변 복사", exact: true })).toBeVisible();
-  if (await page.getByRole("button", { name: "사이드바 열기" }).isVisible()) await page.getByRole("button", { name: "사이드바 열기" }).click();
-  await page.getByRole("button", { name: `${question} 메뉴` }).click();
-  await page.getByRole("button", { name: "이름 변경", exact: true }).click();
+  await page.getByRole("button", { name: "대화 이름 변경", exact: true }).click();
   await page.getByLabel("대화 이름", { exact: true }).fill("다시 이어갈 대화");
   await page.getByRole("button", { name: "저장", exact: true }).click();
+  await expect(page.getByRole("button", { name: "대화 이름 변경", exact: true })).toHaveText("다시 이어갈 대화");
+  await page.reload();
+  await expect(page.getByRole("button", { name: "대화 이름 변경", exact: true })).toHaveText("다시 이어갈 대화");
+  if (await page.getByRole("button", { name: "사이드바 열기" }).isVisible()) await page.getByRole("button", { name: "사이드바 열기" }).click();
   await expect(page.getByRole("button", { name: "다시 이어갈 대화", exact: true })).toBeVisible();
   if (await page.getByRole("button", { name: "사이드바 접기" }).isVisible()) await page.getByRole("button", { name: "사이드바 접기" }).click();
   await page.getByRole("button", { name: /테스트 모드/ }).click();

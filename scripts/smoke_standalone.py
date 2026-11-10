@@ -5,6 +5,7 @@ Run with backend/.venv/bin/python scripts/smoke_standalone.py after npm run buil
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -59,6 +60,18 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
                     raise RuntimeError(f"Server did not start: {url}")
             assert all(process.poll() is None for process in processes), 'A newly launched server exited; refusing to test another process on the same port'
             client.headers.update({"x-llm-account": "1", "origin": "http://127.0.0.1:3100"})
+            # KaTeX fonts must be served by this app, including offline deployments.
+            document = client.get('/').text
+            styles = set(re.findall(r'href="([^" ]+\.css(?:\?[^" ]*)?)"', document))
+            fonts = set()
+            for style in styles:
+                response = client.get(style)
+                assert response.status_code == 200
+                fonts.update(re.findall(r'/_next/static/media/[^\s"\')]+\.woff2', response.text))
+            assert fonts, 'Bundled math font assets were not found in the rendered styles'
+            for font in fonts:
+                response = client.get(font)
+                assert response.status_code == 200 and len(response.content) > 100
             username = f"standalone_{uuid.uuid4().hex[:12]}"
             response = client.post("/api/auth/register", json={"username": username,
                 "email": f"{username}@example.com", "password": "StandalonePass123!", "accept_terms": True})
@@ -125,6 +138,22 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             assert client.patch(chat_path, headers=access, json={'title':'스트리밍 검증'}).json()['title'] == '스트리밍 검증'
             assert client.get('/api/chat/conversations?offset=1', headers=access).json()['items'] == []
             assert client.delete(chat_path, headers=access).status_code == 204
+            assert client.get('/api/admin/overview',headers=access).status_code == 403
+            subprocess.run([str(python),'manage_admin.py','grant',username], cwd=backend, env=api_env,
+                check=True, capture_output=True, text=True)
+            operations = client.get('/api/admin/overview',headers=access)
+            assert operations.status_code == 200, operations.text
+            assert operations.json()['requests_24h']['total'] == 3
+            assert operations.json()['requests_24h']['complete'] == 2 and operations.json()['requests_24h']['cancelled'] == 1
+            assert client.get('/api/admin/overview?mode=live',headers=access).json()['requests_24h']['total'] == 0
+            assert len(client.get('/api/admin/requests',headers=access).json()['items']) == 3
+            members = client.get('/api/admin/users',headers=access).json()['items']
+            assert len(members) == 1 and members[0]['is_admin']
+            audits = client.get('/api/admin/audit',headers=access).json()['items']
+            assert any(row['action']=='admin.role.grant' and row['target']==username for row in audits)
+            assert client.post('/api/admin/connections/demo/check',headers=access).json()['status'] == 'test'
+            assert client.get('/api/admin/overview').status_code == 401
+            assert client.get('/admin').status_code == 200
             response = client.post("/api/auth/refresh")
             assert response.status_code == 200, response.text
             refreshed = response.json()
@@ -136,7 +165,7 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             assert client.get("/api/account/users/me", headers=access).status_code == 401
             assert client.get("/login").status_code == 200
             assert all(process.poll() is None for process in processes), 'A test server exited during validation'
-            print("PASS: real Python + Next.js accounts, streaming chat, persistence, stop, retry, pagination and deletion")
+            print("PASS: accounts, streaming chat, persisted titles, stop/retry, operator permissions, metadata and local role setup")
     except Exception:
         for handle in logs:
             handle.flush()

@@ -57,6 +57,9 @@
 .cw-topbar-workspace,.cw-topbar-slash { color:var(--cw-muted); flex-shrink:0; }
 .cw-topbar-slash { opacity:.5; }
 .cw-topbar-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cw-title-button { display:flex; align-items:center; gap:9px; min-width:0; background:none; border:0; padding:7px 5px; margin-left:-5px; border-radius:5px; text-align:left; }
+.cw-title-button:hover { background:var(--cw-soft); }
+.cw-title-button>svg { color:var(--cw-muted); flex-shrink:0; }
 .cw-mode { display:inline-flex; align-items:center; gap:7px; padding:6px 8px; border:1px solid var(--cw-line); background:none; border-radius:5px; color:var(--cw-muted); font-size:10px!important; white-space:nowrap; }
 .cw-mode>span,.cw-demo-note>span { width:5px; height:5px; background:var(--cw-muted); border-radius:50%; flex-shrink:0; }
 .cw-mode.is-test { color:#8b773e; background:#f9f6ec; border-color:#eee8d8; }
@@ -106,6 +109,8 @@
 .cw-markdown p { margin:0 0 16px; white-space:pre-wrap; }
 .cw-markdown h1,.cw-markdown h2,.cw-markdown h3 { margin:26px 0 12px; line-height:1.5; font-weight:600; }
 .cw-markdown h1 { font-size:23px; }.cw-markdown h2 { font-size:20px; }.cw-markdown h3 { font-size:17px; }
+.cw-markdown h4,.cw-markdown h5,.cw-markdown h6 { margin:22px 0 10px; line-height:1.6; font-weight:600; }
+.cw-markdown h4 { font-size:15px; }.cw-markdown h5 { font-size:14px; }.cw-markdown h6 { font-size:13px; color:var(--cw-muted); }
 .cw-markdown ul,.cw-markdown ol { padding-left:24px; margin:12px 0 20px; }
 .cw-markdown ul { list-style:disc; }.cw-markdown ol { list-style:decimal; }.cw-markdown li { margin:5px 0; }
 .cw-markdown a { color:var(--cw-accent); text-decoration:underline; text-underline-offset:3px; }
@@ -116,6 +121,25 @@
 .cw-markdown th,.cw-markdown td { border:1px solid var(--cw-line); padding:9px 13px; text-align:left; }
 .cw-markdown th { background:var(--cw-soft); font-weight:600; }
 .cw-markdown hr { border:0; border-top:1px solid var(--cw-line); margin:24px 0; }
+.cw-code-block { border:1px solid var(--cw-line); border-radius:8px; margin:20px 0; background:var(--cw-soft); overflow:hidden; }
+.cw-code-header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:7px 13px; border-bottom:1px solid var(--cw-line); color:var(--cw-muted); font:10px ui-monospace,SFMono-Regular,Consolas,monospace; }
+.cw-code-block>pre { margin:0; border:0; border-radius:0; }
+.cw-markdown .task-list-item { list-style:none; position:relative; }
+.cw-markdown .task-list-item>input { margin:0 8px 0 -20px; accent-color:var(--cw-accent); }
+.cw-markdown .footnotes { border-top:1px solid var(--cw-line); margin-top:26px; padding-top:12px; color:var(--cw-muted); font-size:12px; }
+.cw-markdown sup>a { font-size:10px; }
+.cw-markdown .katex { font-size:1.12em; }
+.cw-markdown .katex-display { max-width:100%; overflow-x:auto; overflow-y:hidden; padding:8px 0; margin:20px 0; }
+.cw-markdown .hljs-keyword,.cw-markdown .hljs-selector-tag,.cw-markdown .hljs-literal { color:#8d4b94; }
+.cw-markdown .hljs-string,.cw-markdown .hljs-regexp,.cw-markdown .hljs-attr { color:#2d7055; }
+.cw-markdown .hljs-number,.cw-markdown .hljs-symbol,.cw-markdown .hljs-built_in { color:#936323; }
+.cw-markdown .hljs-title,.cw-markdown .hljs-type { color:#386b99; }
+.cw-markdown .hljs-comment,.cw-markdown .hljs-meta { color:#7b8373; font-style:italic; }
+:root[data-theme="dark"] .cw-markdown .hljs-keyword,:root[data-theme="dark"] .cw-markdown .hljs-selector-tag,:root[data-theme="dark"] .cw-markdown .hljs-literal { color:#ce9bd1; }
+:root[data-theme="dark"] .cw-markdown .hljs-string,:root[data-theme="dark"] .cw-markdown .hljs-regexp,:root[data-theme="dark"] .cw-markdown .hljs-attr { color:#9fc4a0; }
+:root[data-theme="dark"] .cw-markdown .hljs-number,:root[data-theme="dark"] .cw-markdown .hljs-symbol,:root[data-theme="dark"] .cw-markdown .hljs-built_in { color:#d3ba8e; }
+:root[data-theme="dark"] .cw-markdown .hljs-title,:root[data-theme="dark"] .cw-markdown .hljs-type { color:#9bb9d6; }
+:root[data-theme="dark"] .cw-markdown .hljs-comment,:root[data-theme="dark"] .cw-markdown .hljs-meta { color:#9ba68f; }
 .cw-message-actions { display:flex; align-items:center; gap:16px; margin-top:18px; color:var(--cw-muted); }
 .cw-copy,.cw-text-button { display:inline-flex; align-items:center; justify-content:center; gap:6px; background:transparent; border:0; padding:4px 0; font-size:11px!important; color:var(--cw-muted); }
 .cw-copy:hover,.cw-text-button:hover { color:var(--cw-ink); }

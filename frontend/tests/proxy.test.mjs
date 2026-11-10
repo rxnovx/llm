@@ -32,7 +32,7 @@ before(async () => {
     if (mode === "timeout") { await new Promise((resolve) => setTimeout(resolve, 350)); }
     if (mode === "invalid-json") { response.end("not-json"); return; }
     if (mode === "invalid-token") { response.end(JSON.stringify({ user: {} })); return; }
-    if (["401", "429", "503"].includes(mode)) {
+    if (["401", "403", "429", "503"].includes(mode)) {
       response.statusCode = Number(mode);
       if (mode === "429") response.setHeader("retry-after", "60");
       response.end(JSON.stringify({ detail: "simulated upstream error" })); return;
@@ -198,4 +198,26 @@ test("chat routes keep origin validation, path boundaries and pagination query",
   assert.equal((await fetch(`${origin}/api/chat/admin`)).status, 404);
   await fetch(`${origin}/api/chat/conversations?offset=50&limit=25`);
   assert.equal(received.path, "/chat/conversations?offset=50&limit=25");
+});
+
+test("operator proxy preserves permission denials and forwards metadata queries without cookies", async () => {
+  mode = "403";
+  assert.equal((await fetch(`${origin}/api/admin/overview`, { headers: { authorization: "Bearer member" } })).status, 403);
+  mode = "tokens";
+  await fetch(`${origin}/api/admin/users?q=alice&offset=20`, { headers: { authorization: "Bearer operator", cookie: "private-cookie=value" } });
+  assert.equal(received.path, "/admin/users?q=alice&offset=20");
+  assert.equal(received.headers.authorization, "Bearer operator");
+  assert.equal(received.headers.cookie, undefined);
+});
+
+test("operator mutations still require same-origin CSRF protection and cannot reach other paths", async () => {
+  mode = "tokens";
+  const endpoint = `${origin}/api/admin/connections/demo/check`;
+  for (const headers of [{}, { ...csrf, origin: "https://other.example" }]) {
+    assert.equal((await fetch(endpoint, { method: "POST", headers })).status, 403);
+  }
+  assert.equal((await fetch(endpoint, { method: "POST", headers: csrf })).status, 200);
+  assert.equal(received.path, "/admin/connections/demo/check");
+  assert.equal((await fetch(`${origin}/api/admin/database`)).status, 404);
+  assert.equal((await fetch(`${origin}/api/admin/users`, { method: "POST", headers: csrf })).status, 404);
 });
