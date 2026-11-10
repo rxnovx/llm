@@ -1,0 +1,74 @@
+name: llm
+
+x-service-defaults: &defaults
+  init: true
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  api:
+    <<: *defaults
+    build: ./backend
+    env_file: .env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: sqlite:////app/data/app.db
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      AUTH_PROXY_SECRET: ${AUTH_PROXY_SECRET:?Set AUTH_PROXY_SECRET in .env}
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8000
+      SERVER_RELOAD: "false"
+      EXPOSE_DOCS: "false"
+      EXPOSE_AUTH_TOKENS_IN_RESPONSE: "false"
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-disabled}
+      UPLOAD_DIRECTORY: /app/data/avatars
+    volumes: ["app-data:/app/data"]
+    ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  web:
+    <<: *defaults
+    build: ./frontend
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+      APP_URL: ${APP_URL:-http://localhost:8080}
+      AUTH_SERVER_URL: http://api:8000
+      AUTH_PROXY_SECRET: ${AUTH_PROXY_SECRET:?Set AUTH_PROXY_SECRET in .env}
+      AUTH_PROXY_CLIENT_IP_HEADER: x-real-ip
+    ports: ["127.0.0.1:${FRONTEND_PORT:-3000}:3000"]
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  nginx:
+    <<: *defaults
+    image: nginxinc/nginx-unprivileged:1.28-alpine
+    ports: ["${HTTP_PORT:-8080}:8080"]
+    volumes: ["./deploy/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    depends_on:
+      web: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  app-data:
