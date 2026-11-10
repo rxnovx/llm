@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { WorkspaceLink as Link } from "@/components/shared/WorkspaceLink";
 import type { ReactNode } from "react";
 
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
@@ -8,12 +8,7 @@ export const authInputClassName =
 
 export function AuthPageShell({ children }: { children: ReactNode }) {
   return (
-    <main className="relative flex min-h-dvh items-center justify-center bg-[var(--bg)] px-4 py-10 text-[var(--fg)]">
-      <div className="absolute right-4 top-4">
-        <ThemeToggle />
-      </div>
-      {children}
-    </main>
+    <div className="auth-modal-content">{children}<div className="auth-theme-control"><ThemeToggle /></div></div>
   );
 }
 
@@ -31,12 +26,12 @@ export function AuthCard({
   wide?: boolean;
 }) {
   return (
-    <section className={`w-full ${wide ? "max-w-lg" : "max-w-sm"} rounded-[var(--radius-xl)] border border-[var(--border)] bg-[var(--surface)] p-6 shadow-[var(--shadow-md)]`}>
+    <section className={`auth-modal-card ${wide ? "auth-modal-card-wide" : ""}`}>
       <Link data-ui-feedback="surface" href="/" className="mb-7 inline-flex items-center gap-2">
         <span aria-hidden="true" className="grid size-8 place-items-center rounded-lg bg-[var(--primary)] text-[var(--on-primary)]">L</span>
         <span className="text-sm font-semibold">LLM</span>
       </Link>
-      <h1 data-design-part="heading" className="text-2xl font-bold tracking-[-0.025em]">{title}</h1>
+      <h2 data-design-part="heading" className="text-2xl font-semibold tracking-[-0.025em]">{title}</h2>
       <p className="mt-2 text-sm leading-6 text-[var(--fg-muted)]">
         {description}
       </p>

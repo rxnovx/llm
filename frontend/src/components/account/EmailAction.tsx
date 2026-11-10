@@ -1,12 +1,13 @@
 "use client";
 import { useState, type FormEvent } from "react";
 import { useSearchParams } from "next/navigation";
-import Link from "next/link";
+import { WorkspaceLink as Link } from "@/components/shared/WorkspaceLink";
 import { AuthCard, AuthError, AuthField, AuthPageShell, AuthStatus, authInputClassName } from "@/components/auth/AuthCard";
 import { api, authApi } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/api-error";
 import { useAuthStore } from "@/stores/authStore";
 import type { AuthMessage } from "@/types/auth";
+import { workspaceHref, WORKSPACE_LOCATION_EVENT } from "@/lib/workspace-navigation";
 
 export function EmailAction({ mode }: { mode: "verify" | "reset" | "recover" }) {
   const query = useSearchParams();
@@ -42,7 +43,8 @@ export function EmailAction({ mode }: { mode: "verify" | "reset" | "recover" }) 
         if (token) await useAuthStore.getState().logout();
       }
       setMessage(text); setDone(Boolean(token)); setPassword(""); setConfirm("");
-      if (token) window.history.replaceState(null, "", window.location.pathname);
+      if (token) { window.history.replaceState(null, "", workspaceHref(window.location.pathname, window.location.search));
+        window.dispatchEvent(new Event(WORKSPACE_LOCATION_EVENT)); }
     } catch (caught) { setError(getApiErrorMessage(caught, "요청을 완료하지 못했습니다.")); }
     finally { setBusy(false); }
   };

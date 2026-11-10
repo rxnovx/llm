@@ -36,9 +36,9 @@ export function rejectUnsafeMutation(request: NextRequest): NextResponse | null 
   return null;
 }
 
-export async function requestBody(request: NextRequest): Promise<ArrayBuffer> {
+export async function requestBody(request: NextRequest, maxBodyBytes = MAX_BODY_BYTES): Promise<ArrayBuffer> {
   const limit = Number(request.headers.get("content-length"));
-  if (limit > MAX_BODY_BYTES) throw new RangeError("요청 크기가 너무 큽니다.");
+  if (limit > maxBodyBytes) throw new RangeError("요청 크기가 너무 큽니다.");
   if (!request.body) return new ArrayBuffer(0);
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -48,7 +48,7 @@ export async function requestBody(request: NextRequest): Promise<ArrayBuffer> {
       const { value, done } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_BODY_BYTES) {
+      if (size > maxBodyBytes) {
         await reader.cancel();
         throw new RangeError("요청 크기가 너무 큽니다.");
       }

@@ -1,12 +1,14 @@
 "use client";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import Link from "next/link";
+import { WorkspaceLink as Link } from "@/components/shared/WorkspaceLink";
 import { useRouter } from "next/navigation";
 import { AuthCard, AuthError, AuthField, AuthPageShell, authInputClassName } from "@/components/auth/AuthCard";
 import { authApi } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/api-error";
 import { useAuthStore } from "@/stores/authStore";
 import type { AuthConfig, AuthUser } from "@/types/auth";
+import { workspaceHref } from "@/lib/workspace-navigation";
+import { getSafeNextPath } from "@/lib/auth-router";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -34,9 +36,9 @@ export default function SignupPage() {
         password: values.password, display_name: values.displayName.trim() || null,
         accept_terms: values.consent, locale: "ko", time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       });
-      if (data.email_verification_required) { router.replace(`/user/verify-email?email=${encodeURIComponent(values.email)}`); return; }
+      if (data.email_verification_required) { router.replace(workspaceHref(`/user/verify-email?email=${encodeURIComponent(values.email)}`, window.location.search), { scroll: false }); return; }
       await useAuthStore.getState().login({ loginId: values.username, password: values.password });
-      router.replace("/");
+      router.replace(workspaceHref(getSafeNextPath(new URLSearchParams(window.location.search).get("next")), window.location.search), { scroll: false });
     } catch (caught) { setError(getApiErrorMessage(caught, "회원가입을 완료하지 못했습니다.")); }
     finally { setBusy(false); }
   };

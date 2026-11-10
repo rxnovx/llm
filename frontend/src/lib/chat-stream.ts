@@ -17,10 +17,11 @@ export async function readChatStream(stream: ReadableStream<Uint8Array>, onEvent
         if (line.startsWith("event:")) name = line.slice(6).trim();
         else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
         else if (!line) {
-          if (data.length && ["start", "delta", "done", "error", "cancelled"].includes(name)) {
+          if (data.length && ["start", "queue", "context", "delta", "done", "error", "cancelled"].includes(name)) {
             const payload = JSON.parse(data.join("\n"));
             if (!payload || typeof payload !== "object") throw new Error("응답 형식이 올바르지 않습니다.");
             if (name === "delta" && typeof payload.content !== "string") throw new Error("응답 형식이 올바르지 않습니다.");
+            if (name === "queue" && (!["queued", "running"].includes(payload.status) || !Number.isSafeInteger(payload.position) || payload.position < 0)) throw new Error("대기열 응답 형식이 올바르지 않습니다.");
             onEvent({ event: name, data: payload } as ChatEvent);
             if (["done", "error", "cancelled"].includes(name)) finished = true;
           }

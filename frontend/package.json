@@ -15,6 +15,9 @@
     "test:proxy": "node --test tests/proxy.test.mjs",
     "test:env": "node --test tests/env.test.mjs",
     "test:chat": "node --experimental-strip-types --test tests/chat-stream.test.mjs",
+    "test:markdown": "node --test tests/markdown.test.mjs",
+    "test:api": "node --test tests/authenticated-fetch.test.mjs",
+    "test:navigation": "node --experimental-strip-types --test tests/workspace-navigation.test.mjs",
     "test:browser": "playwright test",
     "predev": "node scripts/prepare-next-wasm.mjs",
     "prebuild": "node scripts/prepare-next-wasm.mjs",
@@ -22,11 +25,15 @@
   },
   "dependencies": {
     "axios": "^1.18.0",
+    "katex": "^0.19.1",
     "next": "16.2.12",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

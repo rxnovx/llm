@@ -16,6 +16,23 @@ class ProviderError(Exception):
     pass
 
 
+class ModelProfile(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: str = Field(min_length=1, max_length=200)
+    context_window: int = Field(8192, ge=1024, le=1048576)
+    max_output_tokens: int = Field(2048, ge=64, le=16384)
+    max_concurrent: int = Field(2, ge=1, le=64)
+
+    @model_validator(mode='after')
+    def budget(self):
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError('모델 ID를 입력하세요.')
+        if self.max_output_tokens + 512 >= self.context_window:
+            raise ValueError('문맥 한도는 최대 출력보다 512 이상 커야 합니다.')
+        return self
+
+
 class Connection(BaseModel):
     model_config = ConfigDict(extra='forbid')
     id: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,64}$')
@@ -24,9 +41,17 @@ class Connection(BaseModel):
     base_url: str = ''
     model: str = Field('', max_length=200)
     api_key: SecretStr = SecretStr('')
+    credential_ready: bool = True
+    enabled: bool = True
+    allowed_users: list[str] = Field(default_factory=list, max_length=500)
+    models: list[ModelProfile] = Field(default_factory=list, max_length=100)
+    context_window: int = Field(8192, ge=1024, le=1048576)
+    max_output_tokens: int = Field(2048, ge=64, le=16384)
+    max_concurrent: int = Field(2, ge=1, le=64)
 
     @model_validator(mode='after')
     def validate_url(self):
+        self.allowed_users = sorted(set(name.strip().lower() for name in self.allowed_users if name.strip()))
         if self.provider != 'test':
             url = urlsplit(self.base_url)
             if (url.scheme not in {'http', 'https'} or not url.hostname or url.username
@@ -34,19 +59,36 @@ class Connection(BaseModel):
                 raise ValueError('Use an HTTP(S) base URL without credentials, query or fragment')
             # Validate malformed / out-of-range ports as well.
             _ = url.port
+        ModelProfile(name=self.model or 'default', context_window=self.context_window,
+            max_output_tokens=self.max_output_tokens, max_concurrent=self.max_concurrent)
+        if len({profile.name for profile in self.models}) != len(self.models):
+            raise ValueError('모델 ID는 중복할 수 없습니다.')
         return self
+
+    def profile(self, model: str) -> ModelProfile:
+        for profile in self.models:
+            if profile.name == model:
+                return profile
+        if self.models:
+            raise ProviderError('이 연결에서 허용되지 않은 모델입니다.')
+        return ModelProfile(name=model or self.model or 'demo', context_window=self.context_window,
+            max_output_tokens=self.max_output_tokens, max_concurrent=self.max_concurrent)
 
     def public(self):
         return {'id': self.id, 'name': self.name, 'provider': self.provider,
-                'default_model': self.model, 'is_test': self.provider == 'test'}
+                'default_model': self.model, 'is_test': self.provider == 'test',
+                'models': [item.model_dump() for item in self.models],
+                'context_window': self.context_window, 'max_output_tokens': self.max_output_tokens,
+                'max_concurrent': self.max_concurrent}
 
 
-def connections(settings: Settings) -> list[Connection]:
+def connections(settings: Settings, db=None, user=None, *, include_disabled=False) -> list[Connection]:
     try:
         values = json.loads(settings.llm_connections_json)
         if not isinstance(values, list) or len(values) > 20:
             raise ValueError()
-        configured = [Connection.model_validate(value) for value in values]
+        configured = [Connection.model_validate({'max_output_tokens': settings.llm_max_tokens,
+            'context_window': max(8192, settings.llm_max_tokens + 1024), **value}) for value in values]
         ids = [item.id for item in configured]
         if len(ids) != len(set(ids)) or 'demo' in ids or any(item.provider == 'test' for item in configured):
             raise ValueError()
@@ -54,11 +96,15 @@ def connections(settings: Settings) -> list[Connection]:
         # Never include configuration values: they may contain an API key.
         raise ProviderError('서버의 LLM_CONNECTIONS_JSON 설정을 확인해 주세요.') from None
     demo = [Connection(id='demo', name='테스트 모델', provider='test', model='demo')] if settings.llm_test_mode else []
-    return demo + configured
+    if db is not None:
+        from app.modules.chat.registry import overlay
+        configured = overlay(settings, configured, db)
+    return [item for item in demo + configured if (include_disabled or (item.enabled and item.credential_ready))
+        and (user is None or user.is_global_admin or not item.allowed_users or user.username in item.allowed_users)]
 
 
-def resolve(settings: Settings, connection_id: str) -> Connection:
-    for item in connections(settings):
+def resolve(settings: Settings, connection_id: str, db=None, user=None) -> Connection:
+    for item in connections(settings, db, user):
         if item.id == connection_id:
             return item
     raise ProviderError('선택한 연결을 사용할 수 없습니다. 연결 설정을 확인해 주세요.')
@@ -92,6 +138,7 @@ async def list_models(connection: Connection) -> list[str]:
 
 
 DEMO_REPLIES = [
+    '## Markdown 예시\n\n**핵심 내용**을 정리하고 ~~완료한 항목~~을 구분할 수 있어요.\n\n- [x] 대화 시작\n- [ ] 다음 질문 정리\n\n간단한 관계식은 $E=mc^2$처럼 표현할 수 있습니다.\n\n> 코드와 표, 수식도 같은 대화 안에서 읽을 수 있어요.\n\n추가 설명은 각주로 남겨둘게요.[^1]\n\n[^1]: 이것은 실제 모델 호출 없이 생성된 테스트 예시입니다.',
     '좋아요. 먼저 **목표와 조건**을 나눠 적어 보면 정리가 쉬워져요.\n\n1. 원하는 결과를 한 문장으로 적기\n2. 꼭 지켜야 할 조건 정리하기\n3. 가장 작은 단계부터 실행하기\n\n지금 가장 먼저 해결하고 싶은 부분은 무엇인가요?',
     '한 가지 방법만 고르기보다 두 가지 안을 비교해 보면 어떨까요?\n\n| 기준 | 간단하게 시작 | 충분히 준비 |\n| --- | --- | --- |\n| 장점 | 바로 확인할 수 있어요 | 방향을 미리 정할 수 있어요 |\n| 고려할 점 | 수정이 필요할 수 있어요 | 준비 시간이 필요해요 |\n\n어떤 쪽이 지금 상황에 더 잘 맞나요?',
     '조금 더 구체적으로 생각해 볼게요.\n\n- **현재 상황**: 이미 알고 있는 것과 모르는 것을 나눠 보세요.\n- **다음 행동**: 오늘 할 수 있는 일 하나를 정해 보세요.\n- **확인 방법**: 잘됐는지 판단할 기준을 적어 보세요.\n\n작게 시작한 뒤 결과를 보고 조정해도 충분해요.',
@@ -108,8 +155,10 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
             yield reply[index:index + 9]
         return
     vllm = connection.provider == 'vllm'
+    profile = connection.profile(model)
     payload = {'model': model, 'messages': history, 'stream': True}
-    payload.update({'max_tokens': settings.llm_max_tokens} if vllm else {'options': {'num_predict': settings.llm_max_tokens}})
+    payload.update({'max_tokens': profile.max_output_tokens} if vllm else {
+        'options': {'num_predict': profile.max_output_tokens, 'num_ctx': profile.context_window}})
     complete = False
     try:
         async with client(connection, settings.llm_timeout_seconds) as session:
