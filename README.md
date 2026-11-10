@@ -20,6 +20,8 @@
 
 로그인 후 `/`에서 대화를 시작합니다. 기본 `LLM_TEST_MODE=true`는 랜덤 예시 답변을 스트리밍하며 실제 모델에 접속하지 않습니다. 대화 기록은 기본 SQLite에 계정별로 저장됩니다. 실제 폐쇄망 서버를 연결하려면 [LLM_CONNECTIONS.md](LLM_CONNECTIONS.md)를 참고합니다. 서비스 10곳의 레퍼런스와 화면 구성 판단은 [DESIGN.md](DESIGN.md)에 기록했습니다.
 
+메인은 로그인 전후 모두 채팅 화면입니다. 사이드바 계정 메뉴의 **설정**에서 일반·프로필·보안·로그인 기기·계정을 모달로 관리합니다. 로그인·가입·복구·운영 화면도 채팅 위에서 열리며, 앱 안에서 모달을 열고 닫는 동안 대화와 작성 중인 글을 유지하도록 구성했습니다. 직접 접근 주소와 동작은 [MODALS.md](MODALS.md)에 있습니다.
+
 운영 화면의 **모델 관리**에서 서버·모델·사용 허용 계정·문맥 및 동시 생성 한도를 저장하면 재시작 없이 적용됩니다. 채팅의 **문맥**에서 입력 예산·제외된 대화를 확인하고 요약 메모를 직접 넣을 수 있습니다. 모델·사용자 한도를 넘는 생성은 DB 대기열에서 순서와 취소 버튼을 표시합니다. 기존 프론트엔드 `.env`의 `LLM_REQUEST_TIMEOUT_MS=150000`은 대기 시간을 포함하도록 `180000` 이상으로 수정하세요. 환경파일 예제와 [연결 문서](LLM_CONNECTIONS.md)에 전체 설정을 정리했습니다.
 
 현재 대화의 상단 제목 옆 편집 버튼 또는 사이드바 대화 메뉴의 **이름 변경**으로 제목을 수정합니다. 직접 정한 제목은 첫 메시지의 자동 제목으로 덮어쓰지 않습니다. Markdown 범위는 [MARKDOWN.md](MARKDOWN.md), 최초 운영자 지정과 `/admin` 사용법은 [OPERATIONS.md](OPERATIONS.md)에 있습니다.
@@ -151,6 +153,7 @@ npm run test:env
 npm run test:chat
 npm run test:markdown
 npm run test:api
+npm run test:navigation
 npm run test:portable
 ```
 

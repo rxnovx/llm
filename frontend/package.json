@@ -17,6 +17,7 @@
     "test:chat": "node --experimental-strip-types --test tests/chat-stream.test.mjs",
     "test:markdown": "node --test tests/markdown.test.mjs",
     "test:api": "node --test tests/authenticated-fetch.test.mjs",
+    "test:navigation": "node --experimental-strip-types --test tests/workspace-navigation.test.mjs",
     "test:browser": "playwright test",
     "predev": "node scripts/prepare-next-wasm.mjs",
     "prebuild": "node scripts/prepare-next-wasm.mjs",

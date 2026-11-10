@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import Link from "next/link";
+import { WorkspaceLink as Link } from "@/components/shared/WorkspaceLink";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/authStore";
 import { chatFetch, chatJson } from "@/lib/chat-api";
@@ -14,6 +14,7 @@ import { ContextDialog } from "./ContextDialog";
 import { CopyButton, MessageContent } from "./MessageContent";
 import { Icon, Wordmark, type IconName } from "./Icons";
 import "./workspace.css";
+import { replaceConversationLocation, workspaceHref } from "@/lib/workspace-navigation";
 
 const starters: { icon: IconName; title: string; prompt: string }[] = [
   { icon: "idea", title: "아이디어 정리", prompt: "떠오른 아이디어를 실행 가능한 계획으로 정리하고 싶어요. 먼저 어떤 내용을 알려드리면 좋을까요?" },
@@ -26,15 +27,14 @@ const shortDate = (timestamp: number) => new Date(timestamp * 1000).toLocaleDate
 export function ChatWorkspace() {
   const user = useAuthStore((state) => state.user);
   const initialized = useAuthStore((state) => state.initialized);
-  if (!initialized) return <main className="cw-gate"><Wordmark /><p role="status">워크스페이스를 여는 중…</p></main>;
-  if (!user) return <main className="cw-gate"><div className="cw-gate-theme"><ThemeToggle /></div><Wordmark />
-    <span className="cw-overline">LLM WORKSPACE</span><h1>나의 모델과, 나의 대화.</h1><p>로그인하고 새로운 대화를 시작하세요.</p>
-    <div className="cw-gate-actions"><Link className="cw-primary-button" href="/login?next=/">로그인<Icon name="arrow" size={16} /></Link>
-      <Link className="cw-text-button" href="/user/signup">계정 만들기</Link></div></main>;
-  return <Workspace key={user.subject} user={user} />;
+  const [guestDraft, setGuestDraft] = useState("");
+  useEffect(() => useAuthStore.subscribe((state, previous) => {
+    if (previous.user && previous.user.subject !== state.user?.subject) setGuestDraft("");
+  }), []);
+  return <Workspace key={user?.subject ?? "guest"} user={user} ready={initialized} initialDraft={guestDraft} onGuestDraft={setGuestDraft} />;
 }
 
-function Workspace({ user }: { user: AuthUser }) {
+function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser | null; ready: boolean; initialDraft: string; onGuestDraft: (draft: string) => void }) {
   const router = useRouter();
   const [connections, setConnections] = useState<Connection[]>([]);
   const [selected, setSelected] = useState("");
@@ -42,8 +42,10 @@ function Workspace({ user }: { user: AuthUser }) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [active, setActive] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [draft, setDraft] = useState("");
-  const [initializing, setInitializing] = useState(true);
+  const [localDraft, setDraftValue] = useState(initialDraft);
+  const draft = user ? localDraft : initialDraft;
+  const setDraft = (value: string) => { setDraftValue(value); if (!user) onGuestDraft(value); };
+  const [initializing, setInitializing] = useState(Boolean(user));
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState("");
@@ -73,9 +75,12 @@ function Workspace({ user }: { user: AuthUser }) {
   const sending = useRef(false);
   const connection = connections.find((item) => item.id === selected);
   const busy = streaming || !!active?.busy;
-  const canSend = !!connection && (connection.is_test || !!model.trim()) && !busy && !loading && !initializing;
+  const subject = user?.subject;
+  const canSend = ready && (!user || !!connection && (connection.is_test || !!model.trim())) && !busy && !loading && !initializing;
+  const openModels = () => { if (user) setSettingsOpen(true); else router.push(workspaceHref("/login", window.location.search), { scroll: false }); };
 
   useEffect(() => {
+    if (!subject) return;
     const abort = new AbortController();
     void Promise.all([
       chatJson<{ connections: Connection[] }>("/config", { signal: abort.signal }),
@@ -94,10 +99,10 @@ function Workspace({ user }: { user: AuthUser }) {
     }).catch((caught) => { if (!abort.signal.aborted) setError(errorText(caught)); })
       .finally(() => { if (!abort.signal.aborted) setInitializing(false); });
     return () => { abort.abort(); controller.current?.abort(); loadController.current?.abort(); };
-  }, []);
+  }, [subject]);
 
   useEffect(() => {
-    if (busy) return;
+    if (busy || !subject) return;
     const abort = new AbortController();
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
@@ -107,10 +112,11 @@ function Workspace({ user }: { user: AuthUser }) {
     if (settingsOpen) refresh();
     window.addEventListener("focus", refresh);
     return () => { abort.abort(); window.removeEventListener("focus", refresh); };
-  }, [busy, settingsOpen]);
+  }, [busy, settingsOpen, subject]);
 
   useEffect(() => {
     const keyboard = (event: KeyboardEvent) => {
+      if (document.querySelector("dialog[open]")) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault(); setSearching(true); setSidebar(true);
         requestAnimationFrame(() => searchInput.current?.focus());
@@ -174,7 +180,7 @@ function Workspace({ user }: { user: AuthUser }) {
     loadController.current?.abort(); setLoading(false);
     setActive(null); setMessages([]); setDraft(""); setError(""); setSidebar(false); setMenu(""); pinned.current = true;
     setContextReport(null); setQueue(null); setContextOpen(false); generation.current = null;
-    window.history.replaceState(null, "", "/");
+    replaceConversationLocation(null);
     requestAnimationFrame(() => editor.current?.focus());
   };
   const openConversation = async (item: Conversation) => {
@@ -189,7 +195,7 @@ function Workspace({ user }: { user: AuthUser }) {
       setContextReport(null); setQueue(detail.generation ?? null); setContextOpen(false);
       generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
       setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
-      window.history.replaceState(null, "", `/?chat=${item.id}`);
+      replaceConversationLocation(item.id);
     } catch (caught) { if (!abort.signal.aborted) setError(errorText(caught)); }
     finally { if (!abort.signal.aborted) setLoading(false); }
   };
@@ -197,6 +203,8 @@ function Workspace({ user }: { user: AuthUser }) {
   const send = async (content = draft, retry = false) => {
     const text = content.trim();
     if (!text || !canSend || sending.current) return;
+    if (!user) { onGuestDraft(text); router.push(workspaceHref("/login", window.location.search), { scroll: false }); return; }
+    onGuestDraft("");
     sending.current = true; setStreaming(true); setError(""); pinned.current = true;
     const abort = new AbortController(); controller.current = abort;
     const originalDraft = draft;
@@ -208,7 +216,7 @@ function Workspace({ user }: { user: AuthUser }) {
         current = await chatJson<Conversation>("/conversations", { method: "POST", signal: abort.signal,
           body: JSON.stringify({ connection_id: selected, model }) });
         setActive(current); updateConversation(current);
-        window.history.replaceState(null, "", `/?chat=${current.id}`);
+        replaceConversationLocation(current.id);
       }
       const id = crypto.randomUUID(); generation.current = { id, conversation: current.id };
       const response = await chatFetch(`/conversations/${current.id}/messages`, { method: "POST", signal: abort.signal,
@@ -273,7 +281,7 @@ function Workspace({ user }: { user: AuthUser }) {
       } else {
         await chatJson(`/conversations/${action.item.id}`, { method: "DELETE" });
         setConversations((old) => old.filter((entry) => entry.id !== action.item.id));
-        if (active?.id === action.item.id) { setActive(null); setMessages([]); setDraft(""); window.history.replaceState(null, "", "/"); }
+        if (active?.id === action.item.id) { setActive(null); setMessages([]); setDraft(""); replaceConversationLocation(null); }
       }
       setError(""); setAction(null);
     } catch (caught) { setError(errorText(caught)); }
@@ -290,20 +298,20 @@ function Workspace({ user }: { user: AuthUser }) {
     finally { setLoading(false); }
   };
   const logout = async () => {
-    try { controller.current?.abort(); await useAuthStore.getState().logout(); router.replace("/login"); }
+    try { controller.current?.abort(); await useAuthStore.getState().logout(); router.replace(workspaceHref("/login", window.location.search), { scroll: false }); }
     catch (caught) { setError(errorText(caught)); }
   };
   const visible = conversations.filter((item) => item.title.toLocaleLowerCase().includes(search.toLocaleLowerCase().trim()));
   const composer = <form className={`cw-composer ${streaming ? "is-streaming" : ""}`} onSubmit={(event) => { event.preventDefault(); void send(); }}>
     <label className="cw-sr-only" htmlFor="chat-message">메시지</label>
-    <textarea ref={editor} id="chat-message" placeholder={connection ? "무엇이든 편하게 물어보세요" : "모델을 연결하고 대화를 시작하세요"}
+    <textarea ref={editor} id="chat-message" placeholder={!user || connection ? "무엇이든 편하게 물어보세요" : "모델을 연결하고 대화를 시작하세요"}
       value={draft} rows={2} maxLength={16000} disabled={loading || initializing || !!active?.busy && !streaming} onChange={(event) => setDraft(event.target.value)}
       onKeyDown={(event) => {
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
           event.preventDefault(); void send();
         }
       }} />
-    <div className="cw-composer-bottom"><button className="cw-model-picker" type="button" disabled={busy} onClick={() => setSettingsOpen(true)}>
+    <div className="cw-composer-bottom"><button className="cw-model-picker" type="button" disabled={busy} onClick={openModels}>
       <Icon name={connection?.is_test ? "chat" : "server"} size={16} /><span>{connection?.is_test ? connection.name : model || connection?.name || "모델 연결"}</span><Icon name="chevron" size={14} /></button>
       {active && <button className="cw-context-button" type="button" disabled={busy || !connection} onClick={() => setContextOpen(true)}>문맥</button>}
       <span className="cw-enter-hint">Shift + Enter 줄바꿈</span>
@@ -329,25 +337,27 @@ function Workspace({ user }: { user: AuthUser }) {
           {menu === item.id && <div className="cw-row-menu"><button onClick={() => rename(item)}><Icon name="edit" size={14} />이름 변경</button>
             <button className="cw-danger" onClick={() => { setAction({ type: "delete", item }); setMenu(""); setError(""); }}><Icon name="trash" size={14} />삭제</button></div>}</div>)}</nav>
         {hasMore && <button className="cw-load-more" disabled={loading} onClick={() => void loadMore()}>이전 대화 더 보기</button>}</div>
-      <footer className="cw-sidebar-footer"><button className="cw-connection-link" onClick={() => setSettingsOpen(true)}><Icon name="settings" size={17} />모델 연결<span>{connections.length}</span></button>
-        <div className="cw-account-wrap">{accountOpen && <div className="cw-account-menu"><Link href="/user/profile"><Icon name="settings" size={15} />계정 설정</Link>
-          {user.is_global_admin && <Link href="/admin"><Icon name="server" size={15} />운영 대시보드</Link>}<ThemeToggle />
+      <footer className="cw-sidebar-footer"><button className="cw-connection-link" onClick={openModels}><Icon name="settings" size={17} />모델 연결<span>{user ? connections.length : ""}</span></button>
+        {user ? <div className="cw-account-wrap">{accountOpen && <div className="cw-account-menu"><Link href="/user/settings" onClick={() => { setAccountOpen(false); setSidebar(false); }}><Icon name="settings" size={15} />설정</Link>
+          {user.is_global_admin && <Link href="/admin" onClick={() => { setAccountOpen(false); setSidebar(false); }}><Icon name="server" size={15} />운영 대시보드</Link>}<ThemeToggle />
           <button onClick={() => void logout()}><Icon name="logout" size={15} />로그아웃</button></div>}
-          <button className="cw-account" aria-expanded={accountOpen} onClick={() => setAccountOpen(!accountOpen)}>
-            <UserAvatar name={user.display_name || user.username} src={user.avatar_url} className="cw-user-avatar" /><span><strong>{user.display_name || user.username}</strong><small>개인 워크스페이스</small></span><Icon name="chevron" size={15} /></button></div></footer>
+          <button className="cw-account" data-workspace-focus aria-label="계정 메뉴" aria-expanded={accountOpen} onClick={() => setAccountOpen(!accountOpen)}>
+            <UserAvatar name={user.display_name || user.username} src={user.avatar_url} className="cw-user-avatar" /><span><strong>{user.display_name || user.username}</strong><small>개인 워크스페이스</small></span><Icon name="chevron" size={15} /></button></div>
+          : <div className="cw-guest-account"><Link data-workspace-focus href="/login">로그인</Link><Link href="/user/signup">계정 만들기</Link></div>}</footer>
     </aside>
     <main className="cw-main"><header className="cw-topbar"><div className="cw-topbar-left"><button className="cw-icon-button cw-mobile-only" aria-label="사이드바 열기" onClick={() => setSidebar(true)}><Icon name="panel" /></button>
       <span className="cw-topbar-workspace">워크스페이스</span><span className="cw-topbar-slash">/</span>
       {active ? <button className="cw-title-button" disabled={busy || loading} aria-label="대화 이름 변경" title="대화 이름 변경" onClick={() => rename(active)}>
         <span className="cw-topbar-title">{active.title}</span><Icon name="edit" size={13} /></button> : <span className="cw-topbar-title">새 대화</span>}</div>
-      <button className={`cw-mode ${connection?.is_test ? "is-test" : ""}`} onClick={() => setSettingsOpen(true)}><span />{connection?.is_test ? "테스트 모드" : connection?.name || "연결 선택"}<Icon name="chevron" size={12} /></button></header>
+      {user ? <button className={`cw-mode ${connection?.is_test ? "is-test" : ""}`} onClick={openModels}><span />{connection?.is_test ? "테스트 모드" : connection?.name || "연결 선택"}<Icon name="chevron" size={12} /></button>
+        : <div className="cw-guest-topbar"><ThemeToggle /><Link href="/login">로그인</Link></div>}</header>
       <div className={`cw-content ${messages.length ? "has-messages" : ""}`} ref={viewport} onScroll={() => {
         const element = viewport.current;
         if (element) { pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100; setScrollDown(!pinned.current); }
       }} aria-busy={loading}>
         {loading && <p className="cw-loading" role="status">대화를 불러오는 중…</p>}
         {!messages.length ? <div className="cw-welcome"><div className="cw-welcome-heading"><div className="cw-welcome-mark"><Wordmark /></div>
-          <p className="cw-greeting">{user.display_name || user.username}님의 워크스페이스</p><h1>무엇을 함께 해볼까요?</h1><p className="cw-welcome-description">생각을 정리하고, 질문하고, 다음 단계로.</p></div>
+          <p className="cw-greeting">{user ? `${user.display_name || user.username}님의 워크스페이스` : "내 모델과, 나의 대화."}</p><h1>무엇을 함께 해볼까요?</h1><p className="cw-welcome-description">생각을 정리하고, 질문하고, 다음 단계로.</p></div>
           {composer}<div className="cw-starters">{starters.map((item) => <button key={item.title} disabled={busy || loading} onClick={() => { setDraft(item.prompt); editor.current?.focus(); }}>
             <Icon name={item.icon} size={16} />{item.title}<span>↗</span></button>)}</div>
           {connection?.is_test && <p className="cw-demo-note"><span />현재 테스트 모드입니다. 실제 모델 대신 랜덤 예시 답변이 표시됩니다.</p>}

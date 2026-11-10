@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { WorkspaceLink as Link } from "@/components/shared/WorkspaceLink";
 import { authenticatedFetch, ApiRequestError } from "@/lib/authenticated-fetch";
 import { useAuthStore } from "@/stores/authStore";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
@@ -27,20 +27,20 @@ async function adminJson<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 function Status({ value }: { value: RunStatus }) { return <span className={`ops-status status-${value}`}>{labels[value]}</span>; }
 
-export function AdminDashboard() {
+export function AdminDashboard({ embedded = false }: { embedded?: boolean }) {
   const initialized = useAuthStore((state) => state.initialized);
   const user = useAuthStore((state) => state.user);
-  if (!initialized) return <main className="cw-gate"><p role="status">권한을 확인하는 중…</p></main>;
-  if (!user) return <main className="cw-gate"><Wordmark /><h1>운영자 로그인</h1><p>대시보드를 보려면 운영자 계정으로 로그인하세요.</p>
-    <Link className="cw-primary-button" href="/login?next=/admin">로그인</Link><Link href="/">워크스페이스로 돌아가기</Link></main>;
+  if (!initialized) return <section className="settings-access"><p role="status">권한을 확인하는 중…</p></section>;
+  if (!user) return <section className="settings-access"><Wordmark /><h2>운영자 로그인</h2><p>대시보드를 보려면 운영자 계정으로 로그인하세요.</p>
+    <Link className="account-button" href="/login?next=/admin">로그인</Link><Link href="/">대화로 돌아가기</Link></section>;
   if (!user.is_global_admin) return <AccessDenied />;
-  return <Dashboard key={user.subject} name={user.display_name || user.username} />;
+  return <Dashboard key={user.subject} name={user.display_name || user.username} embedded={embedded} />;
 }
 function AccessDenied() {
-  return <main className="cw-gate"><Wordmark /><h1>운영자 권한이 필요합니다</h1><p>이 계정으로는 운영 대시보드에 접근할 수 없습니다.</p><Link className="cw-primary-button" href="/">워크스페이스로 돌아가기</Link></main>;
+  return <section className="settings-access"><Wordmark /><h2>운영자 권한이 필요합니다</h2><p>이 계정으로는 운영 대시보드에 접근할 수 없습니다.</p><Link className="account-button" href="/">대화로 돌아가기</Link></section>;
 }
 
-function Dashboard({ name }: { name: string }) {
+function Dashboard({ name, embedded }: { name: string; embedded: boolean }) {
   const [overview, setOverview] = useState<OpsOverview | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
   const [mode, setMode] = useState<OpsMode>("all");
@@ -118,9 +118,9 @@ function Dashboard({ name }: { name: string }) {
   const maximum = Math.max(1, ...overview?.daily.map((day) => day.total) ?? []);
   const changeTab = (next: Tab) => { if (next === tab && page === 0) return; setLoading(true); setTab(next); setPage(0); };
 
-  return <main className="ops-dashboard"><header className="ops-nav"><Link className="ops-brand" href="/"><Wordmark small /><strong>llm.</strong><span>운영</span></Link>
-    <div><ThemeToggle /><span className="ops-operator">{name}</span><Link href="/">워크스페이스로<Icon name="arrow" size={14} /></Link></div></header>
-    <div className="ops-body"><header className="ops-heading"><div><p>WORKSPACE OPERATIONS</p><h1>운영 대시보드</h1><span>사용 현황과 모델 연결을 확인하세요.</span></div>
+  return <section className={`ops-dashboard ${embedded ? "ops-dashboard-embedded" : ""}`}>{!embedded && <header className="ops-nav"><Link className="ops-brand" href="/"><Wordmark small /><strong>llm.</strong><span>운영</span></Link>
+    <div><ThemeToggle /><span className="ops-operator">{name}</span><Link href="/">워크스페이스로<Icon name="arrow" size={14} /></Link></div></header>}
+    <div className="ops-body"><header className="ops-heading"><div><p>WORKSPACE OPERATIONS</p><h2>운영 현황</h2><span>사용 현황과 모델 연결을 확인하세요.</span></div>
       <div className="ops-refresh"><small>{overview ? `${timestamp(overview.generated_at, zone)} 기준` : "운영 정보를 불러옵니다"}</small>
         <button className="ops-button" disabled={loading} onClick={() => { setLoading(true); setRefresh((old) => old + 1); }}><Icon name="refresh" size={14} />{loading ? "불러오는 중…" : "새로고침"}</button></div></header>
       <div className="ops-toolbar"><nav aria-label="운영 메뉴">{tabs.map(([id, label]) => <button key={id} aria-current={tab === id ? "page" : undefined} onClick={() => changeTab(id)}>{label}</button>)}</nav>
@@ -174,5 +174,5 @@ function Dashboard({ name }: { name: string }) {
         <footer className="ops-pagination"><span>{page + 1}페이지</span><button className="ops-button" disabled={loading || page === 0} onClick={() => { setLoading(true); setPage((old) => old - 1); }}>이전</button><button className="ops-button" disabled={loading || !hasMore} onClick={() => { setLoading(true); setPage((old) => old + 1); }}>다음</button></footer>
       </section>}
       <p className="ops-footnote">생성 통계 필터는 사용자·세션 수에 적용되지 않습니다. 성공률은 완료·실패·중단 요청을 기준으로 계산하며 취소·대기·진행 중 요청은 제외합니다. 통계는 화면이 열려 있을 때 30초마다 갱신합니다.</p></>}
-    </div></main>;
+    </div></section>;
 }

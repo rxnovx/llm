@@ -128,6 +128,20 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             client.headers.update({"x-llm-account": "1", "origin": "http://127.0.0.1:3100"})
             # KaTeX fonts must be served by this app, including offline deployments.
             document = client.get('/').text
+            assert 'data-workspace-background' in document and re.search(r'<textarea\b[^>]*id="chat-message"',document)
+            assert 'data-workspace-modal=' not in document
+            modal_paths = {
+                '/login':'auth','/user/signup':'auth','/user/reset-password':'auth','/user/verify-email':'auth','/user/recover':'auth',
+                '/user/profile':'settings','/user/profile/edit':'settings','/user/settings':'settings','/admin':'admin',
+            }
+            for page_path,kind in modal_paths.items():
+                page=client.get(page_path,params={'chat':'12345678-1234-1234-1234-123456789abc'})
+                assert page.status_code==200, page_path
+                assert re.search(r'<dialog\b[^>]*data-workspace-modal="'+kind+'"',page.text), page_path
+                assert re.search(r'<textarea\b[^>]*id="chat-message"',page.text), page_path
+                assert re.search(r'<div\b[^>]*data-workspace-background[^>]*inert=',page.text), page_path
+            missing=client.get('/missing-workspace-page')
+            assert missing.status_code==404 and 'data-workspace-modal="other"' in missing.text
             styles = set(re.findall(r'href="([^" ]+\.css(?:\?[^" ]*)?)"', document))
             fonts = set()
             for style in styles:
@@ -248,7 +262,7 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             assert client.get("/api/account/users/me", headers=access).status_code == 401
             assert client.get("/login").status_code == 200
             assert all(process.poll() is None for process in processes), 'A test server exited during validation'
-            print("PASS: accounts, streaming, operator permissions, live model edits, context summaries and real HTTP queued cancellation")
+            print("PASS: chat-first HTML, all modal deep links, accounts, streaming, operator controls, context summaries and queued cancellation")
     except Exception:
         for handle in logs:
             handle.flush()
