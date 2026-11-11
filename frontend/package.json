@@ -15,7 +15,7 @@
     "test:proxy": "node --test tests/proxy.test.mjs",
     "test:env": "node --test tests/env.test.mjs",
     "test:chat": "node --experimental-strip-types --test tests/chat-stream.test.mjs",
-    "test:apps": "node --experimental-strip-types --test tests/app-mentions.test.mjs",
+    "test:apps": "node --experimental-strip-types --test tests/app-mentions.test.mjs tests/gitlab-progress.test.mjs",
     "test:markdown": "node --test tests/markdown.test.mjs",
     "test:api": "node --test tests/authenticated-fetch.test.mjs",
     "test:navigation": "node --experimental-strip-types --test tests/workspace-navigation.test.mjs",

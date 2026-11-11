@@ -19,6 +19,7 @@ from app.modules.auth.dependencies import Authenticated
 from app.modules.chat.models import Admission, ContextNote, Conversation, GenerationRun, Message
 from app.modules.chat import context as context_budget, providers, scheduler
 from app.modules.integrations import config as gitlab_config, service as gitlab_connections
+from app.modules.integrations import merge_requests
 from app.modules.integrations.models import MessageContext
 from app.modules.integrations.tools import GitlabSelection, read_context
 from app.modules.integrations.transport import GitlabError
@@ -275,6 +276,7 @@ class Turn:
     started_clock: float = 0
     parallel_used: bool = False
     publish_gitlab: bool = False
+    gitlab_generation: int | None = None
 
 
 def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, connection: providers.Connection) -> Turn:
@@ -343,6 +345,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     for app in apps:
         if app.get('mode')=='files':app.pop('mode',None)
         if app.get('workspace_id') is None:app.pop('workspace_id',None)
+        if app.get('merge_request') is None:app.pop('merge_request',None)
     if data.retry and (any(a.get('mode')=='execute' for a in apps) or (data.assistant.allow_writes if data.assistant else assistant.assistant_context and json.loads(assistant.assistant_context.data_json).get('allow_writes'))) and not data.confirm_write_retry:
         raise HTTPException(409,'외부 변경·명령이 다시 실행될 수 있습니다. 쓰기 재시도를 명시적으로 확인하세요.')
     workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute'})
@@ -350,11 +353,15 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         if not workspace_client.enabled():raise HTTPException(503,'운영자가 Terminal MCP 서버를 연결해야 합니다.')
         if connection.provider!='test' and not connection.profile(model).supports_tools:
             raise HTTPException(422,'이 모델의 도구 호출 사용이 설정되지 않았습니다. 다른 모델을 선택하거나 운영자에게 설정을 요청하세요.')
+    gitlab_generation = None
     if data.publish_gitlab:
         if data.retry or not data.apps or data.apps[0].mode != 'execute' or connection.provider == 'test':
-            raise HTTPException(422, 'MR 생성은 실제 모델의 프로젝트 분석·실행을 선택한 새 요청에서 허용할 수 있습니다.')
+            raise HTTPException(422, 'MR 게시는 실제 모델의 프로젝트 분석·실행을 선택한 새 요청에서 허용할 수 있습니다.')
         account = gitlab_connections.owned(db, user_id, data.apps[0].connection_id)
         gitlab_connections.require_publish(account, gitlab_config.instance(account.provider_id))
+        gitlab_generation = account.generation
+    elif apps and apps[0].get('merge_request'):
+        gitlab_generation = gitlab_connections.owned(db, user_id, apps[0]['connection_id']).generation
     if apps and not workspace_mode and context_budget.reference_budget(db,item.id,connection,model,content)<2000:
         raise HTTPException(422,'GitLab 파일을 담을 문맥 예산이 부족합니다. 질문·요약 메모를 줄이거나 더 큰 문맥의 모델을 선택하세요.')
     if assistant.source_record is None:
@@ -393,7 +400,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     return Turn(item.id, str(data.request_id), assistant.id, history,
         {'conversation': conversation_data(item), 'user_message': message_data(user_message),
          'assistant_message': message_data(assistant) | {'content': ''}, 'context': report}, previous_message, previous_connection, started_clock,
-        publish_gitlab=data.publish_gitlab)
+        publish_gitlab=data.publish_gitlab, gitlab_generation=gitlab_generation)
 
 
 def event(name: str, data: dict) -> str:
@@ -431,6 +438,14 @@ async def guarded_parts(iterator, cancelled):
 @router.post('/conversations/{conversation_id}/messages')
 async def send(conversation_id: UUID, data: TurnInput, request: Request, context: Authenticated, db: Database):
     user_id = context.user.id
+    if not data.apps and not data.retry and not data.publish_gitlab:
+        candidate = merge_requests.automatic_connection(db, user_id, data.content)
+        if candidate:
+            owned(db, conversation_id, user_id)
+            bind = db.get_bind()
+            db.rollback()
+            resolved = await merge_requests.resolve(bind, user_id, candidate)
+            data.apps = [GitlabSelection.model_validate(resolved['selection'])]
     connection = connection_for(data.connection_id, db, context.user)
     turn = prepare(db, conversation_id, context.user.id, data, connection)
     settings, bind = get_settings(), db.get_bind()
@@ -485,7 +500,7 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                 phase='model'
                 yield event('queue', {'status': 'running', 'position': 0, 'request_id': turn.request_id})
                 apps = turn.start['assistant_message']['apps']
-                workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute'})
+                workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute','merge_request'})
                 options=turn.start['assistant_message']['assistant']
                 with Session(bind) as session:general_mode=assistant_context.active(session,user_id,options,question=data.content.strip(),conversation_id=turn.conversation_id,connection=admitted)
                 async with asyncio.timeout(settings.terminal_agent_timeout_seconds if workspace_mode or general_mode else settings.llm_timeout_seconds):

@@ -146,7 +146,7 @@ MCP는 연결·도구 호출 규격이며, 아래 도구 이름과 권한 정책
 
 앱은 모델에 provisioning 도구와 인증 정보를 노출하지 않고 작업공간 ID도 서버에서 주입합니다. 모델에는 탐색 도구와 실행 모드의 `workspace_write_file`, `terminal_exec`만 제공합니다. 호스트가 실행 완료까지 로그를 수집하고 취소를 처리하므로 polling·stdin 제어 도구는 모델 입력에서 제외합니다. 사용자는 작업공간 모달에서 명령 입력·조회·중지를 할 수 있으며 `terminal_input`은 실행 허용이 필요합니다. 브라우저에서는 `/api/workspaces` BFF를 경유하며 `internal/checkout`은 접근할 수 없습니다.
 
-MR 생성 허용을 선택한 요청에는 API 호스트가 `gitlab_open_merge_request`를 제공합니다. Terminal MCP는 지정된 파일을 읽고 GitLab API 호출은 백엔드가 수행합니다.
+MR 쓰기를 허용한 요청에는 API 호스트가 새 MR용 `gitlab_open_merge_request` 또는 기존 MR용 `gitlab_update_merge_request`를 제공합니다. Terminal MCP는 지정된 파일을 읽고 GitLab API 호출은 백엔드가 수행합니다.
 
 ## 분석 범위와 수명
 

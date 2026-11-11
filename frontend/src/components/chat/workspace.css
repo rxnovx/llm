@@ -225,6 +225,17 @@
 .cw-message-sources>div { display:flex; flex-wrap:wrap; gap:7px; }.cw-message-sources a { display:flex; flex-direction:column; gap:6px; padding:10px 12px; max-width:100%; color:var(--cw-ink); border:1px solid var(--cw-line); border-radius:8px; text-decoration:none; overflow-wrap:anywhere; }
 .cw-message-sources a:hover { background:var(--cw-hover); }.cw-message-sources strong { font-size:11px; font-weight:500; }.cw-message-sources small { color:var(--cw-muted); font-size:10px; }
 .cw-gitlab-dialog { width:min(640px,calc(100vw - 32px)); }.cw-gitlab-dialog .cw-dialog-footer { gap:14px; }.cw-gitlab-dialog .cw-dialog-footer>span { font-size:11px; }
+.cw-mr-summary { display:grid; gap:5px; margin:14px 0; padding:12px; border:1px solid var(--cw-line); border-radius:7px; overflow-wrap:anywhere; }
+.cw-mr-summary strong { font-size:13px; }.cw-mr-summary small { font-size:11px; color:var(--cw-muted); }
+.cw-mr-progress { max-width:420px; margin:0 0 14px; padding:10px 12px; border:1px solid var(--cw-line); border-radius:8px; font-size:12px; }
+.cw-mr-progress header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:7px; }
+.cw-mr-progress ol { list-style:none; display:grid; gap:5px; padding:0; margin:0; }
+.cw-mr-progress li { display:grid; grid-template-columns:7px minmax(0,1fr) max-content; align-items:baseline; gap:9px; line-height:1.5; }
+.cw-mr-progress li small { display:block; color:var(--cw-muted); overflow-wrap:anywhere; }
+.cw-mr-step-dot { width:6px; height:6px; background:currentColor; border-radius:50%; align-self:center; }
+.cw-mr-step-status,.cw-mr-step-dot { color:var(--cw-muted); }
+.cw-mr-progress [data-status="running"] :is(.cw-mr-step-dot,.cw-mr-step-status) { color:var(--primary); }
+.cw-mr-progress [data-status="error"] :is(.cw-mr-step-dot,.cw-mr-step-status) { color:var(--error); }
 .cw-scope-field { display:flex; flex-direction:column; gap:8px; margin-block:15px; font-size:12px; color:var(--cw-muted); }
 .cw-scope-field input,.cw-scope-field select { width:100%; min-width:0; padding:10px 11px; border:1px solid var(--cw-line); border-radius:6px; background:var(--cw-panel); color:var(--cw-ink); font:inherit; font-size:13px; }
 .cw-scope-project,.cw-scope-directory,.cw-scope-branch { display:flex; align-items:center; justify-content:space-between; gap:12px; }.cw-scope-project { margin-top:20px; }.cw-scope-project strong { font-size:13px; overflow-wrap:anywhere; }

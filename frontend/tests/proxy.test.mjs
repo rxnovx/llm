@@ -156,6 +156,19 @@ test("proxy routes cannot reach the other application's API", async () => {
   assert.equal((await fetch(`${origin}/api/auth/config`, { method: "POST", headers: csrf })).status, 404);
 });
 
+test("GitLab MR resolution forwards the caller's authenticated selection and applies the origin check", async () => {
+  mode = "tokens";
+  const url = `${origin}/api/apps/gitlab/merge-request/resolve`;
+  const body = JSON.stringify({ reference: "https://gitlab.example/team/app/-/merge_requests/27" });
+  const headers = { ...csrf, "content-type": "application/json", authorization: "Bearer test-access-token" };
+  assert.equal((await fetch(url, { method: "POST", headers: { ...headers, origin: "https://other.example" }, body })).status, 403);
+  assert.equal((await fetch(url, { method: "POST", headers, body })).status, 200);
+  assert.equal(received.path, "/apps/gitlab/merge-request/resolve");
+  assert.equal(received.headers.authorization, "Bearer test-access-token");
+  assert.equal(received.body, body);
+  assert.equal((await fetch(url)).status, 404);
+});
+
 test("oversized request bodies are rejected before reaching the API", async () => {
   const response = await fetch(`${origin}/api/account/users/me/avatar`, { method: "POST", headers: csrf,
     body: Buffer.alloc(6 * 1024 * 1024 + 1) });
