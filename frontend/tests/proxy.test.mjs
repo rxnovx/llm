@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { after, before, test } from "node:test";
 
 const origin = "http://127.0.0.1:3099";
 const upstreamOrigin = "http://127.0.0.1:8099";
 const refresh = "test-refresh-token-for-proxy-contract-only";
+const oauthState = "test-oauth-state-"+"x".repeat(32);
+const oauthKey = createHash("sha256").update(oauthState).digest("hex").slice(0,16);
 let mode = "tokens";
 let received = null;
 let server;
@@ -32,6 +35,8 @@ before(async () => {
     if (mode === "timeout") { await new Promise((resolve) => setTimeout(resolve, 350)); }
     if (mode === "invalid-json") { response.end("not-json"); return; }
     if (mode === "invalid-token") { response.end(JSON.stringify({ user: {} })); return; }
+    if (mode === "apps-start") { response.end(JSON.stringify({authorize_url:`https://gitlab.example/oauth/authorize?state=${oauthState}`,cookie_key:oauthKey})); return; }
+    if (mode === "apps-complete") { response.end(JSON.stringify({connection:{id:"connection-one",username:"alice"},return_path:"/user/settings/apps",popup:true})); return; }
     if (["401", "403", "429", "503"].includes(mode)) {
       response.statusCode = Number(mode);
       if (mode === "429") response.setHeader("retry-after", "60");
@@ -250,4 +255,76 @@ test("context preview and summary edits keep chat route and CSRF boundaries", as
     assert.equal(received.path,`/chat/${path}${suffix}`); assert.equal(received.body,body);
   }
   assert.equal((await fetch(`${origin}/api/chat/${path}/unknown`,{method:"POST",headers:csrf})).status,404);
+});
+
+test("GitLab OAuth BFF binds independent HttpOnly state cookies and hides backend browser metadata", async () => {
+  mode="apps-start";
+  const headers={...csrf,origin:"http://localhost:3099",authorization:"Bearer alice",cookie:"private=value","x-oauth-browser":"attacker-nonce"};
+  const response=await fetch(`${origin}/api/apps/gitlab/office/authorize`,{method:"POST",headers,body:'{"popup":true}'});
+  assert.equal(response.status,200);
+  const data=await response.json(),setCookie=response.headers.get("set-cookie");
+  assert.equal(data.cookie_key,undefined);
+  assert.match(setCookie,new RegExp(`llm_gitlab_oauth_${oauthKey}=`));
+  assert.match(setCookie,/HttpOnly/i);assert.match(setCookie,/Secure/i);assert.match(setCookie,/SameSite=lax/i);
+  assert.match(setCookie,/Path=\/api\/apps\/gitlab\/oauth\/complete/);
+  assert.equal(received.headers.cookie,undefined);
+  assert.notEqual(received.headers["x-oauth-browser"],"attacker-nonce");
+  const browser=received.headers["x-oauth-browser"];
+  mode="apps-complete";
+  const complete=await fetch(`${origin}/api/apps/gitlab/oauth/complete`,{method:"POST",headers:{...headers,cookie:setCookie.split(";",1)[0]},body:JSON.stringify({state:oauthState,code:"one-use-code"})});
+  assert.equal(complete.status,200);
+  assert.equal(received.headers["x-oauth-browser"],browser);
+  assert.equal(received.headers.cookie,undefined);
+  assert.match(complete.headers.get("set-cookie"),/Max-Age=0/i);
+});
+
+test("app routes enforce CSRF, callback origin, bounded bodies and path boundaries", async () => {
+  mode="tokens";
+  const path="/api/apps/gitlab/office/authorize";
+  assert.equal((await fetch(origin+path,{method:"POST",body:"{}"})).status,403);
+  assert.equal((await fetch(origin+path,{method:"POST",headers:csrf,body:"{}"})).status,400);
+  assert.equal((await fetch(origin+path,{method:"POST",headers:{...csrf,origin:"http://localhost:3099"},body:"x".repeat(65537)})).status,413);
+  assert.equal((await fetch(`${origin}/api/apps/admin`)).status,404);
+  const endpoint="/api/apps/connections/12345678-1234-1234-1234-123456789abc/projects/7/tree?ref=feature%2Fmain&path=app";
+  assert.equal((await fetch(origin+endpoint,{headers:{authorization:"Bearer alice",cookie:"private=value"}})).status,200);
+  assert.equal(received.path,endpoint.replace("/api/","/"));
+  assert.equal(received.headers.cookie,undefined);
+  assert.equal(received.headers.authorization,"Bearer alice");
+});
+
+test("workspace proxy isolates internal credentials and validates mutation origins and body size",async()=>{
+  mode='tokens';
+  const id='12345678-1234-1234-1234-123456789abc';
+  assert.equal((await fetch(`${origin}/api/workspaces/internal/checkout`,{method:'POST',headers:csrf,body:'{}'})).status,404);
+  assert.equal((await fetch(`${origin}/api/workspaces/${id}/tools`,{method:'POST',body:'{}'})).status,403);
+  assert.equal((await fetch(`${origin}/api/workspaces/${id}/tools`,{method:'POST',headers:csrf,body:'x'.repeat(65537)})).status,413);
+  await fetch(`${origin}/api/workspaces?conversation_id=${id}`,{headers:{authorization:'Bearer owner',cookie:'private=value'}});
+  assert.equal(received.path,`/workspaces?conversation_id=${id}`);assert.equal(received.headers.cookie,undefined);
+  assert.equal(received.headers.authorization,'Bearer owner');
+  const response=await fetch(`${origin}/api/workspaces/${id}/tools`,{method:'POST',headers:{...csrf,authorization:'Bearer owner'},body:JSON.stringify({name:'repo_map',arguments:{}})});
+  assert.equal(response.status,200);assert.equal(received.path,`/workspaces/${id}/tools`);
+});
+
+test('knowledge multipart proxy preserves bytes, isolates cookies, and enforces origin and path limits',async()=>{
+  mode='tokens';const id='12345678-1234-1234-1234-123456789abc';
+  assert.equal((await fetch(`${origin}/api/knowledge/documents`,{method:'POST',body:'{}'})).status,403);
+  assert.equal((await fetch(`${origin}/api/knowledge/internal/credentials`,{method:'POST',headers:csrf,body:'{}'})).status,404);
+  const form=new FormData();form.set('conversation_id',id);form.set('file',new Blob(['문서 원문']), 'manual.md');
+  const r=await fetch(`${origin}/api/knowledge/documents`,{method:'POST',headers:{...csrf,authorization:'Bearer owner',cookie:'secret=cookie'},body:form});
+  assert.equal(r.status,200);assert.equal(received.path,'/knowledge/documents');
+  assert.match(received.headers['content-type'],/^multipart\/form-data; boundary=/);
+  assert.match(received.body,/문서 원문/);assert.equal(received.headers.cookie,undefined);
+  assert.equal(received.headers.authorization,'Bearer owner');
+  await fetch(`${origin}/api/knowledge/documents/${id}/chunks/${id}`,{headers:{authorization:'Bearer owner'}});
+  assert.equal(received.path,`/knowledge/documents/${id}/chunks/${id}`);
+});
+
+test('assistant proxy protects registry mutations and preserves upstream authorization failures',async()=>{
+  mode='403';const endpoint='/api/assistant/mcp/servers/browser';
+  assert.equal((await fetch(origin+endpoint,{method:'PUT',body:'{}'})).status,403);
+  const response=await fetch(origin+endpoint,{method:'PUT',headers:{...csrf,authorization:'Bearer user'},body:'{}'});
+  assert.equal(response.status,403);assert.equal(received.path,'/assistant/mcp/servers/browser');
+  assert.equal(received.headers.authorization,'Bearer user');
+  assert.equal((await fetch(origin+'/api/assistant/admin/secrets',{headers:csrf})).status,404);
+  assert.equal((await fetch(origin+'/api/assistant/preferences',{method:'PUT',headers:csrf,body:'x'.repeat(65537)})).status,413);
 });

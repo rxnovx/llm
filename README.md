@@ -151,6 +151,7 @@ npm run test:session
 npm run test:proxy
 npm run test:env
 npm run test:chat
+npm run test:apps
 npm run test:markdown
 npm run test:api
 npm run test:navigation
@@ -173,8 +174,17 @@ npx playwright test
 
 브라우저 검증은 개발용 DB에 고유한 테스트 계정을 생성합니다. 운영 서버를 대상으로 실행하지 않습니다. 기본 주소는 `http://localhost:3000`이며 `ACCOUNTS_BASE_URL`로 바꿀 수 있습니다. 설치된 Chromium을 사용하려면 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`를 지정합니다. 검증 결과와 환경 제한은 [VALIDATION.md](VALIDATION.md)에 기록합니다.
 
+## GitLab 앱 연결
+
+GitLab 계정 연결과 `@GitLab` 코드 조회는 [GITLAB_APPS.md](GITLAB_APPS.md)를 참고하세요. 사용자별 OAuth 승인과 서버 환경 설정이 필요하며, 설정은 앱 연결 모달에서 사용합니다. 기본 SQLite·개별 실행·Compose 구성을 그대로 사용합니다.
+
+프로젝트 전체 다운로드·자동 코드 탐색·명령 실행·작업공간 관리는 [TERMINAL_MCP.md](TERMINAL_MCP.md)에 정리했습니다. MCP는 별도 서비스이며 개인별 저장소 권한과 실행 모드를 적용합니다. 기존 연결은 `read_repository` 권한 추가 후 다시 인증해야 합니다.
+
 ## Termux 실행 명령어
+
 ``` bash
 LD_PRELOAD="$PREFIX/lib/libpython3.13.so${LD_PRELOAD:+:$LD_PRELOAD}" \
 python main.py
 ```
+
+범용 문서 RAG·파일 첨부·공유 지식베이스·MCP 앱·개인 기억 설정은 [ASSISTANT.md](ASSISTANT.md)를 참고하세요.

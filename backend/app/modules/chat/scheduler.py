@@ -73,4 +73,25 @@ def poll(db, request_id, settings, resolve):
 
 def finish(db, request_id, status):
     db.execute(update(Admission).where(Admission.request_id == request_id,
-        Admission.state.in_(['queued', 'running'])).values(state=status, expires_at=int(time.time())))
+        Admission.state.in_(['queued', 'running','tool_waiting'])).values(state=status, expires_at=int(time.time())))
+
+
+def release_for_tools(db,request_id,deadline):
+    """Keep the conversation lease, return the inference permit during CPU/network work."""
+    lock(db)
+    db.execute(update(Admission).where(Admission.request_id==request_id).values(state='tool_waiting',expires_at=deadline))
+    run=db.get(GenerationRun,request_id)
+    if run:
+        run.status,run.deadline_at='tool_waiting',deadline
+        db.execute(update(Conversation).where(Conversation.id==run.conversation_id,Conversation.generation_id==request_id)
+            .values(generation_until=deadline))
+
+
+def requeue(db,request_id,settings):
+    lock(db)
+    run=db.get(GenerationRun,request_id)
+    row=db.scalar(select(Admission).where(Admission.request_id==request_id))
+    if row:
+        db.delete(row);db.flush()
+    enqueue(db,run,settings)
+    run.status='queued'

@@ -28,7 +28,7 @@ async function handle(request: NextRequest, context: { params: Promise<{ path: s
   try { if (request.method !== "GET") body = await requestBody(request); }
   catch (error) { return bodyError(error); }
   const upstream = await authServerFetch(`/chat/${path}${request.nextUrl.search}`, { method: request.method, headers, body, signal: request.signal },
-    Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 180000));
+    Number(process.env.LLM_REQUEST_TIMEOUT_MS ?? 900000));
   if (upstream.ok && upstream.headers.get("content-type")?.startsWith("text/event-stream")) {
     return new Response(upstream.body, { status: upstream.status, headers: {
       "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no",

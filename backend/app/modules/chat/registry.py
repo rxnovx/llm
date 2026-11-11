@@ -23,6 +23,7 @@ class ConnectionInput(BaseModel):
     context_window: int = Field(8192, ge=1024, le=1048576)
     max_output_tokens: int = Field(2048, ge=64, le=16384)
     max_concurrent: int = Field(2, ge=1, le=64)
+    supports_tools: bool = False
     auth_mode: Literal['inherit', 'none', 'reference'] = 'none'
     key_ref: str = Field('', max_length=64, pattern=r'^[a-zA-Z0-9_-]*$')
     revision: int = Field(0, ge=0)

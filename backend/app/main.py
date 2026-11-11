@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import time
 
 from fastapi import Depends, FastAPI, Response
@@ -11,12 +12,18 @@ from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.core.config import get_settings
+from app.core.body_limit import KnowledgeBodyLimit
 from app.db.base import Base
 from app.db.session import engine, get_db
 from app.modules.auth.router import router as auth_router
 from app.modules.users.router import router as users_router
 from app.modules.chat.router import router as chat_router
 from app.modules.admin.router import router as admin_router
+from app.modules.integrations.router import router as apps_router
+from app.modules.workspaces.router import router as workspaces_router
+from app.modules.knowledge.router import router as knowledge_router
+from app.modules.assistant.router import router as assistant_router
+from app.modules.knowledge.service import worker as knowledge_worker
 from app.modules.chat.models import SchedulerLock
 from sqlalchemy.exc import IntegrityError
 
@@ -36,21 +43,28 @@ async def lifespan(app: FastAPI):
             except IntegrityError:
                 db.rollback()  # Another API process initialized the same row.
     settings.avatar_upload_path.mkdir(parents=True, exist_ok=True)
-    yield
-    engine.dispose()
+    stop=asyncio.Event()
+    task=asyncio.create_task(knowledge_worker(engine,stop)) if settings.knowledge_enabled and settings.knowledge_worker_enabled else None
+    try:yield
+    finally:
+        stop.set()
+        if task:
+            task.cancel();await asyncio.gather(task,return_exceptions=True)
+        engine.dispose()
 
 
 app = FastAPI(title="LLM", lifespan=lifespan,
               docs_url="/docs" if settings.expose_docs else None,
               redoc_url=None, openapi_url="/openapi.json" if settings.expose_docs else None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[h.strip() for h in settings.allowed_hosts.split(",") if h.strip()])
+app.add_middleware(KnowledgeBodyLimit)
 app.add_middleware(CORSMiddleware, allow_origins=[h.strip() for h in settings.cors_origins.split(",") if h.strip()],
                    allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type"])
 
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request, error):
-    if request.url.path.startswith('/admin/connections'):
+    if request.url.path.startswith(('/admin/connections', '/apps', '/workspaces','/assistant','/knowledge')):
         return JSONResponse(status_code=422, content={'detail': [
             {key: item[key] for key in ('loc', 'msg', 'type')} for item in error.errors()]})
     return await request_validation_exception_handler(request, error)
@@ -80,3 +94,7 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(chat_router)
 app.include_router(admin_router)
+app.include_router(apps_router)
+app.include_router(workspaces_router)
+app.include_router(knowledge_router)
+app.include_router(assistant_router)

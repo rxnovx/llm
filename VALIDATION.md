@@ -1,6 +1,81 @@
 # 계정·대화·운영 기능 검증
 
+## 자동 판단·RAG·코드 분석 최신 검증 — 2026-11-11
+
+PR #4의 `02114ee` 소스를 새 검증 폴더로 복원하고 원격 223개 파일의 Git blob 해시와 전체 tree 일치를 확인했습니다. 아래 결과는 복원한 코드와 작업공간 UUID 직렬화 수정에 대한 결과입니다. GitHub Actions는 사용하지 않았습니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 백엔드 전체 | `python -m pytest -q`: **186개 통과**, 57.36초. 비밀번호 강도 검사의 기존 Starlette 상태 코드 상수 폐기 예정 경고 2건만 남음 |
+| 추가 자동 처리·코드 분석 | 최초 대상 테스트 30개 통과. 실제 Git HTTP clone·MCP SDK/HTTP·출처·권한·재검색·보류·취소·중복 실행 방지·공유 해제·재생성 복원·정적 관계·캐시 검증 포함 |
+| 작업공간 직렬화 | workspace_id에 UUID 객체를 할당하도록 수정. 자동 clone·명령 실행 흐름에서 Pydantic 직렬화 경고를 실패로 처리하는 회귀 조건 추가 |
+| 프론트엔드 Node | `node --experimental-strip-types --test tests/*.test.mjs`: **69개 통과**, 프록시·SSE·CSRF·자료/앱·환경 우선순위·Markdown·WASM·모달 이동 포함 |
+| 정적 검사·빌드 | `npm run typecheck`, `npm run lint`, `npm run build` 모두 통과 |
+| 실제 서버 HTTP | `scripts/smoke_standalone.py` 통과. 실제 Python·빌드된 Next 서버에서 계정·스트리밍·운영·문맥/대기열·GitLab API 대역·multipart 업로드/자동 색인/RAG/인용/삭제·개인 설정 확인 |
+| 브라우저 | Playwright Chromium이 `socket() failed: Operation not permitted`, `ptrace: Operation not permitted`로 시작하지 못함. 공유 Chrome도 준비된 테스트 프로세스의 localhost:3101에 `ERR_CONNECTION_REFUSED`로 접근하지 못함. 실제 화면·포커스·모바일·IME·스크린샷은 통과로 기록하지 않음 |
+
+Python 3.12.14, Node 24.22.1을 사용했습니다. 모델 추론·GitLab 계정 API·임베딩/Qdrant/재정렬은 로컬 대역 또는 HTTP 계약으로 검사하며, 사용자의 실제 폐쇄망 서버에 접속한 결과가 아닙니다. 실제 모델의 JSON/도구 선택·답변/검색 품질·부하, 실제 GitLab OAuth·Qdrant·Docker/Compose/Nginx·PostgreSQL·사설 CA·Termux/Android는 해당 환경에서 추가 검증해야 합니다.
+
+자동화 가능한 기본 검증은 개발 측에서 완료하고, 실제 서비스 연결과 단말에서만 확인할 수 있는 부분을 환경별 검증으로 구분합니다. 아래 기록은 이전 커밋 또는 초기 작성 당시의 이력입니다.
+
+## 이전 검증 기록
+
 검증일: 2026-11-10. Node.js 24.22.1, Python 3.12.14. 이 저장소의 루트 경로와 LLM 서비스 식별자로 다시 검증했습니다. GitHub Actions는 실행하지 않았습니다.
+
+## 범용 대화·파일 RAG·MCP 앱 추가 검증
+
+검증일: 2026-11-11 (Asia/Seoul). 기존 PR #4에 범용 기능을 처음 추가한 이전 커밋의 검증 기록입니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 백엔드 전체 `python -m pytest -q` | **156개 통과**. 기존 127개 + 범용 지식·문서·임베딩·벡터·MCP·기억·조합 흐름 29개 |
+| 문서·RAG | 실제 PDF/DOCX/XLSX/텍스트/Markdown/CSV/JSON/HTML 추출, 별도 추출 프로세스, 대기/오류/재색인·내용 해시 재사용·버전 교체, 대화별 첨부/만료, 개인/공유/공유 해제 권한, 검색 도중 삭제 후 재확인, 새 lease를 이전 워커가 덮어쓰지 않는 흐름 검증 |
+| 모델·벡터 어댑터 | 도구 미지원 모델에도 검색 근거가 실제 입력으로 전달됨을 확인. vLLM/Ollama 임베딩 형식·정규화, SQLite dense 검색, 모델 변경 시 재색인, Qdrant 생성/upsert/현재 문서 ID 필터/삭제 정리 및 rerank 형식은 HTTP 계약 대역으로 검증 |
+| 공통 MCP | 공식 SDK 기반 실제 HTTP MCP 서버 2개로 같은 도구명 구분, 선택·사용자/현재 권한·쓰기 허용·서비스 키 헤더 분리, 숨겨진 도구 미노출과 외부 schema 참조 차단 검증. 실제 Git HTTP/Terminal MCP와 일반 지식의 동시 사용도 확인 |
+| 맞춤 설정·기억 | 사용자별 목록·입력 격리, revision 충돌, 명시적 저장/삭제/사용 토글, 실제 모델 입력에 적용되는 지침·기억 검증 |
+| 프론트엔드 Node | **68개 통과**. multipart 업로드의 boundary 유지·인증/출처 검사·쿠키 비전달, 지식/운영 BFF 경로/크기 제한, 문서 출처 SSE 추가 |
+| 타입·린트·빌드 | 모두 통과. 새 파일·지식·앱·기억·운영 모달과 BFF 포함 |
+| 실제 별도 실행 smoke | Python main.py + 빌드한 Next.js + 격리 SQLite에서 업로드 → 자동 워커/문서 추출 → RAG SSE → 출처 저장·원문 조회 → 삭제·개인 설정 통과. 기존 계정·운영·채팅·GitLab OAuth HTTP 흐름도 통과 |
+| 전용 워커 | 새 SQLite DB에서 knowledge_main.py가 스키마를 만들고 실행되는 것 확인 |
+| Compose | compose.knowledge.yaml YAML 파싱·서비스/이미지 연결 확인. Qdrant v1.20.0 릴리스 메타데이터 확인. Docker 실행 파일이 없어 실제 이미지·Compose 실행은 미검증 |
+
+`tests/knowledge.spec.ts`에 실제 업로드·색인 완료·질문 초안 유지·출처 모달·맞춤 설정 시나리오를 추가했습니다. 실행을 시도했으나 Chromium이 `socket() failed: Operation not permitted`, `ptrace: Operation not permitted`로 시작하지 못했습니다. 화면·포커스·모바일/IME·스크린샷은 미검증입니다.
+
+실제 사용자 임베딩·reranker·Qdrant·폐쇄망 vLLM/Ollama의 검색/도구 선택 품질과 부하, Docker·Termux·사설 CA 배포는 미검증입니다. 기본 SQLite는 명시적으로 키워드/BM25 검색이며 임베딩 설정 시에만 의미 검색을 결합합니다. 가짜 임베딩을 운영 검색으로 제공하지 않습니다. OCR/멀티미디어, 웹 자동 수집, 범용 MCP 개인 OAuth는 포함하지 않습니다. 설치·현재 제한·MCP 세션 격리는 [ASSISTANT.md](ASSISTANT.md)에 정리했습니다. GitHub Actions는 실행하지 않았습니다.
+
+## Terminal MCP·프로젝트 분석 추가 검증
+
+PR #4의 GitLab OAuth 구성에 Terminal MCP, 사용자·대화별 저장소, 모델 도구 호출 루프, 작업공간 모달을 추가했습니다. 아래 기록은 이전 GitLab/계정 검증 표보다 최신입니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 백엔드 전체 `python -m pytest -q` | 127개 통과. 기존 104개와 terminal/agent/실제 Git HTTP·MCP·broker 흐름 23개 포함 |
+| Terminal MCP | 공식 Python SDK 2.3.0 클라이언트로 현대 프로토콜의 HTTP·stdio 도구 조회/호출, 전용 audience/만료·소유권·경로·symlink·UTF-8·Python AST·JS/TS Tree-sitter·내용 해시 캐시 검증 |
+| 실행 워커 | 개인 개발용 프로세스에서 stdout/stderr/stdin, 한글 출력, 앱 비밀 환경 변수 미상속, 종료 코드, 시간 초과, 중지, 출력 제한 검증. Docker 실행 인자의 권한·네트워크·자원 제한은 계약 검사 |
+| 통합 분석 흐름 | 로컬 git-http-backend로 실제 shallow fetch, 실제 MCP HTTP 서버와 내부 broker HTTP를 연결해 작업공간 생성·재사용, 코드·출처 저장, 도구 추론 재호출, 실행 중 GPU 허가 반납, 취소 시 프로세스 정리, GitLab 연결 해제 시 사본 정리 검증. GitLab 계정 API와 모델 응답은 대역 사용 |
+| 프론트엔드 Node 테스트 | 64개 통과. 새 workspace BFF 출처·본문 크기·내부 broker 차단과 작업공간/activity SSE 이벤트 포함 |
+| 프론트엔드 타입·린트·빌드 | 통과. 프로젝트 모드·작업 기록·작업공간 모달·모델 도구 지원 설정 포함 |
+| 기존 별도 실행 smoke | 실제 Python main.py와 빌드한 Next.js로 계정·대화·운영·GitLab OAuth/조회·출처·해제 HTTP 흐름 통과 |
+
+Chromium으로 `tests/apps.spec.ts`를 실행했으나 `process_singleton_posix.cc: socket() failed: Operation not permitted`, `ptrace: Operation not permitted`로 브라우저 시작이 차단되었습니다. `tests/workspaces.spec.ts`도 추가했지만 화면·팝업·포커스·모바일/IME와 스크린샷은 미검증입니다.
+
+이 환경에는 Docker CLI/daemon이 없어 이미지 빌드·Compose 실행·실제 컨테이너 격리는 미검증입니다. 실제 Termux, 사설 CA·폐쇄망 연결, 사용자 GitLab OAuth 및 실제 vLLM/Ollama 모델의 도구 선택 정확도도 미검증입니다. vLLM/Ollama 요청 형식은 HTTP 대역으로 검사했습니다. 분석기는 구문·텍스트 후보를 제공하며 완전한 LSP 의미 참조·런타임 호출 그래프·벡터 검색은 구현 범위에 포함하지 않습니다. 설정·모드·현재 제한은 [TERMINAL_MCP.md](TERMINAL_MCP.md)에 기록합니다.
+
+## GitLab OAuth·앱 멘션 추가 검증
+
+기존 PR #3을 main에 병합한 뒤 별도 `feat/gitlab-oauth-mentions-20261110` 브랜치에서 구현했습니다. 아래는 GitLab 연동을 추가한 현재 변경의 검증이며, 뒤의 표는 이전 기반 구현 기록입니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 백엔드 전체 `python -m pytest -q` | 104개 통과: 기존 77개 + GitLab 27개. OAuth state/nonce/PKCE, 계정·로그인 세션 격리와 앱 토큰 회전, 중도 로그아웃, 암호화 키 교체, 동시 refresh, 401 재시도·403 권한 거절, 경로/크기/전체 시간 제한, 출처·재생성 복구·중지·연결 해제·대기열 회수 포함 |
+| 프론트엔드 Node 테스트 | 총 62개: 세션 5 + BFF 20 + 환경 3 + SSE 8 + Markdown 10 + API 4 + 모달 경로 8 + WASM 1 + 앱 멘션/팝업/작성 내용 복원 3 |
+| `npm run typecheck`, `npm run lint`, `npm run build` | 통과. 새 앱 설정·콜백 모달 및 BFF 경로 포함, 새 프론트엔드 의존성 없음 |
+| `backend/.venv-portable/bin/python scripts/smoke_standalone.py` | 실제 `python main.py`와 빌드한 Next.js 별도 프로세스, 격리 SQLite, 로컬 HTTP GitLab/모델 응답 서버 사용. 인증 시작 → PKCE 교환 → 앱 세션 갱신 → GitLab 토큰 갱신 → 프로젝트/브랜치/파일 조회 → SSE 출처와 저장 → 연결 해제/원격 철회 통과. 기존 계정·운영·모달·채팅 검증도 함께 실행 |
+| Playwright UI 실행 시도 | 기본 다운로드 브라우저가 없어 설치된 `/usr/bin/chromium`으로도 시도했으나 `process_singleton_posix.cc: socket() failed: Operation not permitted`, `ptrace: Operation not permitted`로 브라우저 시작 자체가 차단됨 |
+
+`tests/apps.spec.ts`에 GitLab API 응답 대역을 이용하는 데스크톱/모바일용 파일 선택·출처·채팅 유지 시나리오를 추가했습니다. 실제 브라우저 UI·키보드/IME·화면 크기·팝업 복귀의 동작 및 스크린샷은 이 환경에서 검증하지 못했습니다. Node 테스트는 입력 범위와 팝업/저장소 로직을 검증하며 실제 브라우저 검증을 대체하지 않습니다.
+
+사용자 GitLab URL·OAuth 앱 인증 정보는 제공되지 않았으므로 **실제 GitLab 서버에서의 로그인과 권한 동작은 미검증**입니다. 실제 Termux/Android, Docker 이미지 빌드·Compose 실행, Nginx 런타임, 사설 CA, PostgreSQL도 이번 검증에 포함하지 않았습니다. GitLab OAuth 암호화는 별도 `requirements-gitlab.txt`로 제공하고 Docker 이미지에는 포함합니다. 일반 SQLite·채팅의 기본 의존성은 유지했습니다. 설정은 [GITLAB_APPS.md](GITLAB_APPS.md)를 참고하세요.
 
 ## 통과
 
@@ -99,3 +174,48 @@ URL 테스트 8개는 앱 내 이동 시 대화 ID 보존, 현재 모달을 닫�
 - 실제 Android/Termux 단말에서 설치·개발 서버·운영 빌드·화면 동작은 미검증입니다. Termux용 네이티브 Python/CSS 모듈은 단말에서 추가 확인이 필요합니다.
 
 FastAPI 테스트 실행 시 상위 Starlette의 httpx 및 HTTP 422 상수에 관한 deprecation 경고 3건이 출력됐으나 테스트 실패는 없었습니다.
+
+
+## 2026-11-10 추가 변경: 자동 판단·근거 점검·코드 관계 분석
+
+**초기 등록 당시 상태: 실행 미검증.** `02114ee`를 등록할 때 작업 실행 환경이 unavailable 상태여서 Python/Node 실행·타입 검사·린트·빌드·브라우저 검증을 수행하지 못했습니다. 이후 환경 복구 후의 결과는 이 문서 상단의 최신 검증 항목에 기록했습니다. GitHub Actions는 실행하지 않았습니다.
+
+추가한 테스트 범위:
+- 수동 선택 없는 질문 → 연결된 프로젝트 조회 → 실제 Git HTTP clone·MCP 색인·출처·저장
+- 연결 누락·동명 프로젝트의 대상 확인, 서버용 토큰이 판단 메타데이터에 없는지 확인
+- 내 자료·공유 자료·현재 대화 첨부의 자동 범위와 만료·공유 해제
+- 불확실한 초안 비노출, 검색어 재작성·재검색·재생성, 없는 인용 거부·최대 시도 후 보류
+- 터미널 명령 중복 실행 방지, 실패한 재생성의 기존 답변·출처·판단 복구
+- vLLM/Ollama의 구조화 출력 요청 계약
+- Python import 별칭·상대 경로·중첩 스코프·파라미터 가림·클래스 참조
+- TS 기본 export·재수출·상대 import·파라미터 가림, 실제 MCP 도구·권한 경계
+- 내용 해시 캐시 갱신·실제 소스 문맥·파싱 오류·외부 의존성·분석 제한 표시
+- 자동 workspace 선택과 최종 routing의 SSE 전달
+
+비실행 검토에서 Python 파일의 문자열/괄호 쌍과 예시 환경 변수의 누락·중복을 확인했습니다. 이것은 Python 컴파일·타입 검사·실행 테스트를 대체하지 않습니다.
+
+재현 명령:
+
+```bash
+cd backend
+python -m pip install -r requirements-dev.txt
+python -m pytest tests/test_automatic_assistant.py tests/test_codeintel.py -q
+python -m pytest -q
+cd ../frontend
+npm ci
+npm run typecheck
+npm run lint
+npm run build
+npm run test:chat
+npm run test:session
+npm run test:api
+npm run test:env
+npm run test:apps
+npm run test:markdown
+npm run test:navigation
+npm run test:portable
+npm run test:proxy
+npm run test:browser
+```
+
+실제 연결에서는 GitLab OAuth·Terminal MCP를 준비하고 대화 도구 선택 없이 그룹/프로젝트 분석을 요청합니다. 문서를 준비한 뒤 일반 질문·사내 규정 질문·자동 검색 끄기/항상·검색 실패·공유 해제·취소를 확인합니다. 실제 모델의 JSON schema·도구 parser·근거 점검 품질과 실제 Qdrant/임베딩·Termux·Docker는 별도 검증 대상입니다.

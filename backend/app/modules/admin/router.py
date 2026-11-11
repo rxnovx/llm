@@ -34,17 +34,17 @@ def mode_filter(mode: Mode):
 
 
 def effective_status(now: int):
-    return case((Run.status.in_(['running', 'queued']) & (Run.deadline_at <= now), 'interrupted'), else_=Run.status)
+    return case((Run.status.in_(['running', 'queued','tool_waiting']) & (Run.deadline_at <= now), 'interrupted'), else_=Run.status)
 
 
 def counts(db: Session, *conditions):
     status = effective_status(int(time.time()))
     row = db.execute(select(func.count(Run.id).label('total'),
         *[func.sum(case((status == value, 1), else_=0)).label(value)
-          for value in ['complete', 'error', 'cancelled', 'queued', 'running', 'interrupted']],
+          for value in ['complete', 'error', 'cancelled', 'queued', 'running', 'interrupted','tool_waiting']],
         func.avg(case((status == 'complete', Run.duration_ms))).label('average_ms'))
         .where(*conditions)).mappings().one()
-    result = {key: int(row[key] or 0) for key in ['total', 'complete', 'error', 'cancelled', 'queued', 'running', 'interrupted']}
+    result = {key: int(row[key] or 0) for key in ['total', 'complete', 'error', 'cancelled', 'queued', 'running', 'interrupted','tool_waiting']}
     result['average_ms'] = round(row['average_ms']) if row['average_ms'] is not None else None
     denominator = result['complete'] + result['error'] + result['interrupted']
     result['success_rate'] = round(result['complete'] / denominator * 100, 1) if denominator else None
@@ -106,7 +106,7 @@ def overview(request: Request, context: Admin, db: Database, mode: Mode = 'all')
 
 @router.get('/requests')
 def requests(context: Admin, db: Database, mode: Mode = 'all',
-             status: Literal['all', 'complete', 'error', 'cancelled', 'queued', 'running', 'interrupted'] = 'all',
+             status: Literal['all', 'complete', 'error', 'cancelled', 'queued', 'running', 'interrupted','tool_waiting'] = 'all',
              limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
     now = int(time.time())
     query = select(Run, User.username).outerjoin(User).where(*mode_filter(mode))
@@ -116,9 +116,9 @@ def requests(context: Admin, db: Database, mode: Mode = 'all',
     return {'has_more': len(rows) > limit, 'items': [
         {'id': run.id, 'username': username, 'model': run.model, 'connection_id': run.connection_id,
          'provider': run.provider, 'is_test': run.is_test,
-         'status': 'interrupted' if run.status in {'running', 'queued'} and run.deadline_at <= now else run.status,
+         'status': 'interrupted' if run.status in {'running', 'queued','tool_waiting'} and run.deadline_at <= now else run.status,
          'started_at': run.started_at, 'duration_ms': run.duration_ms, 'first_token_ms': run.first_token_ms,
-         'output_chars': run.output_chars, 'error_code': 'interrupted' if run.status in {'running', 'queued'} and run.deadline_at <= now else run.error_code}
+         'output_chars': run.output_chars, 'error_code': 'interrupted' if run.status in {'running', 'queued','tool_waiting'} and run.deadline_at <= now else run.error_code}
         for run, username in rows[:limit]]}
 
 

@@ -1,8 +1,8 @@
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY requirements.txt requirements-postgres.txt ./
-RUN pip install --no-cache-dir -r requirements-postgres.txt \
+COPY requirements.txt requirements-postgres.txt requirements-gitlab.txt requirements-mcp-client.txt requirements-knowledge.txt ./
+RUN pip install --no-cache-dir -r requirements-postgres.txt -r requirements-mcp-client.txt -r requirements-knowledge.txt \
     && groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --no-create-home app
 COPY --chown=app:app . .

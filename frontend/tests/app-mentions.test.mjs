@@ -1,0 +1,59 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+import ts from "typescript";
+import { appMentionAt, removeAppMention } from "../src/lib/app-mentions.ts";
+
+test("app mentions match standalone prefixes at the caret and preserve surrounding text", () => {
+  for (const value of ["@", "@Git", "이 코드 @gitlab"]) assert.ok(appMentionAt(value,value.length));
+  for (const value of ["me@gitlab", "@github", "@gitlab/file", "문장 @gitlab 뒤"]) assert.equal(appMentionAt(value,value.length),null);
+  const value = "질문 @Git 다음 내용";
+  const range = appMentionAt(value,7);
+  assert.deepEqual(range,{ start:3,end:7,query:"Git" });
+  assert.equal(removeAppMention(value,range),"질문  다음 내용");
+});
+
+function environment({ popup = null, reply = {}, failure = null } = {}) {
+  const exports = {}, storage = new Map(), calls = [], events = [];
+  const context = vm.createContext({ exports, URLSearchParams, Date, Event,
+    sessionStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key,value) => storage.set(key,value), removeItem: (key) => storage.delete(key) },
+    window: { open: () => popup, location: { search:"?chat=conversation-one", assign: (url) => calls.push(url) }, dispatchEvent: (event) => events.push(event.type) },
+    require: () => ({ authenticatedFetch: async (url, init) => { calls.push({ url, init }); if (failure) throw failure; return Response.json(reply); } }),
+  });
+  const code = ts.transpileModule(readFileSync("src/lib/app-connections.ts","utf8"),{ compilerOptions:{ module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022 } }).outputText;
+  vm.runInContext(code,context);
+  return { ...exports, calls, events };
+}
+test("full-navigation fallback preserves only an expiring owner/chat-scoped draft once", async () => {
+  const env = environment({ reply:{ authorize_url:"https://gitlab.example/oauth/authorize" } });
+  env.backupOAuthDraft("alice","작성 중인 질문","chat-a");
+  assert.equal(env.takeOAuthDraft("bob","chat-a"),null);
+  assert.equal(env.takeOAuthDraft("alice","chat-a"),null);
+  const chat="12345678-1234-1234-1234-123456789abc";
+  env.backupOAuthDraft("alice","질문",chat);
+  assert.equal(env.oauthReturnPath("alice"),`/user/settings/apps?chat=${chat}`);
+  assert.equal(env.oauthReturnPath("bob"),"/user/settings/apps");
+  assert.equal(env.takeOAuthDraft("alice",chat),"질문");
+  env.backupOAuthDraft("alice","작성 중인 질문","chat-a");
+  assert.equal(env.takeOAuthDraft("alice","chat-b"),null);
+  env.backupOAuthDraft("alice","작성 중인 질문","chat-a");
+  assert.equal(env.takeOAuthDraft("alice","chat-a"),"작성 중인 질문");
+  assert.equal(env.takeOAuthDraft("alice","chat-a"),null);
+  await env.connectGitlab("office");
+  assert.equal(JSON.parse(env.calls[0].init.body).popup,false);
+  assert.deepEqual(env.events,["llm:oauth-leaving"]);
+  assert.equal(env.calls[1],"https://gitlab.example/oauth/authorize");
+});
+test("a popup has no opener; a dismissed or failed popup cannot replace the main chat", async () => {
+  const popup = { opener:{}, closed:false,location:{ href:"" },close() { this.closed=true; } };
+  const env = environment({ popup,reply:{ authorize_url:"https://gitlab.example/oauth/authorize" } });
+  await env.connectGitlab("office");
+  assert.equal(popup.opener,null);
+  assert.equal(popup.location.href,"https://gitlab.example/oauth/authorize");
+  assert.deepEqual(env.events,[]);
+  assert.equal(JSON.parse(env.calls[0].init.body).popup,true);
+  await assert.rejects(() => environment({ popup:{...popup,closed:true},reply:{authorize_url:"https://gitlab.example"} }).connectGitlab("office"),/닫혔/);
+  await assert.rejects(() => environment({ popup,failure:new Error("unavailable") }).connectGitlab("office"),/unavailable/);
+  assert.equal(popup.closed,true);
+});

@@ -1,0 +1,14 @@
+# Apply after compose.yaml and compose.terminal.yaml. The private manager alone receives the socket.
+services:
+  api:
+    environment:
+      TERMINAL_EXECUTION_ENABLED: "true"
+  terminal:
+    environment:
+      TERMINAL_EXECUTION_MODE: docker
+      TERMINAL_WORKSPACE_HOST_PATH: ${TERMINAL_WORKSPACE_HOST_PATH:?Set an absolute private host directory}
+      TERMINAL_WORKER_IMAGE: ${TERMINAL_WORKER_IMAGE:-llm-terminal-worker:local}
+    group_add: ["${TERMINAL_DOCKER_GID:?Set the Docker socket group ID}"]
+    volumes:
+      - ${TERMINAL_WORKSPACE_HOST_PATH:?Set an absolute private host directory}:/app/terminal-data
+      - ${TERMINAL_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock

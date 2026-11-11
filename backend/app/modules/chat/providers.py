@@ -10,6 +10,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
 from app.core.config import Settings
+from app.core.tls import assistant_tls
 
 
 class ProviderError(Exception):
@@ -22,6 +23,7 @@ class ModelProfile(BaseModel):
     context_window: int = Field(8192, ge=1024, le=1048576)
     max_output_tokens: int = Field(2048, ge=64, le=16384)
     max_concurrent: int = Field(2, ge=1, le=64)
+    supports_tools: bool = False
 
     @model_validator(mode='after')
     def budget(self):
@@ -48,6 +50,7 @@ class Connection(BaseModel):
     context_window: int = Field(8192, ge=1024, le=1048576)
     max_output_tokens: int = Field(2048, ge=64, le=16384)
     max_concurrent: int = Field(2, ge=1, le=64)
+    supports_tools: bool = False
 
     @model_validator(mode='after')
     def validate_url(self):
@@ -72,14 +75,14 @@ class Connection(BaseModel):
         if self.models:
             raise ProviderError('이 연결에서 허용되지 않은 모델입니다.')
         return ModelProfile(name=model or self.model or 'demo', context_window=self.context_window,
-            max_output_tokens=self.max_output_tokens, max_concurrent=self.max_concurrent)
+            max_output_tokens=self.max_output_tokens, max_concurrent=self.max_concurrent,supports_tools=self.supports_tools)
 
     def public(self):
         return {'id': self.id, 'name': self.name, 'provider': self.provider,
                 'default_model': self.model, 'is_test': self.provider == 'test',
                 'models': [item.model_dump() for item in self.models],
                 'context_window': self.context_window, 'max_output_tokens': self.max_output_tokens,
-                'max_concurrent': self.max_concurrent}
+                'max_concurrent': self.max_concurrent,'supports_tools':self.supports_tools}
 
 
 def connections(settings: Settings, db=None, user=None, *, include_disabled=False) -> list[Connection]:
@@ -114,7 +117,7 @@ def client(connection: Connection, timeout: float) -> httpx.AsyncClient:
     key = connection.api_key.get_secret_value()
     return httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(10, timeout)),
         headers={'Authorization': f'Bearer {key}'} if key else {},
-        follow_redirects=False, trust_env=False)
+        follow_redirects=False, trust_env=False,verify=assistant_tls())
 
 
 def endpoint(connection: Connection, suffix: str) -> str:
@@ -194,3 +197,89 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
         raise ProviderError('모델 서버 응답 시간이 초과되었습니다. 다시 시도해 주세요.') from None
     except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
         raise ProviderError('모델 서버에 연결할 수 없거나 응답 형식이 올바르지 않습니다.') from None
+
+
+async def tool_reply(connection,model,history,tools,settings):
+    """One structured agent step; tools are executed exclusively by the application host."""
+    if connection.provider=='test':
+        names={t['function']['name'] for t in tools}
+        if 'repo_map' not in names:
+            return {'role':'assistant','content':'테스트 모드에서 선택한 자료와 앱 연결 흐름을 확인했습니다. '+('[KS1]' if any('[KS1]' in m.get('content','') for m in history) else '')+'\n\n실제 모델이 작성한 분석은 아닙니다. 실제 연결을 선택하면 자료 검색과 도구 호출을 사용해 답변합니다.','tool_calls':[]}
+        if any('[GL1]' in m.get('content','') for m in history):
+            return {'role':'assistant','content':'테스트 모드에서 저장소 색인과 실제 소스 구간 조회를 완료했습니다. [GL1]\n\n실제 모델의 코드 분석 답변은 아닙니다. 실제 모델 연결로 분석 품질을 확인하세요.','tool_calls':[]}
+        results=[item for item in history if item['role']=='tool']
+        if not results:
+            return {'role':'assistant','content':'','tool_calls':[{'id':'demo-map','type':'function','function':{'name':'repo_map','arguments':{'limit':20}}}]}
+        if len(results)==1:
+            value=json.loads(results[0]['content'])
+            path=next((f['path'] for f in value.get('files',[]) if f['path'].endswith(('.py','.ts','.tsx','.js','.md'))),None)
+            if path:return {'role':'assistant','content':'','tool_calls':[{'id':'demo-read','type':'function','function':{'name':'workspace_read_file','arguments':{'path':path,'start_line':1,'end_line':80}}}]}
+        return {'role':'assistant','content':'테스트 모드에서 저장소 탐색과 코드 조회를 완료했습니다. [GL1]\n\n실제 모델의 코드 분석 답변은 아닙니다. 모델 연결을 선택하면 조회한 근거를 바탕으로 분석합니다.','tool_calls':[]}
+    if not connection.profile(model).supports_tools:
+        raise ProviderError('이 모델은 도구 호출 사용이 설정되지 않았습니다. 운영자가 모델의 supports_tools를 확인해야 합니다.')
+    vllm=connection.provider=='vllm'
+    profile=connection.profile(model)
+    # Ollama uses object arguments; OpenAI-compatible providers use serialized arguments.
+    outgoing=[]
+    for item in history:
+        entry=dict(item)
+        if entry.get('tool_calls'):
+            entry['tool_calls']=[dict(call,function=dict(call['function'],arguments=(
+                json.dumps(call['function']['arguments']) if vllm and isinstance(call['function']['arguments'],dict) else call['function']['arguments']))) for call in entry['tool_calls']]
+        outgoing.append(entry)
+    payload={'model':model,'messages':outgoing,'tools':tools,'stream':False}
+    payload.update({'max_tokens':profile.max_output_tokens,'tool_choice':'auto'} if vllm else {'options':{'num_predict':profile.max_output_tokens,'num_ctx':profile.context_window}})
+    try:
+        async with client(connection,settings.llm_timeout_seconds) as session:
+            async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=payload) as response:
+                if not response.is_success:raise ProviderError('모델의 도구 호출 요청이 거절되었습니다. 도구 지원과 서버 parser 설정을 확인하세요.')
+                raw=bytearray()
+                async for part in response.aiter_bytes():
+                    raw.extend(part)
+                    if len(raw)>256000:raise ProviderError('모델의 도구 응답이 크기 제한을 초과했습니다.')
+        data=json.loads(raw)
+        message=data['choices'][0]['message'] if vllm else data['message']
+        content=message.get('content') or ''
+        calls=message.get('tool_calls') or []
+        if not isinstance(content,str) or not isinstance(calls,list) or len(calls)>4:raise ValueError()
+        normalized=[]
+        for index,call in enumerate(calls):
+            function=call['function']
+            arguments=function['arguments']
+            if isinstance(arguments,str):arguments=json.loads(arguments)
+            if not isinstance(arguments,dict) or not isinstance(function['name'],str):raise ValueError()
+            normalized.append({'id':str(call.get('id') or f'call-{index}-{secrets.token_hex(4)}'),'type':'function',
+                'function':{'name':function['name'],'arguments':arguments}})
+        return {'role':'assistant','content':content,'tool_calls':normalized}
+    except ProviderError:raise
+    except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError):
+        raise ProviderError('모델 도구 응답을 처리하지 못했습니다. 도구 호출을 지원하는 모델과 parser 설정을 확인하세요.') from None
+
+async def structured_reply(connection,model,messages,schema,settings):
+    """Bounded JSON decision; never executes tools or accepts a server URL from the model."""
+    profile=connection.profile(model)
+    vllm=connection.provider=='vllm'
+    payload={'model':model,'messages':messages,'stream':False}
+    if vllm:
+        payload.update(max_tokens=min(1024,profile.max_output_tokens),temperature=0,
+            response_format={'type':'json_schema','json_schema':{'name':'assistant_decision','schema':schema,'strict':True}})
+    else:
+        payload.update(format=schema,options={'temperature':0,'num_predict':min(1024,profile.max_output_tokens),'num_ctx':profile.context_window})
+    try:
+        async with client(connection,settings.llm_timeout_seconds) as session:
+            async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=payload) as response:
+                if not response.is_success:raise ProviderError('자동 판단 요청이 거절되었습니다. 모델 서버의 구조화 출력 지원을 확인하세요.')
+                raw=bytearray()
+                async for part in response.aiter_bytes():
+                    raw.extend(part)
+                    if len(raw)>65536:raise ProviderError('자동 판단 응답이 너무 큽니다.')
+        value=json.loads(raw)
+        message=value['choices'][0]['message'] if vllm else value['message']
+        content=message.get('content','')
+        if not isinstance(content,str):raise ValueError()
+        result=json.loads(content)
+        if not isinstance(result,dict):raise ValueError()
+        return result
+    except ProviderError:raise
+    except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError,AttributeError):
+        raise ProviderError('자동 판단 응답을 처리하지 못했습니다. 구조화 출력 설정을 확인하세요.') from None

@@ -10,7 +10,8 @@ export async function authenticatedFetch(url: string, init: RequestInit = {}): P
   if (!token) token = await refreshAccessToken();
   const request = () => {
     const headers = new Headers(init.headers);
-    headers.set("content-type", "application/json"); headers.set("x-llm-account", "1");
+    if (!(typeof FormData !== 'undefined' && init.body instanceof FormData)) headers.set("content-type", "application/json");
+    headers.set("x-llm-account", "1");
     if (token) headers.set("authorization", `Bearer ${token}`);
     return fetch(url, { ...init, credentials: "same-origin", headers });
   };

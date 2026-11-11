@@ -61,3 +61,44 @@ test("invalid queue positions and states fail and release the reader", async () 
     assert.equal(source.locked, false);
   }
 });
+
+test("app reading and bounded source events arrive before a terminal answer", async () => {
+  const source = { id:"GL1",path:"app/main.py",url:"https://gitlab.example/team/app/-/blob/abc/app/main.py",commit:"abc",start_line:1,end_line:4 };
+  const value = 'event: tool\ndata: {"app":"gitlab","status":"reading","detail":"파일을 읽는 중"}\n\n'
+    + `event: sources\ndata: ${JSON.stringify({sources:[source]})}\n\n`+events;
+  const received=[];
+  await readChatStream(stream(encoder.encode(value),1),(event) => received.push(event));
+  assert.deepEqual(received.map((item) => item.event),["tool","sources","start","delta","done"]);
+  assert.equal(received[1].data.sources[0].path,"app/main.py");
+  for (const invalid of [null,[{...source,url:"javascript:alert(1)"}],Array(31).fill(source)]) {
+    await assert.rejects(() => readChatStream(stream(encoder.encode(`event: sources\ndata: ${JSON.stringify({sources:invalid})}\n\n`)),() => {}),/출처/);
+  }
+});
+
+test("workspace and tool activity events remain distinct from answer text", async()=>{
+  const value='event: workspace\ndata: {"id":"workspace-one","status":"ready"}\n\n'
+    +'event: activity\ndata: {"name":"repo_map","status":"complete","detail":"파일 조회","step":1}\n\n'+events;
+  const received=[];
+  await readChatStream(stream(encoder.encode(value),2),event=>received.push(event));
+  assert.deepEqual(received.map(event=>event.event),['workspace','activity','start','delta','done']);
+  assert.equal(received[1].data.detail,'파일 조회');
+});
+
+test('knowledge sources preserve document version and location without an external URL',async()=>{
+  const events=[];
+  const source={id:'KS1',app:'knowledge',document_id:'document',chunk_id:'chunk',filename:'매뉴얼.pdf',location:'3쪽',sha256:'abc',revision:2};
+  const stream=new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(`event: sources\ndata: ${JSON.stringify({sources:[source]})}\n\nevent: done\ndata: {}\n\n`));controller.close();}});
+  await readChatStream(stream,event=>events.push(event));assert.deepEqual(events[0].data.sources,[source]);
+});
+
+test('automatic workspace selection and final routing survive split SSE data',async()=>{
+  const selection={app:'gitlab',connection_id:'account',project_id:7,ref:'main',paths:[],mode:'workspace',workspace_id:'workspace'};
+  const value='event: workspace\ndata: '+JSON.stringify({id:'workspace',status:'ready',automatic:true,selection})+'\n\n'
+    +'event: activity\ndata: '+JSON.stringify({name:'evidence_review',status:'running',detail:'근거 점검',step:0})+'\n\n'
+    +'event: done\ndata: '+JSON.stringify({message:{routing:{automatic:true,automatic_project:true,route:'gitlab',status:'complete'}}})+'\n\n';
+  const received=[];
+  await readChatStream(stream(encoder.encode(value),1),event=>received.push(event));
+  assert.deepEqual(received[0].data.selection,selection);
+  assert.equal(received[0].data.automatic,true);
+  assert.equal(received.at(-1).data.message.routing.automatic_project,true);
+});

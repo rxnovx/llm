@@ -9,6 +9,8 @@ const routes: Record<string, { kind: "auth" | "settings" | "admin"; title: strin
   "/user/profile": { kind: "settings", title: "설정" },
   "/user/profile/edit": { kind: "settings", title: "설정" },
   "/user/settings": { kind: "settings", title: "설정" },
+  "/user/settings/apps": { kind: "settings", title: "설정" },
+  "/apps/gitlab/callback": { kind: "auth", title: "GitLab 연결" },
   "/admin": { kind: "admin", title: "운영 대시보드" },
 };
 export function workspaceModal(pathname: string) {
@@ -32,7 +34,7 @@ export function workspaceHref(href: string, search: string) {
   // Continue a login/signup/recovery flow without copying verification tokens.
   if (routes[url.pathname]?.kind === "auth" && !url.searchParams.has("next") && current.has("next")) {
     const next = current.get("next")!;
-    if (/^\/(?:\?|$)|^\/(?:admin|user\/(?:profile(?:\/edit)?|settings))(?:\?|$)/.test(next)
+    if (/^\/(?:\?|$)|^\/(?:admin|user\/(?:profile(?:\/edit)?|settings(?:\/apps)?))(?:\?|$)/.test(next)
         && !/[\\\r\n]/.test(next)) url.searchParams.set("next", next);
   }
   return url.pathname + url.search + url.hash;

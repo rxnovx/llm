@@ -18,6 +18,13 @@ from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
 from app.modules.chat.models import Admission, ContextNote, Conversation, GenerationRun, Message
 from app.modules.chat import context as context_budget, providers, scheduler
+from app.modules.integrations.models import MessageContext
+from app.modules.integrations.tools import GitlabSelection, read_context
+from app.modules.integrations.transport import GitlabError
+from app.modules.workspaces import agent as workspace_agent
+from app.modules.workspaces import client as workspace_client
+from app.modules.assistant import context as assistant_context
+from app.modules.assistant.models import TurnContext
 
 router = APIRouter(prefix='/chat', tags=['chat'])
 Database = Annotated[Session, Depends(get_db)]
@@ -38,6 +45,8 @@ class TurnInput(ConversationInput):
     content: str = Field(min_length=1, max_length=16000)
     request_id: UUID
     retry: bool = False
+    apps: list[GitlabSelection] | None = Field(None,max_length=1)
+    assistant: assistant_context.Selection | None = None
 
 
 class CancelInput(BaseModel):
@@ -61,7 +70,12 @@ def conversation_data(item: Conversation):
 
 
 def message_data(item: Message):
-    return {key: getattr(item, key) for key in ('id', 'role', 'content', 'status', 'model', 'is_test', 'error', 'created_at')}
+    record = item.source_record
+    return {key: getattr(item, key) for key in ('id', 'role', 'content', 'status', 'model', 'is_test', 'error', 'created_at')} | {
+        'apps':json.loads(record.apps_json) if record else [], 'sources':json.loads(record.sources_json) if record else [],
+        'assistant':json.loads(item.assistant_context.data_json) if item.assistant_context else {},
+        'routing':json.loads(item.decision_record.data_json) if item.decision_record else {},
+        'tools':[{'name':trace.name,'step':trace.step,'status':trace.status,'detail':trace.detail} for trace in item.tool_traces[-80:]]}
 
 
 def owned(db: Session, conversation_id: UUID, user_id: str) -> Conversation:
@@ -81,7 +95,9 @@ def connection_for(connection_id: str, db=None, user=None):
 @router.get('/config')
 def config(context: Authenticated, db: Database):
     try:
-        return {'connections': [item.public() for item in providers.connections(get_settings(), db, context.user)]}
+        settings=get_settings()
+        return {'connections': [item.public() for item in providers.connections(settings, db, context.user)],
+            'terminal':{'enabled':workspace_client.enabled(),'execution_enabled':settings.terminal_execution_enabled}}
     except providers.ProviderError as error:
         raise HTTPException(503, str(error)) from None
 
@@ -179,10 +195,19 @@ def rename_conversation(conversation_id: UUID, data: TitleInput, context: Authen
 
 
 @router.delete('/conversations/{conversation_id}', status_code=204)
-def delete_conversation(conversation_id: UUID, context: Authenticated, db: Database):
+async def delete_conversation(conversation_id: UUID, context: Authenticated, db: Database):
     item = owned(db, conversation_id, context.user.id)
     if item.generation_id and item.generation_until > time.time():
         raise HTTPException(409, '응답을 중지한 뒤 대화를 삭제해 주세요.')
+    from app.modules.workspaces.service import close_copies
+    user_id=context.user.id
+    db.rollback()
+    await close_copies(db.get_bind(),user_id,conversation_id=str(conversation_id))
+    item=owned(db,conversation_id,user_id)
+    if item.generation_id and item.generation_until>time.time():raise HTTPException(409,'응답을 중지한 뒤 대화를 삭제해 주세요.')
+    from app.modules.knowledge.models import Document
+    from app.modules.knowledge.service import remove as remove_document
+    for doc in db.scalars(select(Document).where(Document.conversation_id==item.id)):remove_document(db,doc)
     db.delete(item)
     db.commit()
     return Response(status_code=204)
@@ -232,10 +257,10 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     if previous_generation:
         scheduler.finish(db, previous_generation, 'error')
         db.execute(update(GenerationRun).where(GenerationRun.id == previous_generation,
-            GenerationRun.status.in_(['running', 'queued'])).values(status='error', error_code='interrupted', finished_at=now,
+            GenerationRun.status.in_(['running', 'queued','tool_waiting'])).values(status='error', error_code='interrupted', finished_at=now,
                 duration_ms=(now - GenerationRun.started_at) * 1000))
     db.execute(update(GenerationRun).where(GenerationRun.conversation_id == item.id,
-        GenerationRun.status.in_(['running', 'queued']), GenerationRun.deadline_at <= now).values(
+        GenerationRun.status.in_(['running', 'queued','tool_waiting']), GenerationRun.deadline_at <= now).values(
             status='error', error_code='interrupted', finished_at=now,
             duration_ms=(now - GenerationRun.started_at) * 1000))
     rows = list(db.scalars(select(Message).where(Message.conversation_id == item.id).order_by(Message.position)))
@@ -264,6 +289,28 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         assistant = Message(conversation_id=item.id, position=position + 1, role='assistant', content='',
             status='pending', model=model, is_test=connection.provider == 'test')
         db.add_all([user_message, assistant])
+    apps = [app.model_dump(mode='json') for app in data.apps] if data.apps is not None else (
+        json.loads(assistant.source_record.apps_json) if data.retry and assistant.source_record else [])
+    for app in apps:
+        if app.get('mode')=='files':app.pop('mode',None)
+        if app.get('workspace_id') is None:app.pop('workspace_id',None)
+    workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute'})
+    if workspace_mode:
+        if not workspace_client.enabled():raise HTTPException(503,'운영자가 Terminal MCP 서버를 연결해야 합니다.')
+        if connection.provider!='test' and not connection.profile(model).supports_tools:
+            raise HTTPException(422,'이 모델의 도구 호출 사용이 설정되지 않았습니다. 다른 모델을 선택하거나 운영자에게 설정을 요청하세요.')
+    if apps and not workspace_mode and context_budget.reference_budget(db,item.id,connection,model,content)<2000:
+        raise HTTPException(422,'GitLab 파일을 담을 문맥 예산이 부족합니다. 질문·요약 메모를 줄이거나 더 큰 문맥의 모델을 선택하세요.')
+    if assistant.source_record is None:
+        assistant.source_record = MessageContext(apps_json=json.dumps(apps),sources_json='[]')
+    else:
+        assistant.source_record.apps_json,assistant.source_record.sources_json = json.dumps(apps),'[]'
+    if assistant.decision_record:assistant.decision_record.data_json='{}'
+    options=data.assistant.model_dump(mode='json') if data.assistant is not None else (
+        json.loads(assistant.assistant_context.data_json) if data.retry and assistant.assistant_context else {})
+    assistant_context.validate(db,user_id,item.id,options,connection,model)
+    if assistant.assistant_context is None:assistant.assistant_context=TurnContext(data_json=json.dumps(options))
+    else:assistant.assistant_context.data_json=json.dumps(options)
     try:
         history, report = context_budget.plan(db, item.id, connection, model, content)
     except providers.ProviderError as error:
@@ -324,6 +371,7 @@ async def guarded_parts(iterator, cancelled):
 
 @router.post('/conversations/{conversation_id}/messages')
 def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Database):
+    user_id = context.user.id
     connection = connection_for(data.connection_id, db, context.user)
     turn = prepare(db, conversation_id, context.user.id, data, connection)
     settings, bind = get_settings(), db.get_bind()
@@ -332,6 +380,8 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
         text, status, error = '', 'cancelled', None
         first_token_ms, error_code = None, 'cancelled'
         saved = None
+        sources = []
+        workspace_selection=None
         def cancelled():
             with Session(bind) as session:
                 active = session.get(Conversation, turn.conversation_id)
@@ -356,30 +406,62 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                 raise TimeoutError('queue')
             if state == 'running':
                 yield event('queue', {'status': 'running', 'position': 0, 'request_id': turn.request_id})
-                yield event('context', report)
-                async with asyncio.timeout(settings.llm_timeout_seconds):
-                    iterator = providers.stream_reply(admitted, turn.start['conversation']['model'], turn.history, settings)
-                    async with aclosing(guarded_parts(iterator, cancelled)) as parts:
-                        async for part in parts:
-                            if len(text) + len(part) > 200000:
-                                raise providers.ProviderError('응답 길이 제한에 도달했습니다. 질문을 나눠서 보내 주세요.')
-                            text += part
-                            if first_token_ms is None:
-                                first_token_ms = max(0, int((time.monotonic() - turn.started_clock) * 1000))
-                            yield event('delta', {'content': part})
+                apps = turn.start['assistant_message']['apps']
+                workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute'})
+                options=turn.start['assistant_message']['assistant']
+                with Session(bind) as session:general_mode=assistant_context.active(session,user_id,options,question=data.content.strip(),conversation_id=turn.conversation_id,connection=admitted)
+                async with asyncio.timeout(settings.terminal_agent_timeout_seconds if workspace_mode or general_mode else settings.llm_timeout_seconds):
+                    if workspace_mode or general_mode:
+                        workspace_selection=GitlabSelection.model_validate(apps[0]) if workspace_mode else None
+                        iterator=workspace_agent.stream(bind,user_id,turn,workspace_selection,admitted,settings,cancelled,options=options)
+                        async with aclosing(guarded_parts(iterator,cancelled)) as parts:
+                            async for kind,payload in parts:
+                                if kind=='delta':
+                                    text+=payload['content']
+                                    if len(text)>200000:raise providers.ProviderError('분석 답변 길이 제한을 초과했습니다.')
+                                    if first_token_ms is None:first_token_ms=max(0,int((time.monotonic()-turn.started_clock)*1000))
+                                elif kind=='sources':sources=payload['sources']
+                                elif kind=='workspace' and payload.get('selection'):
+                                    workspace_selection=GitlabSelection.model_validate(payload['selection'])
+                                yield event(kind,payload)
+                    elif apps:
+                        yield event('tool', {'app':'gitlab','status':'reading','detail':'선택한 GitLab 파일을 읽고 있습니다.'})
+                        with Session(bind) as session:
+                            budget = context_budget.reference_budget(session,turn.conversation_id,admitted,
+                                turn.start['conversation']['model'],data.content.strip())
+                        async def fetch_sources():
+                            yield await read_context(bind,user_id,GitlabSelection.model_validate(apps[0]),data.content,budget)
+                        async with aclosing(guarded_parts(fetch_sources(),cancelled)) as results:
+                            async for reference,sources in results:
+                                with Session(bind) as session:
+                                    turn.history,report = context_budget.plan(session,turn.conversation_id,admitted,
+                                        turn.start['conversation']['model'],data.content.strip(),extra_context=reference)
+                        yield event('sources',{'sources':sources})
+                    if not workspace_mode and not general_mode:
+                        yield event('context', report)
+                        iterator = providers.stream_reply(admitted, turn.start['conversation']['model'], turn.history, settings)
+                        async with aclosing(guarded_parts(iterator, cancelled)) as parts:
+                            async for part in parts:
+                                if len(text) + len(part) > 200000:
+                                    raise providers.ProviderError('응답 길이 제한에 도달했습니다. 질문을 나눠서 보내 주세요.')
+                                text += part
+                                if first_token_ms is None:
+                                    first_token_ms = max(0, int((time.monotonic() - turn.started_clock) * 1000))
+                                yield event('delta', {'content': part})
                     if not text.strip():
                         raise providers.ProviderError('모델이 빈 응답을 보냈습니다. 다시 시도해 주세요.')
                     status, error_code = 'complete', None
-        except TurnCancelled:
+        except (TurnCancelled,workspace_agent.AnalysisCancelled):
             pass
         except asyncio.CancelledError:
             raise
-        except (providers.ProviderError, TimeoutError) as caught:
+        except (providers.ProviderError, GitlabError, TimeoutError) as caught:
             status = 'error'
-            error_code = 'provider_error' if isinstance(caught, providers.ProviderError) else 'queue_timeout' if str(caught) == 'queue' else 'timeout'
-            error = str(caught) if isinstance(caught, providers.ProviderError) else '대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.' if str(caught) == 'queue' else '응답 시간이 초과되었습니다. 다시 시도해 주세요.'
+            error_code = 'gitlab_error' if isinstance(caught,GitlabError) else 'provider_error' if isinstance(caught, providers.ProviderError) else 'queue_timeout' if str(caught) == 'queue' else 'timeout'
+            error = str(caught) if isinstance(caught, (providers.ProviderError,GitlabError)) else '대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.' if str(caught) == 'queue' else '응답 시간이 초과되었습니다. 다시 시도해 주세요.'
         except HTTPException as caught:
-            status, error, error_code = 'error', str(caught.detail), 'context_limit'
+            status,error='error',str(caught.detail)
+            error_code='workspace_error' if turn.start['assistant_message']['apps'] and turn.start['assistant_message']['apps'][0].get('mode') in {'workspace','execute'} else 'context_limit'
         except Exception:
             status, error = 'error', '응답을 처리하지 못했습니다. 다시 시도해 주세요.'
             error_code = 'internal_error'
@@ -392,7 +474,7 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                 message = session.get(Message, turn.assistant_id)
                 if item and item.cancel_requested and status == 'complete':
                     status, error_code = 'cancelled', 'cancelled'
-                if run and run.status in {'running', 'queued'}:
+                if run and run.status in {'running', 'queued','tool_waiting'}:
                     run.status, run.error_code = status, error_code
                     run.finished_at = int(time.time())
                     run.duration_ms = max(0, int((time.monotonic() - turn.started_clock) * 1000))
@@ -400,11 +482,26 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                 scheduler.finish(session, turn.request_id, status)
                 if item and message:
                     message.content, message.status, message.error = text, status, error
+                    if message.source_record:
+                        message.source_record.sources_json = json.dumps(sources,ensure_ascii=False)
+                        if workspace_selection and workspace_selection.workspace_id:
+                            updated=json.loads(message.source_record.apps_json)
+                            updated[0]['workspace_id']=str(workspace_selection.workspace_id)
+                            message.source_record.apps_json=json.dumps(updated)
+                    if message.decision_record:
+                        routing_data=json.loads(message.decision_record.data_json)
+                        if status!='complete':routing_data['status']=status
+                        message.decision_record.data_json=json.dumps(routing_data,ensure_ascii=False)
                     # A failed/cancelled regeneration must not destroy a good answer.
                     if status != 'complete' and turn.previous_message:
                         previous = turn.previous_message
                         message.content, message.status, message.error = previous['content'], previous['status'], previous['error']
                         message.model, message.is_test = previous['model'], previous['is_test']
+                        if message.source_record:
+                            message.source_record.apps_json = json.dumps(previous['apps'])
+                            message.source_record.sources_json = json.dumps(previous['sources'],ensure_ascii=False)
+                        if message.assistant_context:message.assistant_context.data_json=json.dumps(previous.get('assistant',{}))
+                        if message.decision_record:message.decision_record.data_json=json.dumps(previous.get('routing',{}),ensure_ascii=False)
                         item.connection_id, item.model = turn.previous_connection, previous['model']
                     item.generation_id, item.generation_until, item.cancel_requested = None, 0, False
                     item.updated_at = int(time.time())

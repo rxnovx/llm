@@ -12,7 +12,7 @@ from app.core.security import (create_access_token, create_one_time_token, creat
 from app.modules.auth import audit, rate_limit, repository
 from app.modules.auth import email as email_delivery
 from app.modules.auth.google import verify_google_credential
-from app.modules.auth.models import OAuthIdentity, OneTimeToken, RefreshSession, User
+from app.modules.auth.models import OAuthIdentity, OneTimeToken, RefreshSession, SessionFamily, User
 from app.modules.auth.schemas import (AccountRecoveryConfirmRequest, EmailChangeRequest, GoogleConnectionResponse, GoogleCredentialRequest, MessageResponse, PasswordChangeRequest, PasswordResetConfirmRequest, PasswordSetRequest, RegisterRequest, SessionResponse, TokenResponse, UserResponse, UserUpdateRequest)
 
 EMAIL_VERIFICATION = "email_verification"
@@ -607,6 +607,7 @@ def issue_tokens(
     request: Request,
     *,
     refresh_expires_at: int | None = None,
+    family_id: str | None = None,
 ) -> TokenResponse:
     registration_error = registration_access_error(user)
     if registration_error or not user.is_active:
@@ -642,6 +643,7 @@ def issue_tokens(
     )
     db.add(session)
     db.flush()
+    db.add(SessionFamily(session_id=session.id, family_id=family_id or session.id))
     access_token, expires_in = create_access_token(
         subject=user.id,
         claims={
@@ -692,10 +694,12 @@ def rotate_refresh_token_with_user(
             "refresh_token_reused",
             "이미 교체된 Refresh Token입니다.",
         )
+    lineage = db.get(SessionFamily, session.id)
     tokens = issue_tokens(
         db,
         user,
         request,
+        family_id=lineage.family_id if lineage else session.id,
     )
     return tokens, user
 

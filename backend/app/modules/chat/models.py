@@ -5,6 +5,9 @@ from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, Unique
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.modules.integrations.models import MessageContext
+from app.modules.workspaces.models import ToolTrace
+from app.modules.assistant.models import TurnContext,TurnDecision
 
 
 class Conversation(Base):
@@ -17,6 +20,7 @@ class Conversation(Base):
     connection_id: Mapped[str] = mapped_column(String(64))
     model: Mapped[str] = mapped_column(String(200), default='')
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
+
     updated_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     generation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     generation_until: Mapped[int] = mapped_column(Integer, default=0)
@@ -38,6 +42,11 @@ class Message(Base):
     is_test: Mapped[bool] = mapped_column(Boolean, default=False)
     error: Mapped[str | None] = mapped_column(String(300), nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
+    source_record = relationship(MessageContext, uselist=False, lazy='selectin',
+                                 cascade='all, delete-orphan', passive_deletes=True)
+    tool_traces = relationship(ToolTrace,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True,order_by=ToolTrace.created_at)
+    assistant_context = relationship(TurnContext,uselist=False,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True)
+    decision_record = relationship(TurnDecision,uselist=False,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True)
 
 
 class GenerationRun(Base):

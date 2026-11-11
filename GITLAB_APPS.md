@@ -1,0 +1,109 @@
+# GitLab 앱 연결
+
+프로젝트 분석·터미널 확장에서는 `read_repository`를 추가로 요청하므로 GitLab OAuth 앱에 `read_user read_api read_repository`를 등록한 뒤 기존 연결을 재인증하세요. 파일 조회 모드 외에 프로젝트 자동 탐색·분석·실행 모드를 제공하며 상세 구성과 현재 범위는 [TERMINAL_MCP.md](TERMINAL_MCP.md)를 참고하세요. 아래의 파일 조회 설명은 기존 파일 모드에 해당합니다.
+
+앱 설정 모달에서 각 사용자가 자기 GitLab 계정을 OAuth로 연결하고, 채팅 입력창의 `@GitLab` 또는 `@ 앱` 버튼에서 프로젝트·브랜치·파일을 선택합니다. 한 질문에 한 연결, 텍스트 소스 파일 최대 5개를 지정합니다. 선택한 파일을 읽은 뒤 현재 vLLM/Ollama 모델에 발췌 자료와 질문을 함께 전달합니다. 모델의 도구 호출 기능은 필수가 아닙니다.
+
+GitLab 주소만 등록하면 모든 사용자에게 공유되는 토큰이 생기는 구조가 아닙니다. 서버의 OAuth 앱 등록과 각 사용자의 GitLab 승인이 모두 필요합니다. GitLab 연결은 이 서비스에 로그인하는 기능과도 별개입니다.
+
+## 1. GitLab에서 OAuth 앱 등록
+
+대상 GitLab의 Applications 설정에서 다음 애플리케이션을 등록합니다. Self-Managed GitLab에서도 같은 OAuth API를 사용합니다.
+
+| 항목 | 값 |
+| --- | --- |
+| Name | 조직에서 식별할 수 있는 이름, 예: LLM |
+| Redirect URI | `https://llm.example.internal/apps/gitlab/callback` |
+| Confidential | 사용 |
+| Scopes | `read_user`, `read_api`, `read_repository` 선택 |
+
+로컬 Termux에서는 예를 들어 `http://localhost:3000/apps/gitlab/callback`을 등록합니다. GitLab 인증 후 돌아오는 브라우저에서 해당 주소에 접근할 수 있어야 합니다. 등록된 redirect URI와 백엔드 `FRONTEND_URL + /apps/gitlab/callback`이 정확히 같아야 합니다.
+
+**같은 브라우저 주소를 계속 사용하세요.** `localhost`, `127.0.0.1`, LAN IP, HTTP/HTTPS는 쿠키가 공유되지 않을 수 있습니다. 프론트엔드 `APP_URL`과 백엔드 `FRONTEND_URL`을 같은 origin으로 맞추고, 그 주소에서 연결을 시작합니다. `APP_ALLOWED_ORIGINS`의 추가 주소로 일반 채팅을 하더라도 OAuth 연결 시작은 `APP_URL`에서 진행하도록 안내합니다.
+
+발급된 Application ID와 Secret은 서버 환경 변수에만 넣습니다. GitLab 사용자별 PAT를 채팅에 입력할 필요는 없습니다.
+
+## 2. 서버 환경 설정
+
+개별 실행은 `backend/.env`, Compose는 루트 `.env`에 설정합니다. 아래 값은 형식 예제이며 실제 인증 정보가 아닙니다.
+
+```dotenv
+GITLAB_INSTANCES_JSON='[{"id":"office","name":"사내 GitLab","base_url":"https://gitlab.example.internal","client_id":"발급받은-application-id","secret_ref":"office"}]'
+GITLAB_CLIENT_SECRETS_JSON='{"office":"발급받은-client-secret"}'
+INTEGRATIONS_ENCRYPTION_KEYS='["별도로-생성한-Fernet-키"]'
+GITLAB_TIMEOUT_SECONDS=10
+GITLAB_CA_BUNDLE=
+```
+
+백엔드 `FRONTEND_URL`, 프론트엔드 `APP_URL`은 실제 브라우저 origin으로 지정합니다. 개발용 `AUTH_COOKIE_SECURE=false`, HTTPS 운영은 `AUTH_COOKIE_SECURE=true`를 사용합니다. OAuth client secret과 암호화 키는 `frontend/.env.local`이나 `NEXT_PUBLIC_*`에 넣지 않습니다.
+
+`python scripts/init_env.py --standalone` 또는 `--compose`는 새 파일에 암호화 키도 생성합니다. 기존 파일을 덮어쓰지 않으므로 이미 설정파일이 있다면 키를 별도로 생성해 추가합니다. GitLab 선택 의존성을 설치한 가상환경에서 다음 명령을 사용할 수 있습니다. 출력값은 로컬 설정파일에만 보관하세요.
+
+```bash
+python -c 'from cryptography.fernet import Fernet; import json; print(json.dumps([Fernet.generate_key().decode()]))'
+```
+
+개별 실행에서 GitLab 기능을 사용하려면:
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m pip install -r requirements-gitlab.txt
+python main.py
+```
+
+다른 터미널에서는 기존대로 `cd frontend && npm run dev`로 실행합니다. 일반 채팅·SQLite 기본 설치는 계속 `requirements.txt`만으로 가능하며, GitLab 암호화 모듈은 앱 연결을 사용할 때 불러옵니다. Docker API 이미지는 GitLab 선택 의존성도 포함하므로 기존 `docker compose up -d --build`로 배포합니다. 환경 변수를 바꾼 뒤에는 각 서비스를 재시작합니다.
+
+폐쇄망에서는 **사용자 브라우저 → 앱과 GitLab**, **백엔드 → GitLab**, **백엔드 → 모델 서버** 경로가 필요합니다. GitLab 또는 모델 서버가 외부 인터넷에 공개될 필요는 없습니다. 사설 CA는 API 프로세스가 읽을 수 있는 PEM 묶음을 `GITLAB_CA_BUNDLE`에 지정합니다. Compose에서는 해당 파일을 별도로 읽기 전용 마운트하고 컨테이너 내부 경로를 지정합니다. TLS 검증을 끄는 옵션은 제공하지 않습니다. 운영 모드의 GitLab base URL은 HTTPS여야 합니다.
+
+Termux의 cryptography `PyType_Type` 오류는 환경 변수 주소와 별개인 Python 네이티브 모듈 문제입니다. [TERMUX.md](TERMUX.md)의 현재 Python 버전에 맞는 `LD_PRELOAD` 방법을 참고하세요. 실제 Android 단말과 사용자 GitLab에서의 인증은 이 PR의 자동 검증 대상이 아닙니다.
+
+## 3. 사용 흐름
+
+1. 앱에 로그인한 뒤 **설정 → 앱 연결 → GitLab 연결**을 누릅니다.
+2. 인증 창에서 GitLab에 로그인하고 읽기 권한을 승인합니다. 완료하면 원래 채팅으로 돌아옵니다.
+3. 채팅에 `@GitLab`을 입력하거나 **@ 앱**을 누릅니다. 키보드 Enter/Tab으로 앱을 선택할 수 있습니다.
+4. 계정·프로젝트·브랜치와 텍스트 파일을 고르고 **이 질문에 추가**를 누릅니다.
+5. 질문을 전송하면 파일 조회 상태와 답변 아래 출처 카드가 표시됩니다. 출처는 경로·발췌 줄·고정된 커밋 링크입니다.
+
+선택은 한 질문에 적용됩니다. `@GitLab`이라는 텍스트 자체만 서버로 보내는 것으로는 도구가 실행되지 않습니다. 구조화된 파일 선택이 있어야 합니다. **다시 생성**은 해당 답변의 연결·브랜치·파일을 재사용하고 현재 접근 권한으로 다시 읽습니다. 브랜치가 이동했다면 새 커밋을 읽으므로 이전 답변과 근거 커밋이 다를 수 있습니다. 실패한 재생성은 기존 완료 답변과 출처를 보존합니다.
+
+인증은 별도 창을 우선 사용해 채팅을 유지합니다. 팝업이 차단되면 전체 페이지 이동을 사용하며, 작성 중인 질문만 현재 사용자·대화에 묶어 `sessionStorage`에 10분 동안 보관한 뒤 한 번 복원합니다. 브라우저 저장소가 차단되면 이 복원은 보장되지 않습니다. 전체 이동은 진행 중인 스트리밍을 중단할 수 있습니다.
+
+설정에서 **연결 해제**하면 앱의 토큰을 즉시 삭제하고 GitLab 원격 철회도 시도합니다. 서버에 접근할 수 없거나 등록 설정이 이미 제거되었다면 로컬 해제와 원격 철회 미확인을 구분해서 표시합니다. 이때 GitLab의 승인된 애플리케이션에서도 직접 해제할 수 있습니다. 이미 저장된 답변과 출처는 유지되며, 대화를 삭제하면 함께 삭제됩니다.
+
+## 범위와 제한
+
+- 사용자 계정마다 OAuth access/refresh token을 별도로 암호화합니다. 다른 사용자나 운영자의 연결로 대신 조회하지 않습니다. `state`는 10분·일회용이고 PKCE, 별도 HttpOnly 브라우저 nonce, 앱 사용자·로그인 세션 계열·인증 버전에 묶습니다. 앱 토큰 갱신은 같은 로그인으로 인정하지만 다른 로그인이나 계정으로 연결을 완료할 수 없습니다.
+- 토큰 갱신은 DB의 비교 후 갱신과 만료되는 임대로 직렬화합니다. 갱신 중 통신이 끊겨 결과를 확인할 수 없으면 다시 인증하도록 표시합니다. 연결 설정의 URL·client ID·redirect URI·scope가 바뀌면 기존 토큰을 변경된 서버로 보내지 않고 다시 연결하도록 합니다.
+- 프로젝트 권한을 조회마다 확인하고 한 질문의 파일은 같은 커밋 SHA로 읽습니다. 사용자 입력 URL, 리다이렉트, 저장소 코드 실행, 쓰기 API는 지원하지 않습니다. 저장소 전체 복제·인덱싱, 의미 검색, AST/호출 관계 분석, MR/커밋 생성은 후속 작업 범위입니다.
+- 파일당 최대 128KiB, 질문당 최대 5개, 발췌 총량 최대 약 30KB와 모델 입력 예산 중 작은 쪽을 사용합니다. UTF-8 텍스트만 읽습니다. 질문 단어가 처음 등장하는 곳 주변 또는 파일 앞부분의 연속 줄을 발췌하므로 전체 파일·저장소를 확인한 결과는 아닙니다. 기존 대화는 문맥 예산에 맞춰 오래된 완전한 턴부터 제외됩니다.
+- `.env`, 일반적인 인증서·키·credentials 파일, 의존성/빌드 디렉터리는 선택에서 제외합니다. 소스 코드에 직접 적힌 비밀까지 완전히 탐지하는 기능은 아닙니다. 사용자가 선택한 코드 발췌는 현재 선택한 모델 서버로 전달됩니다.
+- 출처 카드의 `[GL1]` 등은 실제 읽은 자료입니다. 모델이 본문에서 그 표기를 정확히 인용하는지는 모델 응답에 달려 있습니다. 데모 모드에서도 명시적으로 선택한 GitLab 파일은 실제 조회하지만 답변은 계속 랜덤 예시이므로 코드 분석의 정확도를 검증할 수 없습니다.
+
+암호화 키는 DB와 별도로 백업합니다. 키를 잃으면 기존 토큰을 복구할 수 없어 다시 연결해야 합니다. 키 교체는 새 키를 배열 맨 앞에 추가하고 기존 키를 보존하는 방식입니다. 기존 연결의 토큰 갱신 또는 재연결 때 새 키로 저장하며, 이전 키가 필요한 연결과 진행 중인 OAuth 요청이 없는 것을 확인한 뒤 제거합니다. 키 목록은 최대 5개입니다.
+
+Nginx 기본 access log에서는 OAuth code가 있는 query string과 referrer를 기록하지 않습니다. 별도의 프록시나 개발 서버에서 callback URL 전체를 기록하는 설정도 점검하세요.
+
+## API와 검증
+
+| API | 역할 |
+| --- | --- |
+| `GET /api/apps/catalog` | 현재 사용자의 앱·서버·연결 목록 |
+| `POST /api/apps/gitlab/{provider}/authorize` | nonce cookie와 PKCE 인증 시작 |
+| `POST /api/apps/gitlab/oauth/complete` | 로그인한 사용자의 일회용 인증 완료 |
+| `DELETE /api/apps/connections/{id}` | 내 연결 제거 및 원격 철회 시도 |
+| `GET /api/apps/connections/{id}/projects` | 내 권한으로 프로젝트 검색·페이지 조회 |
+| `GET /api/apps/connections/{id}/projects/{project}/branches` | 브랜치 페이지 조회 |
+| `GET /api/apps/connections/{id}/projects/{project}/tree` | 디렉터리·파일 페이지 조회 |
+
+브라우저는 Next.js BFF를 경유합니다. FastAPI의 같은 경로는 `/api` 접두어 없이 사용하며 Bearer 인증을 요구합니다. 채팅 POST의 선택은 `apps: [{app:"gitlab", connection_id, project_id, ref, paths}]`로 전달합니다. 새 테이블만 추가하므로 기존 SQLite/PostgreSQL 계정·대화 열을 변경하지 않습니다.
+
+백엔드 `pytest`에 OAuth·권한·토큰 갱신·출처·제한 검증을 포함합니다. 프론트엔드는 `npm run test:apps`, `npm run test:chat`, 빌드 후 `npm run test:proxy`로 입력 선택과 BFF 계약을 확인합니다. `tests/apps.spec.ts`는 실제 앱 가입과 GitLab API 응답 대역으로 UI 흐름을 검증하는 Playwright 시나리오입니다. 실제 GitLab/OAuth 등록과 브라우저/Termux 단말 검증 여부는 [VALIDATION.md](VALIDATION.md)를 확인하세요.
+
+## 공식 문서
+
+- [GitLab OAuth 2.0 API: PKCE, 토큰 갱신, 철회](https://docs.gitlab.com/api/oauth2/)
+- [GitLab Repository Files API](https://docs.gitlab.com/api/repository_files/)
+- [GitLab Repositories API](https://docs.gitlab.com/api/repositories/)
+- [cryptography Fernet와 MultiFernet](https://cryptography.io/en/latest/fernet/)

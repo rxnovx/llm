@@ -19,6 +19,8 @@ python main.py
 
 개발 테스트가 필요하면 `python -m pip install -r requirements-dev.txt`를 사용합니다. 기존 가상환경을 계속 사용할 수 있습니다.
 
+GitLab 계정 연결과 `@GitLab` 파일 조회도 사용할 경우 `python -m pip install -r requirements-gitlab.txt`를 추가로 설치합니다. 암호화 모듈을 기본 채팅 의존성과 분리했으며 [GITLAB_APPS.md](GITLAB_APPS.md)에 OAuth 등록·각 서비스 환경 변수·키 생성 방법을 정리했습니다. `FRONTEND_URL`은 이메일 링크뿐 아니라 GitLab OAuth callback 주소에도 사용하므로 프론트엔드 `APP_URL`과 일치시킵니다.
+
 ## 처음 설치하는 경우
 
 프로젝트는 Termux 홈 아래에 둡니다. 예시 경로는 `~/workspace/llm`입니다. Python 3.12 이상과 Node.js 22.13 이상을 사용합니다.
@@ -116,7 +118,11 @@ PSYCOPG_IMPL=python python main.py
 
 ## 참고 근거
 
+원격 MCP와 프로젝트 분석을 사용하는 경우 [TERMINAL_MCP.md](TERMINAL_MCP.md)를 참고하세요. Termux에서 API만 실행할 때는 `requirements-mcp-client.txt`, 같은 환경에서 분석 서버도 실행할 때는 `requirements-terminal.txt`를 사용합니다. 원격 Linux 워커가 명령을 수행하도록 구성하면 Termux에 Docker를 설치할 필요가 없습니다. 개인 개발용 `trusted_local`은 OS 계정에서 직접 실행하는 모드입니다.
+
 - [Psycopg 설치 방식과 libpq 요구 사항](https://www.psycopg.org/psycopg3/docs/basic/install.html)
 - [Next.js CLI의 Webpack 옵션](https://nextjs.org/docs/app/api-reference/cli/next)
 - 설치 버전 Next.js 16.2.12의 `build/swc/index.js`는 Android를 WASM 우선 대상으로 분류합니다. `scripts/prepare-next-wasm.mjs`는 그 버전의 캐시 위치를 준비하며 Next.js 코드를 수정하지 않습니다.
 - [Python의 tzdata fallback](https://docs.python.org/3/library/zoneinfo.html): 시스템 시간대 DB가 없는 환경에서도 `Asia/Seoul` 같은 계정 시간대 검증이 가능하도록 `tzdata`를 기본 의존성에 포함합니다.
+
+범용 파일·지식 검색은 [ASSISTANT.md](ASSISTANT.md)를 참고하세요. 텍스트 검색은 기본 의존성으로 동작하며 PDF/DOCX/XLSX는 `requirements-knowledge.txt`를 설치합니다. SQLite 기본 검색을 사용하거나 내부 임베딩·Qdrant 서버를 연결할 수 있습니다.

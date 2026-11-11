@@ -5,10 +5,10 @@ import type { ModelProfile } from "@/types/chat";
 
 type Draft = { id: string; name: string; provider: "vllm" | "ollama"; base_url: string; model: string; enabled: boolean;
   allowed_users: string[]; models: ModelProfile[]; context_window: number; max_output_tokens: number; max_concurrent: number;
-  auth_mode: "inherit" | "none" | "reference"; key_ref: string; revision: number };
+  auth_mode: "inherit" | "none" | "reference"; key_ref: string; revision: number; supports_tools:boolean };
 type Managed = Draft & { source: "database" | "environment"; has_key: boolean; has_environment: boolean };
 const empty = (): Draft => ({ id: "", name: "", provider: "vllm", base_url: "", model: "", enabled: true,
-  allowed_users: [], models: [], context_window: 8192, max_output_tokens: 2048, max_concurrent: 2, auth_mode: "none", key_ref: "", revision: 0 });
+  allowed_users: [], models: [], context_window: 8192, max_output_tokens: 2048, max_concurrent: 2, auth_mode: "none", key_ref: "", revision: 0, supports_tools:false });
 const draftOf = (item: Managed): Draft => Object.fromEntries(Object.keys(empty()).map((key) => [key, item[key as keyof Draft]])) as Draft;
 
 export function ConnectionManager({ onForbidden }: { onForbidden: () => void }) {
@@ -71,6 +71,7 @@ export function ConnectionManager({ onForbidden }: { onForbidden: () => void }) 
         <label>기본 모델 ID<input maxLength={200} value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} placeholder="서버에서 제공하는 모델 ID" /></label>
         <label>서버 동시 생성 한도<input required type="number" min={1} max={64} value={draft.max_concurrent} onChange={(event) => setDraft({ ...draft, max_concurrent: Number(event.target.value) })} /></label>
         <label>기본 문맥 한도 · 토큰<input required type="number" min={1024} max={1048576} value={draft.context_window} onChange={(event) => setDraft({ ...draft, context_window: Number(event.target.value) })} /></label>
+        <label><input type="checkbox" checked={draft.supports_tools} onChange={event=>setDraft({...draft,supports_tools:event.target.checked})}/>기본 모델의 도구 호출 사용</label>
         <label>기본 최대 출력 · 토큰<input required type="number" min={64} max={16384} value={draft.max_output_tokens} onChange={(event) => setDraft({ ...draft, max_output_tokens: Number(event.target.value) })} /></label>
         <label>인증 방식<select value={draft.auth_mode} onChange={(event) => setDraft({ ...draft, auth_mode: event.target.value as Draft["auth_mode"] })}>
           <option value="none">인증키 없음</option>{items.some((item) => item.id === draft.id && item.has_environment) ? <option value="inherit">환경 설정의 기존 키 사용</option>
@@ -85,6 +86,7 @@ export function ConnectionManager({ onForbidden }: { onForbidden: () => void }) 
           <label>문맥 한도<input required type="number" min={1024} max={1048576} value={item.context_window} onChange={(event) => profile(index, { context_window: Number(event.target.value) })} /></label>
           <label>최대 출력<input required type="number" min={64} max={16384} value={item.max_output_tokens} onChange={(event) => profile(index, { max_output_tokens: Number(event.target.value) })} /></label>
           <label>동시 생성<input required type="number" min={1} max={64} value={item.max_concurrent} onChange={(event) => profile(index, { max_concurrent: Number(event.target.value) })} /></label>
+          <label><input type="checkbox" checked={!!item.supports_tools} onChange={event=>profile(index,{supports_tools:event.target.checked})}/>도구 호출 사용</label>
           <button type="button" className="ops-button" aria-label={`${item.name || index + 1} 모델 설정 삭제`} onClick={() => setDraft({ ...draft, models: draft.models.filter((_, at) => at !== index) })}>삭제</button></div>)}
         <button type="button" className="ops-button" disabled={draft.models.length >= 100} onClick={() => setDraft({ ...draft, models: [...draft.models, { name: "", context_window: draft.context_window, max_output_tokens: draft.max_output_tokens, max_concurrent: draft.max_concurrent }] })}>모델 설정 추가</button>
       </div><footer className="ops-actions"><button type="button" className="ops-button" onClick={() => setDraft(null)}>취소</button><button className="ops-button">{saving ? "저장 중…" : "설정 저장"}</button></footer></fieldset>

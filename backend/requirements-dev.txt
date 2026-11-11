@@ -1,2 +1,3 @@
--r requirements.txt
+-r requirements-terminal.txt
+-r requirements-knowledge.txt
 pytest==9.0.3
