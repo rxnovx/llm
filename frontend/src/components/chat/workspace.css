@@ -352,8 +352,6 @@
   text-align:center;
 }
 .cw-result-image-status p { margin:0 0 4px; }
-.cw-image-mode { color:var(--cw-ink); max-inline-size:100%; }
-.cw-image-mode option { background:var(--cw-panel); color:var(--cw-ink); }
 .cw-image-inputs { display:flex; flex-wrap:wrap; gap:6px; list-style:none; padding:0; margin:0 0 8px; }
 .cw-image-inputs li {
   display:flex; align-items:center; gap:6px; min-width:0; max-width:100%;

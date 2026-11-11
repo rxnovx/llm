@@ -2,6 +2,14 @@ export const GITLAB_MENTION = "@gitlab";
 const appNames = ["gitlab", "knowledge", "apps", "지식"];
 type MentionRange = { start: number; end: number };
 
+export function hasGitlabMention(value: string) {
+  const prose = value
+    .replace(/^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^[ \t]{0,3}\1[ \t]*$|(?![\s\S]))/gm, "\n")
+    .replace(/^[ \t]{0,3}>[^\n]*/gm, "")
+    .replace(/`+[^`\n]*`+|"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’|(?<![\p{L}\p{N}_])'[^'\n]*'(?![\p{L}\p{N}_])/gu, " ");
+  return /(?<![\p{L}\p{N}_@])@gitlab(?![\p{L}\p{N}_.-])/iu.test(prose);
+}
+
 export function appMentionAt(value: string, caret: number) {
   const match = /(?:^|\s)@([\p{L}\p{N}_-]*)$/u.exec(value.slice(0, caret));
   if (!match) return null;

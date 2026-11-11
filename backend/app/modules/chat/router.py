@@ -28,7 +28,6 @@ from app.modules.workspaces import client as workspace_client
 from app.modules.assistant import context as assistant_context
 from app.modules.assistant import gitlab as gitlab_prompt
 from app.modules.assistant.models import TurnContext
-from app.modules.knowledge import service as knowledge
 from app.modules.knowledge.models import Document
 from app.modules.workflows import conversations as workflows
 from app.modules.workflows import image_inputs, image_queue
@@ -384,26 +383,26 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     options=data.assistant.model_dump(mode='json') if data.assistant is not None else (
         json.loads(assistant.assistant_context.data_json) if data.retry and assistant.assistant_context else {})
     image_mode = options.get('image_mode', 'auto')
-    document_ids = options.get('document_ids', [])
-    if image_mode != 'auto' and (apps or data.publish_gitlab):
+    image_source = image_inputs.reference(options)
+    document_ids = set(options.get('document_ids', [])) | set(image_inputs.attachment_ids(options))
+    if (image_mode != 'auto' or image_source) and (apps or data.publish_gitlab or gitlab_request):
         raise HTTPException(422, '이 요청에서 이미지 작업과 GitLab 작업 중 하나를 선택하세요.')
+    if image_source and (options.get('mcp_ids') or options.get('parallel_agents')):
+        raise HTTPException(422, '이미지 원본과 선택한 앱·병렬 분석은 별도의 메시지로 보내세요.')
     settings = get_settings()
     render_only = image_mode in {'generate', 'edit'}
     try:
         connection.profile(model)
         assistant_context.validate(db,user_id,item.id,options,connection,model)
-        if image_mode in {'vision', 'edit'}:
-            for document_id in document_ids:
-                document = knowledge.document_access(db, user_id, document_id, conversation_id=item.id)
-                if document.base_id:
-                    raise HTTPException(404, '이 대화의 첨부 이미지를 찾을 수 없습니다.')
+        if image_source:
+            image_inputs.validate_reference(db, user_id, item.id, options, assistant.id if data.retry else None)
         if render_only:
             history, report = [{'role': 'user', 'content': content}], None
         else:
             history, report = context_budget.plan(db, item.id, connection, model, content)
     except providers.ProviderError as error:
         raise HTTPException(422, str(error)) from None
-    if image_mode == 'edit' and not (options.get('image_artifact_id') or options.get('document_ids')):
+    if image_mode == 'edit' and not image_source:
         reference_id = image_inputs.latest_artifact_id(db, user_id, item.id,
             before_message_id=assistant.id if data.retry else None)
         if reference_id is None:
@@ -485,7 +484,8 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
     user_id = context.user.id
     explicit_image = data.assistant is not None and data.assistant.image_mode != 'auto'
     gitlab_request = None if explicit_image or data.retry or data.publish_gitlab else gitlab_prompt.prompt(data.content)
-    if not explicit_image and not data.apps and not data.retry and not data.publish_gitlab and not gitlab_request:
+    image_source = data.assistant and (data.assistant.image_document_ids or data.assistant.image_artifact_id)
+    if not explicit_image and not image_source and not data.apps and not data.retry and not data.publish_gitlab and not gitlab_request:
         candidate = merge_requests.automatic_connection(db, user_id, gitlab_prompt.unquoted(data.content))
         if candidate:
             owned(db, conversation_id, user_id)
@@ -556,7 +556,8 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                 workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute','merge_request'})
                 with Session(bind) as session:
                     general_mode = image_mode != 'auto' or bool(turn.gitlab_request) or assistant_context.active(
-                        session, user_id, options, question=data.content.strip(), conversation_id=turn.conversation_id, connection=admitted)
+                        session, user_id, options, question=data.content.strip(), conversation_id=turn.conversation_id,
+                        connection=admitted, model=turn.start['conversation']['model'])
                 if render_only:
                     timeout = settings.image_queue_wait_seconds + settings.image_generation_timeout_seconds + 5
                 elif image_mode == 'vision' or not (workspace_mode or general_mode):

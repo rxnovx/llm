@@ -166,6 +166,8 @@ def grant_attachments(db,user_id,parent_id,child_id,ids):
 
 
 def fork(db,user_id,conversation_id,message_id,*,content=None,version=None,tail_only=False):
+    from . import image_inputs
+
     lock(db);parent=owned(db,user_id,conversation_id,idle=True)
     target=db.get(Message,str(message_id))
     if not target or target.conversation_id!=parent.id:raise HTTPException(404,'분기할 메시지를 찾을 수 없습니다.')
@@ -194,7 +196,8 @@ def fork(db,user_id,conversation_id,message_id,*,content=None,version=None,tail_
                 cloned=ToolEvidence(owner_id=user_id,message_id=copied.id,run_id=evidence.run_id,server_id=evidence.server_id,fingerprint=evidence.fingerprint,label=evidence.label,tool=evidence.tool,content=evidence.content,sha256=evidence.sha256)
                 db.add(cloned);db.flush();source['evidence_id']=cloned.id
         opts=apply_payload(db,copied,data,branch=True)
-        all_documents.update(opts.get('document_ids',[]));all_documents.update(s['document_id'] for s in data.get('sources',[]) if s.get('app')=='knowledge')
+        all_documents.update(opts.get('document_ids',[]));all_documents.update(image_inputs.attachment_ids(opts))
+        all_documents.update(s['document_id'] for s in data.get('sources',[]) if s.get('app')=='knowledge')
         for artifact in data.get('artifacts',[]):
             row=db.get(Artifact,artifact['id'])
             if row and row.owner_id==user_id:db.add(ArtifactScope(artifact_id=row.id,message_id=copied.id))
@@ -210,9 +213,11 @@ def fork(db,user_id,conversation_id,message_id,*,content=None,version=None,tail_
             for app in target_apps:
                 app.pop('workspace_id',None)
                 if app.get('mode')=='execute':app['mode']='workspace'
-        all_documents.update(target_options.get('document_ids',[]))
+        all_documents.update(target_options.get('document_ids',[]));all_documents.update(image_inputs.attachment_ids(target_options))
     allowed=grant_attachments(db,user_id,parent.id,child.id,all_documents)
     target_options['document_ids']=[i for i in target_options.get('document_ids',[]) if i in allowed]
+    if 'image_document_ids' in target_options:
+        target_options['image_document_ids']=[i for i in target_options['image_document_ids'] if i in allowed]
     if not tail_only:
         for model in [ContextNote,AutoSummary]:
             note=db.get(model,parent.id)

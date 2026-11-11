@@ -5,7 +5,7 @@ import { downloadResult,workflowJson,type ResultFile } from '@/lib/workflows';
 import { AnswerImage, resultImageTypes } from './AnswerImage';
 import { MessageContent } from './MessageContent';
 type Preview=ResultFile&{content:string;columns:string[];rows:(string|number|boolean|null)[][];preview_truncated:boolean};
-export function AnswerFiles({messageId,files=[],onChange,onEditImage,editDisabled}:{messageId:string;files?:ResultFile[];onChange:(files:ResultFile[])=>void;onEditImage?:(file:ResultFile)=>void;editDisabled?:boolean}){
+export function AnswerFiles({messageId,files=[],onChange,onReferenceImage,referenceDisabled}:{messageId:string;files?:ResultFile[];onChange:(files:ResultFile[])=>void;onReferenceImage?:(file:ResultFile)=>void;referenceDisabled?:boolean}){
   const [formats,setFormats]=useState<string[]>([]),[format,setFormat]=useState('md'),[busy,setBusy]=useState(false),[error,setError]=useState('');
   const [preview,setPreview]=useState<Preview|null>(null);const dialog=useRef<HTMLDialogElement>(null);
   const closePreview = () => setPreview(null);
@@ -27,8 +27,8 @@ export function AnswerFiles({messageId,files=[],onChange,onEditImage,editDisable
           onClick={() => void action(async () => setPreview(await workflowJson<Preview>(`/artifacts/${file.id}`)))}>
           {metadata}
         </button>}
-        {mimeType && onEditImage && <button type="button" className="cw-text-button" disabled={busy || editDisabled}
-          onClick={() => onEditImage(file)}>이 이미지 편집</button>}
+        {mimeType && onReferenceImage && <button type="button" className="cw-text-button" disabled={busy || referenceDisabled}
+          onClick={() => onReferenceImage(file)}>이 이미지 참조</button>}
         <button type="button" className="cw-text-button" disabled={busy}
           onClick={() => void action(() => downloadResult(file))}>다운로드</button>
         <button type="button" className="cw-text-button" disabled={busy} aria-label={`${file.name} 삭제`}

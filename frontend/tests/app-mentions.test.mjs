@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
-import { appMentionAt, insertGitlabMention, removeAppMention } from "../src/lib/app-mentions.ts";
+import { appMentionAt, hasGitlabMention, insertGitlabMention, removeAppMention } from "../src/lib/app-mentions.ts";
 
 test("app mentions match standalone prefixes at the caret and preserve surrounding text", () => {
   for (const value of ["@", "@Git", "이 코드 @gitlab"]) assert.ok(appMentionAt(value,value.length));
@@ -12,6 +12,14 @@ test("app mentions match standalone prefixes at the caret and preserve surroundi
   const range = appMentionAt(value,7);
   assert.deepEqual(range,{ start:3,end:7,query:"Git" });
   assert.equal(removeAppMention(value,range),"질문  다음 내용");
+});
+
+test("quoted GitLab mentions do not select an app for attachment uploads", () => {
+  for (const value of ['이미지에서 “@gitlab” 문구를 찾아줘', '사진의 `@gitlab` 표기', '> @gitlab\n사진을 봐줘',
+    '```md\n@gitlab\n```\n사진을 봐줘', '```md\n@gitlab', 'me@gitlab', '@gitlab.example']) {
+    assert.equal(hasGitlabMention(value), false, value);
+  }
+  assert.equal(hasGitlabMention('“@gitlab” 예시 참고\n@GitLab 코드 검토'), true);
 });
 
 test("GitLab replaces the complete typed token and preserves the surrounding draft", () => {
