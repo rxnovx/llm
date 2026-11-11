@@ -9,6 +9,8 @@ import stat
 SKIP = {'.git','.venv','venv','node_modules','.next','dist','build','vendor','coverage','__pycache__','.cache'}
 EXTENSIONS = {'.py','.js','.jsx','.ts','.tsx','.mjs','.cjs','.json','.md','.txt','.toml','.yaml','.yml','.go','.rs','.java',
               '.c','.cpp','.h','.cs','.rb','.php','.sql','.sh','.html','.css','.vue','.svelte','.kt','.swift','.xml','.ini'}
+PUBLISH_MAX_FILES = 20
+PUBLISH_MAX_BYTES = 1024 * 1024
 
 
 def allowed(path):
@@ -55,9 +57,9 @@ def inventory(root,settings):
     return files,bool(omitted)
 
 
-def read_text(root,path,settings):
+def read_text(root,path,settings,*,allow_missing=False):
     safe_path(root,path)
-    descriptor=secure_fd(root,path,os.O_RDONLY|os.O_NONBLOCK)
+    descriptor=secure_fd(root,path,os.O_RDONLY|os.O_NONBLOCK,allow_missing=allow_missing)
     with os.fdopen(descriptor,'rb') as handle:
         if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):raise ValueError('일반 소스 파일만 조회할 수 있습니다.')
         raw = handle.read(settings.terminal_max_file_bytes+1)
@@ -69,12 +71,17 @@ def read_text(root,path,settings):
         raise ValueError('UTF-8 소스 파일만 지원합니다.') from None
 
 
-def secure_fd(root,path,flags,*,create_directories=False):
+def secure_fd(root,path,flags,*,create_directories=False,allow_missing=False):
     """Resolve each component relative to an open directory; symlink swaps cannot escape the root."""
     parts=Path(path).parts
     if not parts or any(part in {'.','..'} for part in parts) or Path(path).is_absolute():
         raise ValueError('올바른 파일 상대 경로를 지정하세요.')
-    directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    except FileNotFoundError:
+        if allow_missing:
+            raise ValueError('작업공간의 저장소를 찾을 수 없습니다.') from None
+        raise
     try:
         for part in parts[:-1]:
             if create_directories:
@@ -83,7 +90,9 @@ def secure_fd(root,path,flags,*,create_directories=False):
             child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
             os.close(directory);directory=child
         return os.open(parts[-1],flags|os.O_NOFOLLOW,mode=0o600,dir_fd=directory)
-    except OSError:
+    except OSError as error:
+        if allow_missing and isinstance(error,FileNotFoundError):
+            raise
         raise ValueError('파일 경로가 변경되었거나 접근할 수 없습니다.') from None
     finally:os.close(directory)
 

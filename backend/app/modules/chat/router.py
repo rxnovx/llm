@@ -18,6 +18,7 @@ from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
 from app.modules.chat.models import Admission, ContextNote, Conversation, GenerationRun, Message
 from app.modules.chat import context as context_budget, providers, scheduler
+from app.modules.integrations import config as gitlab_config, service as gitlab_connections
 from app.modules.integrations.models import MessageContext
 from app.modules.integrations.tools import GitlabSelection, read_context
 from app.modules.integrations.transport import GitlabError
@@ -54,6 +55,7 @@ class TurnInput(ConversationInput):
     request_id: UUID
     retry: bool = False
     confirm_write_retry: bool = False
+    publish_gitlab: bool = False
     apps: list[GitlabSelection] | None = Field(None,max_length=1)
     assistant: assistant_context.Selection | None = None
 
@@ -272,6 +274,7 @@ class Turn:
     previous_connection: str | None = None
     started_clock: float = 0
     parallel_used: bool = False
+    publish_gitlab: bool = False
 
 
 def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, connection: providers.Connection) -> Turn:
@@ -347,6 +350,11 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         if not workspace_client.enabled():raise HTTPException(503,'운영자가 Terminal MCP 서버를 연결해야 합니다.')
         if connection.provider!='test' and not connection.profile(model).supports_tools:
             raise HTTPException(422,'이 모델의 도구 호출 사용이 설정되지 않았습니다. 다른 모델을 선택하거나 운영자에게 설정을 요청하세요.')
+    if data.publish_gitlab:
+        if data.retry or not data.apps or data.apps[0].mode != 'execute' or connection.provider == 'test':
+            raise HTTPException(422, 'MR 생성은 실제 모델의 프로젝트 분석·실행을 선택한 새 요청에서 허용할 수 있습니다.')
+        account = gitlab_connections.owned(db, user_id, data.apps[0].connection_id)
+        gitlab_connections.require_publish(account, gitlab_config.instance(account.provider_id))
     if apps and not workspace_mode and context_budget.reference_budget(db,item.id,connection,model,content)<2000:
         raise HTTPException(422,'GitLab 파일을 담을 문맥 예산이 부족합니다. 질문·요약 메모를 줄이거나 더 큰 문맥의 모델을 선택하세요.')
     if assistant.source_record is None:
@@ -384,7 +392,8 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         raise HTTPException(409, '동시에 처리된 요청입니다. 새 요청으로 다시 시도해 주세요.') from None
     return Turn(item.id, str(data.request_id), assistant.id, history,
         {'conversation': conversation_data(item), 'user_message': message_data(user_message),
-         'assistant_message': message_data(assistant) | {'content': ''}, 'context': report}, previous_message, previous_connection, started_clock)
+         'assistant_message': message_data(assistant) | {'content': ''}, 'context': report}, previous_message, previous_connection, started_clock,
+        publish_gitlab=data.publish_gitlab)
 
 
 def event(name: str, data: dict) -> str:

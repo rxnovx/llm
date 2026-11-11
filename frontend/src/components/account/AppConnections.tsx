@@ -22,15 +22,17 @@ export function AppConnections() {
     {error && <p className="account-notice text-[var(--error)]" role="alert">{error}</p>}
     {notice && <p className="account-notice" role="status">{notice}</p>}
     {!catalog && !error && <p role="status">앱 연결을 불러오는 중…</p>}
-    {catalog?.apps.map((app) => <section key={app.id}><h3 className="settings-app-heading">GitLab <span>코드 조회</span></h3>
+    {catalog?.apps.map((app) => <section key={app.id}><h3 className="settings-app-heading">GitLab</h3>
       {!app.providers.length && <p className="settings-app-empty">등록된 GitLab 서버가 없습니다. 운영자가 GitLab OAuth 앱과 서버 환경 변수를 등록하면 여기에 표시됩니다.</p>}
       {app.providers.map((provider) => {
         const connection = app.connections.find((item) => item.provider_id === provider.id);
         return <div className="settings-app-card" key={provider.id}><div><strong>{provider.name}</strong><small>{provider.base_url}</small>
-          {connection && <p>@{connection.username} · {connection.status === "connected" ? "연결됨" : "다시 인증 필요"}</p>}
+          {connection && <p>@{connection.username} · {connection.status === "connected" ? connection.can_publish ? "MR 작성 권한 연결됨" : "읽기 연결됨" : "다시 인증 필요"}</p>}
           {!provider.ready && <p>{provider.reason}</p>}</div><div className="settings-app-actions">
           {(!connection || connection.status !== "connected") && <button className="settings-outline-button" disabled={!!busy || !provider.ready}
             onClick={() => void perform(provider.id, () => connectGitlab(provider.id))}>{busy === provider.id ? "연결 중…" : connection ? "다시 연결" : "연결"}</button>}
+          {provider.publish_enabled && !connection?.can_publish && <button className="settings-outline-button" disabled={!!busy || !provider.ready}
+            onClick={() => void perform(provider.id, () => connectGitlab(provider.id, true))}>MR 작성 권한 연결</button>}
           {connection && <button className="settings-text-button" disabled={!!busy} onClick={() => void perform(connection.id, async () => {
             const result = await appsJson<{ remote_revoked: boolean }>(`/connections/${connection.id}`, { method: "DELETE" });
             setNotice(result.remote_revoked ? "GitLab 연결과 원격 인증을 해제했습니다." : "앱에서 연결을 해제했습니다. GitLab에 접속할 수 없어 원격 철회는 확인하지 못했습니다. GitLab의 승인된 애플리케이션에서도 해제할 수 있습니다.");
@@ -42,6 +44,7 @@ export function AppConnections() {
           await appsJson(`/connections/${connection.id}`, { method: "DELETE" }); setNotice("앱에서 연결을 제거했습니다. 원격 인증은 GitLab에서도 해제해 주세요."); notifyAppsChanged();
         })}>연결 제거</button></div>)}
     </section>)}
-    <p className="settings-app-footnote">프로젝트와 파일의 읽기 권한만 요청합니다. 연결을 해제해도 이미 저장된 답변과 출처는 대화에 남습니다.</p>
+    <p className="settings-app-footnote">기본 연결은 읽기 권한을 사용합니다.{catalog?.apps.some(app =>
+      app.providers.some(provider => provider.publish_enabled)) && <> MR 작성 권한 연결은 GitLab의 <code>api</code> 권한을 요청합니다.</>}</p>
   </div>;
 }

@@ -39,7 +39,7 @@ def authorize(db,row):
             or not user or not user.is_active or user.registration_status!='approved'):
         raise HTTPException(409,'GitLab 연결이나 대화가 변경되었습니다. 작업공간을 다시 연결하세요.')
     from app.modules.integrations.config import instance
-    if instance(account.provider_id).fingerprint()!=account.provider_fingerprint:
+    if instance(account.provider_id).granted_scopes(account.provider_fingerprint) is None:
         raise HTTPException(409,'GitLab 서버 등록이 변경되었습니다. 계정을 다시 연결하세요.')
     return account
 

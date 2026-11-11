@@ -8,12 +8,13 @@ type Project = { id: number; name: string; default_branch: string | null };
 type Tree = { items: { name: string; path: string; type: "tree" | "blob"; selectable: boolean }[]; has_more: boolean };
 const errorText = (error: unknown) => error instanceof Error ? error.message : "GitLab 자료를 불러오지 못했습니다.";
 
-export function GitlabScopeDialog({ onClose, onSelect, terminal }: { onClose: () => void; onSelect: (selection: GitlabSelection) => void; terminal?: {enabled:boolean;execution_enabled:boolean} }) {
+export function GitlabScopeDialog({ onClose, onSelect, terminal }: { onClose: () => void; onSelect: (selection: GitlabSelection, publish: boolean) => void; terminal?: {enabled:boolean;execution_enabled:boolean} }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [catalog, setCatalog] = useState<AppCatalog | null>(null), [error, setError] = useState("");
   const [connection, setConnection] = useState(""), [project, setProject] = useState<Project | null>(null);
   const [ref, setRef] = useState("HEAD"), [directory, setDirectory] = useState(""), [paths, setPaths] = useState<string[]>([]);
   const [mode,setMode]=useState<"files"|"workspace"|"execute">("files");
+  const [publish, setPublish] = useState(false);
   useEffect(() => {
     const element = dialog.current!; element.showModal();
     const abort = new AbortController();
@@ -23,11 +24,13 @@ export function GitlabScopeDialog({ onClose, onSelect, terminal }: { onClose: ()
     return () => { abort.abort(); element.close(); };
   }, []);
   const connections = catalog?.apps[0]?.connections.filter((item) => item.status === "connected") ?? [];
+  const selectedConnection = connections.find(item => item.id === connection);
+  const canPublish = mode === "execute" && !!project && !!selectedConnection?.can_publish;
   return <dialog className="cw-dialog cw-gitlab-dialog" ref={dialog} aria-labelledby="gitlab-scope-title" onCancel={(e) => { e.preventDefault(); onClose(); }}>
-    <header className="cw-dialog-header"><div><span className="cw-overline">앱 · 읽기 전용</span><h2 id="gitlab-scope-title">GitLab에서 가져오기</h2></div>
+    <header className="cw-dialog-header"><h2 id="gitlab-scope-title">GitLab에서 가져오기</h2>
       <button type="button" className="cw-icon-button" aria-label="GitLab 선택 닫기" onClick={onClose}><Icon name="close" /></button></header>
     <p className="cw-dialog-description">파일을 직접 선택하거나, 프로젝트 작업공간에서 모델이 관련 코드를 탐색하도록 설정하세요. 조회한 코드는 현재 모델 서버로 전달됩니다.</p>
-    <label className="cw-scope-field">작업 방식<select value={mode} onChange={(e)=>setMode(e.target.value as typeof mode)}><option value="files">선택한 파일 조회</option>
+    <label className="cw-scope-field">작업 방식<select value={mode} onChange={(e)=>{setMode(e.target.value as typeof mode);setPublish(false);}}><option value="files">선택한 파일 조회</option>
       <option value="workspace" disabled={!terminal?.enabled}>프로젝트 자동 분석{!terminal?.enabled?" · 서버 설정 필요":""}</option>
       <option value="execute" disabled={!terminal?.enabled||!terminal.execution_enabled}>프로젝트 분석·실행{!terminal?.execution_enabled?" · 실행 서버 설정 필요":""}</option></select></label>
     {mode==="execute"&&<p className="cw-inline-error">선택한 프로젝트 작업공간에서 모델의 명령 실행과 파일 수정을 허용합니다. 변경 사항은 작업공간에 보관됩니다.</p>}
@@ -35,19 +38,26 @@ export function GitlabScopeDialog({ onClose, onSelect, terminal }: { onClose: ()
     {!catalog && !error && <p role="status">내 앱 연결을 불러오는 중…</p>}
     {catalog && !connections.length && <div className="cw-gitlab-empty"><p>먼저 내 GitLab 계정을 연결하세요.</p>
       <WorkspaceLink href="/user/settings/apps" onClick={onClose}>설정에서 GitLab 연결</WorkspaceLink></div>}
-    {!!connections.length && <><label className="cw-scope-field">계정<select value={connection} onChange={(e) => { setConnection(e.target.value); setProject(null); setPaths([]); setDirectory(""); }}>
+    {!!connections.length && <><label className="cw-scope-field">계정<select value={connection} onChange={(e) => { setConnection(e.target.value); setProject(null); setPaths([]); setDirectory(""); setPublish(false); }}>
       {connections.map((item) => <option key={item.id} value={item.id}>@{item.username} · {catalog?.apps[0].providers.find((p) => p.id === item.provider_id)?.name ?? item.provider_id}</option>)}</select></label>
       {!project ? <ProjectPicker key={connection} connection={connection} onSelect={(item) => { setProject(item); setRef(item.default_branch || "HEAD"); setPaths([]); setDirectory(""); }} />
-        : <><div className="cw-scope-project"><strong>{project.name}</strong><button type="button" className="cw-text-button" onClick={() => { setProject(null); setPaths([]); }}>프로젝트 변경</button></div>
-          <BranchPicker key={`${connection}/${project.id}`} connection={connection} project={project.id} value={ref} onChange={(value) => { setRef(value); setPaths([]); setDirectory(""); }} />
+        : <><div className="cw-scope-project"><strong>{project.name}</strong><button type="button" className="cw-text-button" onClick={() => { setProject(null); setPaths([]); setPublish(false); }}>프로젝트 변경</button></div>
+          <BranchPicker key={`${connection}/${project.id}`} connection={connection} project={project.id} value={ref} onChange={(value) => { setRef(value); setPaths([]); setDirectory(""); setPublish(false); }} />
           <div className="cw-scope-directory"><button type="button" className="cw-text-button" disabled={!directory} onClick={() => setDirectory(directory.split("/").slice(0, -1).join("/"))}>↑ 상위</button><span>{directory || "/"}</span></div>
           {mode==="files"&&<FilePicker key={`${connection}/${project.id}/${ref}/${directory}`} connection={connection} project={project.id} branch={ref} path={directory} paths={paths}
             onDirectory={setDirectory} onToggle={(path) => setPaths((old) => old.includes(path) ? old.filter((p) => p !== path) : old.length < 5 ? [...old, path] : old)} />}
           {!!paths.length && <ul className="cw-selected-files" aria-label="선택한 파일">{paths.map((path) => <li key={path}><span>{path}</span>
             <button type="button" className="cw-icon-button" aria-label={`${path} 선택 해제`} onClick={() => setPaths((old) => old.filter((p) => p !== path))}><Icon name="close" size={13} /></button></li>)}</ul>}
         </>}
+      {canPublish && <label className="cw-knowledge-app">
+        <input type="checkbox" checked={publish} onChange={event => setPublish(event.target.checked)} />
+        <span>이번 요청의 GitLab MR 생성 허용<small>변경사항을 새 브랜치에 커밋하고 선택한 브랜치로 MR을 엽니다.</small></span>
+      </label>}
+      {mode === "execute" && !selectedConnection?.can_publish && catalog?.apps[0]?.providers.some(
+        provider => provider.id === selectedConnection?.provider_id && provider.publish_enabled) &&
+        <WorkspaceLink href="/user/settings/apps" onClick={onClose}>설정에서 MR 작성 권한 연결</WorkspaceLink>}
       <footer className="cw-dialog-footer"><span>{mode==="files"?`${paths.length}/5개 파일`:mode==="execute"?"분석·실행 허용":"프로젝트 자동 탐색"}</span><button type="button" className="cw-primary-button" disabled={!project || mode==="files"&&!paths.length} onClick={() => {
-        if (project) onSelect({ app: "gitlab", connection_id: connection, project_id: project.id, ref, paths:mode==="files"?paths:[],...(mode==="files"?{}:{mode}) });
+        if (project) onSelect({ app: "gitlab", connection_id: connection, project_id: project.id, ref, paths:mode==="files"?paths:[],...(mode==="files"?{}:{mode}) }, canPublish && publish);
       }}>이 질문에 추가</button></footer></>}
   </dialog>;
 }

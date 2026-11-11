@@ -14,7 +14,7 @@ class GitlabError(Exception):
         self.status = status
 
 
-async def request(instance, method, path, *, token=None, params=None, form=None, raw=False, limit=2*1024*1024):
+async def request(instance, method, path, *, token=None, params=None, form=None, payload=None, raw=False, limit=2*1024*1024):
     settings = get_settings()
     headers = {'Accept': 'application/json', 'User-Agent': 'LLM-GitLab/1'}
     if token:
@@ -23,7 +23,7 @@ async def request(instance, method, path, *, token=None, params=None, form=None,
         verify = ssl.create_default_context(cafile=settings.gitlab_ca_bundle or None)
         async with asyncio.timeout(settings.gitlab_timeout_seconds), httpx.AsyncClient(
                 timeout=settings.gitlab_timeout_seconds, verify=verify, follow_redirects=False, trust_env=False) as client:
-            async with client.stream(method, instance.base_url + path, headers=headers, params=params, data=form) as response:
+            async with client.stream(method, instance.base_url + path, headers=headers, params=params, data=form, json=payload) as response:
                 if response.status_code >= 300:
                     messages = {401:'GitLab 인증이 만료되었습니다. 다시 연결해 주세요.',
                                 403:'이 GitLab 자료에 접근할 권한이 없습니다.',

@@ -27,9 +27,10 @@ def family(db, session_id):
 
 
 def public(row, provider=None):
-    changed = provider is None or provider.fingerprint() != row.provider_fingerprint
+    changed = provider is None or provider.granted_scopes(row.provider_fingerprint) is None
     return {'id':row.id, 'app':'gitlab', 'provider_id':row.provider_id, 'username':row.username,
-            'display_name':row.display_name, 'status':'needs_reconnect' if changed else row.status}
+            'display_name':row.display_name, 'status':'needs_reconnect' if changed else row.status,
+            'can_publish': bool(provider and row.status == 'connected' and provider.can_publish(row.provider_fingerprint))}
 
 
 def catalog(db, user_id):
@@ -49,10 +50,13 @@ def catalog(db, user_id):
                     'providers':available,'connections':[public(row,by_id.get(row.provider_id)) for row in rows]}]}
 
 
-def authorize(db, context, provider_id, browser, chat_id, popup):
+def authorize(db, context, provider_id, browser, chat_id, popup, *, publish=False):
     if not browser or not 32 <= len(browser) <= 200:
         raise HTTPException(400,'OAuth 브라우저 확인 정보가 없습니다.')
     provider = config.instance(provider_id)
+    if publish and not provider.allow_publish:
+        raise HTTPException(403, '이 GitLab 서버는 MR 생성을 허용하지 않습니다.')
+    scopes = config.PUBLISH_SCOPES if publish else config.SCOPES
     provider.secret()
     config.vault()
     now = int(time.time())
@@ -67,27 +71,27 @@ def authorize(db, context, provider_id, browser, chat_id, popup):
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
     db.add(OAuthAttempt(state_hash=config.digest(state),user_id=context.user.id,
         session_id=family(db,context.payload['sid']),auth_version=context.user.auth_version,
-        provider_id=provider.id,provider_fingerprint=provider.fingerprint(), browser_hash=config.digest(browser),
+        provider_id=provider.id,provider_fingerprint=provider.fingerprint(scopes), browser_hash=config.digest(browser),
         verifier_cipher=config.seal(verifier),expires_at=now+600,chat_id=chat_id,popup=popup))
     db.commit()
     query = urlencode({'client_id':provider.client_id,'redirect_uri':config.callback_uri(),
-        'response_type':'code','scope':config.SCOPES,'state':state,'code_challenge':challenge,'code_challenge_method':'S256'})
+        'response_type':'code','scope':scopes,'state':state,'code_challenge':challenge,'code_challenge_method':'S256'})
     return {'authorize_url':provider.base_url+'/oauth/authorize?'+query,'cookie_key':config.digest(state)[:16]}
 
 
-def token_values(value):
+def token_values(value, expected_scopes=config.SCOPES):
     try:
         access, refresh = value['access_token'], value['refresh_token']
         ttl = int(value['expires_in'])
         scopes = set(value['scope'].split())
         if (not isinstance(access,str) or not 1<=len(access)<=16000 or not isinstance(refresh,str)
                 or not 1<=len(refresh)<=16000 or not 30<=ttl<=86400*30
-                or not set(config.SCOPES.split()).issubset(scopes) or scopes - set(config.SCOPES.split())
+                or scopes != set(expected_scopes.split())
                 or value.get('token_type','').lower() != 'bearer'):
             raise ValueError()
         return access,refresh,int(time.time())+ttl
     except (ValueError,TypeError,KeyError,AttributeError):
-        raise transport.GitlabError('GitLab OAuth 응답의 만료 시간과 읽기 권한을 확인해 주세요.') from None
+        raise transport.GitlabError('GitLab OAuth 응답의 만료 시간과 승인된 권한을 확인해 주세요.') from None
 
 
 def live_family(db, attempt):
@@ -124,7 +128,8 @@ async def complete(bind, user_id, auth_version, session_id, state, code, denial,
             raise HTTPException(400,'이미 처리된 GitLab 인증 요청입니다.')
         db.commit()
         provider = config.instance(attempt.provider_id)
-        if provider.fingerprint()!=attempt.provider_fingerprint:
+        scopes = provider.granted_scopes(attempt.provider_fingerprint)
+        if scopes is None or scopes == config.PUBLISH_SCOPES and not provider.allow_publish:
             raise HTTPException(409,'인증 중 GitLab 서버 설정이 변경되었습니다. 다시 연결해 주세요.')
         if denial:
             raise HTTPException(400,'GitLab 연결을 승인하지 않았습니다. 필요할 때 다시 연결하세요.')
@@ -132,7 +137,7 @@ async def complete(bind, user_id, auth_version, session_id, state, code, denial,
     value = await transport.request(provider,'POST','/oauth/token',form={'grant_type':'authorization_code',
         'client_id':provider.client_id,'client_secret':provider.secret(),'code':code,
         'redirect_uri':config.callback_uri(),'code_verifier':verifier},limit=65536)
-    access,refresh,expires = token_values(value)
+    access,refresh,expires = token_values(value, scopes)
     try:
         profile = await transport.request(provider,'GET','/api/v4/user',token=access,limit=65536)
         external_id, username = str(profile['id']), profile['username']
@@ -149,7 +154,7 @@ async def complete(bind, user_id, auth_version, session_id, state, code, denial,
             else:
                 row.generation += 1
                 row.version += 1
-            row.provider_fingerprint = provider.fingerprint()
+            row.provider_fingerprint = attempt.provider_fingerprint
             row.external_id,row.username,row.display_name = external_id,username,name
             row.access_cipher,row.refresh_cipher = config.seal(access),config.seal(refresh)
             row.expires_at,row.status,row.refresh_until = expires,'connected',0
@@ -178,14 +183,24 @@ def owned(db, user_id, connection_id):
     return row
 
 
-async def credentials(bind, user_id, connection_id, *, force_version=None):
+def require_publish(account, provider):
+    if not provider.allow_publish:
+        raise HTTPException(403, '운영자가 이 GitLab 서버의 MR 생성을 허용해야 합니다.')
+    if account.status != 'connected' or not provider.can_publish(account.provider_fingerprint):
+        raise HTTPException(403, '계정 설정에서 이 GitLab 서버의 MR 작성 권한을 연결하세요.')
+
+
+async def credentials(bind, user_id, connection_id, *, force_version=None, publish=False):
     until = time.monotonic()+12
     while True:
         with Session(bind,expire_on_commit=False) as db:
             row = owned(db,user_id,connection_id)
             provider = config.instance(row.provider_id)
-            if row.status!='connected' or row.provider_fingerprint!=provider.fingerprint():
+            scopes = provider.granted_scopes(row.provider_fingerprint)
+            if row.status!='connected' or scopes is None:
                 raise HTTPException(409,'GitLab 계정을 다시 연결해 주세요.')
+            if publish:
+                require_publish(row, provider)
             now = int(time.time())
             if row.refresh_until<=now and row.expires_at>now+30 and (force_version is None or row.version!=force_version):
                 return Credentials(provider,config.unseal(row.access_cipher),row.version,row.generation)
@@ -204,7 +219,7 @@ async def credentials(bind, user_id, connection_id, *, force_version=None):
     try:
         value = await transport.request(provider,'POST','/oauth/token',form={'grant_type':'refresh_token',
             'client_id':provider.client_id,'client_secret':provider.secret(),'refresh_token':refresh},limit=65536)
-        access,new_refresh,expires = token_values(value)
+        access,new_refresh,expires = token_values(value, scopes)
         with Session(bind) as db:
             saved = db.execute(update(AppConnection).where(AppConnection.id==str(connection_id),
                 AppConnection.version==version+1,AppConnection.generation==generation,AppConnection.status=='connected').values(
@@ -235,7 +250,7 @@ class GitlabClient:
     def ensure_current(self):
         with Session(self.bind) as db:
             row = owned(db,self.user_id,self.id)
-            if row.status!='connected' or row.generation!=self.generation or row.provider_fingerprint!=self.provider.fingerprint():
+            if row.status!='connected' or row.generation!=self.generation or self.provider.granted_scopes(row.provider_fingerprint) is None:
                 raise HTTPException(409,'조회 중 GitLab 연결이 해제·변경되었습니다. 다시 선택해 주세요.')
 
     async def get(self, path, *, params=None, raw=False, limit=2*1024*1024):
@@ -255,6 +270,16 @@ class GitlabClient:
         self.ensure_current()
         return result
 
+    async def post(self, path, payload, *, before_write):
+        auth = await credentials(self.bind, self.user_id, self.id, publish=True)
+        if self.generation != auth.generation:
+            raise HTTPException(409, 'GitLab 계정 연결이 변경되었습니다. 다시 선택해 주세요.')
+        before_write()
+        result = await transport.request(auth.provider, 'POST', '/api/v4' + path, token=auth.token,
+            payload=payload, limit=128 * 1024)
+        self.ensure_current()
+        return result
+
 
 async def disconnect(bind,user_id,connection_id):
     from app.modules.workspaces.service import close_copies
@@ -263,7 +288,7 @@ async def disconnect(bind,user_id,connection_id):
         row = owned(db,user_id,connection_id)
         try:
             provider = config.instance(row.provider_id)
-            token = config.unseal(row.access_cipher) if provider.fingerprint()==row.provider_fingerprint else None
+            token = config.unseal(row.access_cipher) if provider.granted_scopes(row.provider_fingerprint) is not None else None
         except HTTPException:
             provider,token = None,None
         db.execute(delete(AppConnection).where(AppConnection.id==row.id,AppConnection.user_id==user_id))

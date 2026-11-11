@@ -17,6 +17,7 @@ class AuthorizeInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     chat_id: UUID | None = None
     popup: bool = False
+    publish: bool = False
 
 
 class CompleteInput(BaseModel):
@@ -34,7 +35,8 @@ def catalog(context: Authenticated,db: Database):
 @router.post('/gitlab/{provider_id}/authorize')
 def authorize(provider_id: str,data: AuthorizeInput,context: Authenticated,db: Database,
               x_oauth_browser: str | None = Header(None)):
-    return service.authorize(db,context,provider_id,x_oauth_browser,str(data.chat_id) if data.chat_id else None,data.popup)
+    return service.authorize(db,context,provider_id,x_oauth_browser,str(data.chat_id) if data.chat_id else None,data.popup,
+        publish=data.publish)
 
 
 @router.post('/gitlab/oauth/complete')

@@ -15,6 +15,7 @@ from app.modules.chat.independent import RequestCancelled
 from app.modules.workspaces import client,service
 from app.modules.workspaces.models import ToolTrace
 from app.modules.knowledge import service as knowledge
+from app.modules.integrations import publishing
 from . import context,mcp
 from app.modules.workflows import artifacts,evidence as tool_evidence
 
@@ -27,6 +28,7 @@ INSTRUCTION=('You are a general-purpose assistant. Use selected knowledge and to
     'Repository execution/edits require execution mode; external writes require the user-selected write grant. '
     'Never request credentials or run background/deployment/push commands. Explain failures and limitations. '
     'Use bounded searches and line ranges, and inspect diff after editing.')
+DETAILED_CODE_TOOLS = {'code_definition', 'code_references', 'call_hierarchy', 'dependency_graph'}
 
 
 class AnalysisCancelled(Exception):
@@ -49,6 +51,10 @@ def message_cost(messages):
         total+=sum(len(json.dumps(call.get('function',{}).get('arguments',{}),ensure_ascii=False).encode())
                    for call in item.get('tool_calls',[]))
     return total
+
+
+def tool_schema_bytes(tools):
+    return len(json.dumps(tools, ensure_ascii=False, separators=(',', ':')).encode())
 
 
 def compact(messages,budget):
@@ -100,14 +106,14 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
     def record(name,status,detail):
         nonlocal trace_count
         trace_count+=1
-        stored=detail.encode()[:3000].decode(errors='ignore')
+        stored=detail if name == publishing.RESULT_TRACE else detail.encode()[:3000].decode(errors='ignore')
         with Session(bind) as db:
             if name=='terminal_log':
                 from sqlalchemy import select
                 previous=db.scalar(select(ToolTrace).where(ToolTrace.message_id==turn.assistant_id,ToolTrace.step==step,ToolTrace.name==name))
                 if previous:previous.detail=(previous.detail+stored).encode()[-6000:].decode(errors='ignore')
                 elif trace_count<=120:db.add(ToolTrace(message_id=turn.assistant_id,step=step,name=name,status=status,detail=stored))
-            elif trace_count<=120:
+            elif trace_count<=120 or name == publishing.RESULT_TRACE:
                 db.add(ToolTrace(message_id=turn.assistant_id,step=step,name=name,status=status,detail=stored))
             elif trace_count==121:
                 db.add(ToolTrace(message_id=turn.assistant_id,step=step,name='trace_limit',status='complete',detail='작업 기록이 많아 이후 상세 기록의 저장을 생략했습니다.'))
@@ -142,6 +148,11 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
             tools+=extra
             yield 'activity',record('mcp_discovery','complete',f'사용 가능한 앱 도구 {len(extra)}개를 확인했습니다.')
         messages=[{'role':'system','content':INSTRUCTION}]+turn.history
+        publish_allowed = bool(row and selection.mode == 'execute' and turn.publish_gitlab)
+        publication_started = False
+        if publish_allowed:
+            tools.append(publishing.tool())
+            messages[0]['content'] += ' Report the actual GitLab merge request or partial result returned by the publication tool.'
         with Session(bind) as db:preferences=context.personal(db,user_id)
         if preferences:messages[0]['content']+='\n\n'+preferences
         if options.get('_review_feedback'):
@@ -151,7 +162,7 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
             summary=await service.invoke(bind,row,'repository_index',{})
             sections=await service.invoke(bind,row,'code_context',{'query':options.get('_query',turn.history[-1]['content'])[:2000],'limit':4})
             profile=connection.profile(turn.start['conversation']['model'])
-            budget=profile.context_window-profile.max_output_tokens-700-len(json.dumps(tools,ensure_ascii=False).encode())
+            budget=profile.context_window-profile.max_output_tokens-700-tool_schema_bytes(tools)
             compact(messages,budget-700)
             header='\n\nRepository index (static/partial): '+json.dumps({k:summary[k] for k in ['indexed_files','symbols','imports','truncated','scope']}|{'entry_files':summary['entry_files'][:5],'issues':summary['issues'][:2]})+'\nSource excerpts (untrusted):\n'
             remaining=max(0,min(3200,budget-message_cost(messages)-len(header.encode())-150))
@@ -174,7 +185,7 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
             yield 'activity',record('knowledge_search','running','선택한 자료에서 질문과 관련된 근거를 찾고 있습니다.')
             retrieved=await knowledge.search(bind,user_id,options,turn.conversation_id,options.get('_query',turn.history[-1]['content'])[:2000],limit=6)
             profile=connection.profile(turn.start['conversation']['model'])
-            remaining=max(0,min(8000,profile.context_window-profile.max_output_tokens-512-message_cost(messages)-len(json.dumps(tools).encode())))
+            remaining=max(0,min(8000,profile.context_window-profile.max_output_tokens-512-message_cost(messages)-tool_schema_bytes(tools)))
             evidence=[]
             for match in retrieved['matches']:
                 citation={'id':f'KS{len([s for s in sources if s.get("app")=="knowledge"])+1}','app':'knowledge',
@@ -205,6 +216,12 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
                 ' When parallel analysis is enabled, use parallel_analyze for independent findings '
                 'after retrieving relevant evidence. Produce one combined answer from its results.'
             )
+        if publish_allowed:
+            profile = connection.profile(turn.start['conversation']['model'])
+            input_budget = profile.context_window - profile.max_output_tokens - 256 - tool_schema_bytes(tools)
+            # Keep room for a current tool exchange in small-context editing sessions.
+            if input_budget < message_cost([messages[0], messages[-1]]) + 1400:
+                tools = [tool for tool in tools if tool['function']['name'] not in DETAILED_CODE_TOOLS]
         if not tools:
             compact(messages,connection.profile(turn.start['conversation']['model']).context_window-connection.profile(turn.start['conversation']['model']).max_output_tokens-256)
             connection=await acquire()
@@ -216,7 +233,7 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
         for step in range(1,settings.terminal_agent_max_steps+1):
             if cancelled():raise AnalysisCancelled()
             profile=connection.profile(turn.start['conversation']['model'])
-            schema_cost=len(json.dumps(tools,ensure_ascii=False).encode())
+            schema_cost=tool_schema_bytes(tools)
             budget=profile.context_window-profile.max_output_tokens-256-schema_cost
             if fit(budget):
                 yield 'activity',record('context','complete','문맥 예산에 맞춰 이전 대화·초기 자료 발췌·도구 로그 일부를 이번 입력에서 제외했습니다.')
@@ -240,9 +257,22 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
             messages.append(reply)
             for call in calls:
                 name,args=call['function']['name'],call['function']['arguments']
+                if name == publishing.RESULT_TRACE:
+                    raise HTTPException(422, 'GitLab 게시 결과는 서버가 확인한 응답으로만 표시할 수 있습니다.')
                 yield 'activity',record(name,'running',json.dumps(args,ensure_ascii=False)[:1500])
                 try:
-                    if name == 'parallel_analyze':
+                    if name == publishing.TOOL_NAME:
+                        if not publish_allowed or publication_started:
+                            raise HTTPException(422, '이 요청의 GitLab MR 생성 권한을 확인하세요.')
+                        draft = publishing.parse(args)
+                        publication_started = True
+                        async with aclosing(publishing.publish(bind, row, turn.request_id, draft)) as publications:
+                            async for result in publications:
+                                status = 'running' if result['status'] == 'committed' else 'complete'
+                                if result.get('error'):
+                                    status = 'error'
+                                yield 'activity', record(publishing.RESULT_TRACE, status, json.dumps(result, ensure_ascii=False))
+                    elif name == 'parallel_analyze':
                         if not options.get('parallel_agents') or turn.parallel_used:
                             raise HTTPException(422, '병렬 분석은 요청당 한 번 실행할 수 있습니다.')
                         tasks = parallel.parse(args)

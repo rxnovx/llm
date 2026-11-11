@@ -11,7 +11,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from .analysis import safe_path,secure_fd,read_text
+from .analysis import PUBLISH_MAX_BYTES, PUBLISH_MAX_FILES, safe_path,secure_fd,read_text
 from .auth import current,principal,verify
 from .service import TerminalService
 from .codeintel import CodeIndex
@@ -170,6 +170,31 @@ def build_server(settings):
         async def run():
             checked(workspace_id,stable=True)
             return await service.diff(current(),workspace_id)
+        return await guard(run)
+
+    @mcp.tool()
+    async def workspace_export_files(workspace_id: str, paths: list[str]) -> dict[str, object]:
+        """Read exact file contents for the host's approved GitLab publication."""
+        def run():
+            ctx = checked(workspace_id, stable=True)
+            if not ctx.get('provision') or not ctx.get('execute') or settings.terminal_execution_mode == 'disabled':
+                raise PermissionError('이 작업공간의 게시용 파일은 호스트에서만 조회할 수 있습니다.')
+            if not 1 <= len(paths) <= PUBLISH_MAX_FILES or len(paths) != len(set(paths)):
+                raise ValueError('서로 다른 게시 파일을 1~20개 지정하세요.')
+            root = service.store.repo(workspace_id)
+            if not (root / '.git').is_dir() or (root / '.git').is_symlink():
+                raise ValueError('게시할 저장소 사본을 찾을 수 없습니다.')
+            files, size = [], 0
+            for path in paths:
+                try:
+                    content = read_text(root, path, settings, allow_missing=True)
+                    size += len(content.encode())
+                except FileNotFoundError:
+                    content = None
+                if size > PUBLISH_MAX_BYTES:
+                    raise ValueError('게시 파일의 전체 크기가 1MiB를 초과합니다.')
+                files.append({'path': path, 'content': content})
+            return {'files': files}
         return await guard(run)
 
     @mcp.tool()

@@ -59,7 +59,7 @@ def connection_catalog(db,user_id):
     for row in db.scalars(select(AppConnection).where(AppConnection.user_id==user_id,AppConnection.status=='connected').order_by(AppConnection.id)):
         try:
             provider=config.instance(row.provider_id)
-            if row.provider_fingerprint!=provider.fingerprint():continue
+            if provider.granted_scopes(row.provider_fingerprint) is None:continue
         except HTTPException:continue
         values.append({'connection_id':row.id,'provider_id':provider.id,'server':provider.name})
     return values

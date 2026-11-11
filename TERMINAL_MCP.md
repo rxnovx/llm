@@ -20,7 +20,7 @@ API는 사용자·대화·작업공간·실행 허용 여부를 서명한 MCP �
 
 ## GitLab 권한과 다운로드
 
-GitLab OAuth 앱의 scope에 **`read_user read_api read_repository`**를 등록하세요. 기존 PR의 `read_user read_api` 연결은 scope/fingerprint가 달라지므로 다시 연결해야 합니다. `api` 또는 쓰기 scope는 요청하지 않습니다.
+기본 GitLab 연결은 OAuth 앱의 **`read_user read_api read_repository`** 권한을 사용합니다. MR 작성은 서버에서 기능을 활성화하고 사용자 계정에 `api` 권한을 추가로 연결합니다. [MR 생성 설정](GITLAB_APPS.md#코드-수정-후-mr-생성)
 
 앱이 현재 사용자의 프로젝트 접근과 커밋을 확인한 뒤 일회용·3분 만료 ticket을 생성합니다. MCP의 가져오기 기능은 고정된 내부 broker 주소에서 그 ticket을 사용해 해당 저장소의 인증을 받습니다. Git은 URL에 토큰을 넣지 않고 임시 askpass를 사용해 고정 커밋을 shallow fetch합니다. 인증 임시 파일은 가져오기가 끝나면 제거하며 실행 컨테이너에 마운트하지 않습니다. 재귀 submodule과 Git LFS 파일 다운로드는 자동 수행하지 않습니다. 사설 CA는 API와 MCP 서비스에서 접근 가능한 동일 경로에 별도로 마운트하세요.
 
@@ -136,6 +136,7 @@ MCP는 연결·도구 호출 규격이며, 아래 도구 이름과 권한 정책
 | `workspace_read_file` | 작업공간, 경로, 시작·끝 줄 | 최대 300줄·24KB, 현재 내용 해시·작업 사본 여부 |
 | `workspace_write_file` | 경로, 내용, `expected_hash` | 현재 해시가 일치할 때만 수정; 실행 허용 필요 |
 | `workspace_diff` | 작업공간 | 다운로드 당시 소스와 현재 사본의 차이, 최대 32KB |
+| `workspace_export_files` | 작업공간, 게시 파일 경로 | 백엔드가 승인한 MR 요청의 파일 원문과 삭제 여부 |
 | `terminal_exec` | `argv`, `cwd`, `timeout_seconds` | `job_id`; 명령 인자는 배열로 실행 |
 | `terminal_read` | 작업 ID, 로그 cursor, 최대 크기 | stdout/stderr, 다음 cursor, 종료 상태·코드·잘림 |
 | `terminal_jobs` | 작업공간 | 최근 10개 명령의 상태 |
@@ -144,6 +145,8 @@ MCP는 연결·도구 호출 규격이며, 아래 도구 이름과 권한 정책
 | `workspace_close` | 작업공간 | 작업 중지·소스/캐시/로그 정리 |
 
 앱은 모델에 provisioning 도구와 인증 정보를 노출하지 않고 작업공간 ID도 서버에서 주입합니다. 모델에는 탐색 도구와 실행 모드의 `workspace_write_file`, `terminal_exec`만 제공합니다. 호스트가 실행 완료까지 로그를 수집하고 취소를 처리하므로 polling·stdin 제어 도구는 모델 입력에서 제외합니다. 사용자는 작업공간 모달에서 명령 입력·조회·중지를 할 수 있으며 `terminal_input`은 실행 허용이 필요합니다. 브라우저에서는 `/api/workspaces` BFF를 경유하며 `internal/checkout`은 접근할 수 없습니다.
+
+MR 생성 허용을 선택한 요청에는 API 호스트가 `gitlab_open_merge_request`를 제공합니다. Terminal MCP는 지정된 파일을 읽고 GitLab API 호출은 백엔드가 수행합니다.
 
 ## 분석 범위와 수명
 
