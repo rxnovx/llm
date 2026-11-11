@@ -182,6 +182,7 @@ def test_failed_regeneration_restores_good_answer_sources_and_routing(client,acc
     assert events(response)[-1][0]=='error',response.text[-1500:]
     current=saved(client,headers,conversation)
     for key in ['content','sources','routing','assistant']:assert current[key]==previous[key]
+    assert current['recovery']['preserved_previous'] and current['recovery']['can_retry']
 
 
 def test_host_only_auto_scope_cannot_be_supplied_by_client(client,account):

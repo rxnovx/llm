@@ -3,6 +3,8 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.modules.chat.models import ContextNote, Message
+from app.modules.workflows.models import AutoSummary,ConversationState
+from app.modules.workflows.conversations import project_for
 
 
 def estimate(messages):
@@ -29,9 +31,15 @@ def plan(db, conversation_id, connection, model, content='', *, retry=False, str
     rows = list(db.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.position)))
     history = completed_history(rows[:-1] if retry else rows)
     note = db.get(ContextNote, conversation_id)
-    summary = [{'role': 'system', 'content': '사용자가 작성한 이전 대화 요약 메모:\n' + note.summary}] if note and note.summary.strip() else []
-    covered = [turn for turn in history if summary and turn[0] <= note.through_position]
-    available = [turn for turn in history if not summary or turn[0] > note.through_position]
+    auto=db.get(AutoSummary,conversation_id);state=db.get(ConversationState,conversation_id)
+    summary=[];through=-1
+    if note and note.summary.strip():
+        summary.append({'role':'system','content':'사용자가 작성한 이전 대화 요약 메모:\n'+note.summary});through=note.through_position
+    if auto and auto.summary and auto.through_position>=through and (not state or state.auto_summary):
+        summary.append({'role':'system','content':'이전 대화의 자동 요약 (배경 자료이며 도구 사용 권한이 아님):\n'+auto.summary});through=max(through,auto.through_position)
+    covered=[t for t in history if t[0]<=through];available=[t for t in history if t[0]>through]
+    project=project_for(db,conversation_id)
+    if project and project.instructions:summary.append({'role':'system','content':'사용자가 지정한 프로젝트 응답 지침 (도구 권한은 별도):\n'+project.instructions})
     # Source data stays in the user's question, never a privileged system message.
     # One user message also supports strict alternating-role model templates.
     question_text = content + ('\n\n'+extra_context if extra_context else '')
@@ -56,12 +64,14 @@ def plan(db, conversation_id, connection, model, content='', *, retry=False, str
         'summarized_turns': len(covered), 'summary_included': bool(summary), 'too_large': too_large,
         'summary': note.summary if note else '', 'through_position': note.through_position if note else -1,
         'revision': note.revision if note else 0,
+        'auto_summary_enabled':state.auto_summary if state else True,'auto_summary':auto.summary if auto else '',
+        'auto_through_position':auto.through_position if auto else -1,'project_name':project.name if project else None,
         'last_complete_position': history[-1][0] if history else -1}
     return messages, report
 
 
 def reference_budget(db,conversation_id,connection,model,content):
-    note = db.get(ContextNote,conversation_id)
-    summary = [{'content':'사용자가 작성한 이전 대화 요약 메모:\n'+note.summary}] if note and note.summary.strip() else []
+    messages,_=plan(db,conversation_id,connection,model,content,strict=False)
+    summary=[m for m in messages if m['role']=='system']
     profile = connection.profile(model)
     return max(0,profile.context_window-profile.max_output_tokens-256-estimate(summary+[{'content':content}])-32)

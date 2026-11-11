@@ -14,7 +14,7 @@ test('문서 첨부와 지식 선택이 질문 초안을 유지하고 답변에 
   await page.getByRole('button',{name:'파일·지식',exact:true}).click();
   const modal=page.getByRole('dialog',{name:'자료·앱·개인 설정'});
   await modal.locator('input[type=file]').setInputFiles({name:'manual.md',mimeType:'text/markdown',buffer:Buffer.from('연차 휴가 규정: 연간 15일을 사용할 수 있습니다.')});
-  await expect(modal.getByText(/검색 준비됨/)).toBeVisible({timeout:30000});
+  await expect(modal.locator('.cw-knowledge-documents').getByText(/검색 준비됨/)).toBeVisible({timeout:30000});
   await modal.getByRole('button',{name:'대화에 적용',exact:true}).click();
   await expect(page.getByLabel('메시지',{exact:true})).toHaveValue('연차 휴가 규정을 알려줘');
   await expect(page.locator('.cw-assistant-selection')).toContainText('첨부 1');

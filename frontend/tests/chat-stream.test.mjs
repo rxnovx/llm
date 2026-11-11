@@ -102,3 +102,12 @@ test('automatic workspace selection and final routing survive split SSE data',as
   assert.equal(received[0].data.automatic,true);
   assert.equal(received.at(-1).data.message.routing.automatic_project,true);
 });
+
+test('MCP evidence, actual artifact and coverage survive byte boundaries',async()=>{
+  const source={id:'MS1',app:'mcp',evidence_id:'evidence',server:'문서 검색',tool:'lookup',sha256:'hash'};
+  const file={id:'file',name:'결과.pdf',format:'pdf',size:1234};
+  const value=`event: sources\ndata: ${JSON.stringify({sources:[source]})}\n\nevent: artifact\ndata: ${JSON.stringify(file)}\n\nevent: coverage\ndata: {"excerpts":1,"app_results":1}\n\n`+events;
+  const received=[];await readChatStream(stream(encoder.encode(value),1),e=>received.push(e));
+  assert.deepEqual(received.slice(0,3).map(e=>e.event),['sources','artifact','coverage']);assert.equal(received[1].data.name,'결과.pdf');
+  await assert.rejects(()=>readChatStream(stream(encoder.encode('event: artifact\ndata: {"id":"fake","name":"bad","format":"pdf","size":-0.5}\n\n')),()=>{}),/파일/);
+});

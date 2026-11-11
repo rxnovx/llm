@@ -47,7 +47,10 @@ def active(db,user_id,selection,*,question='',conversation_id='',connection=None
     row=db.get(Preference,user_id)
     if selection.get('base_ids') or selection.get('document_ids') or selection.get('mcp_ids') or row and (row.instructions or row.memory_enabled):
         return True
+    from app.modules.workflows.artifacts import hint
+    if hint(question):return True
     if not get_settings().assistant_automatic_enabled or not selection.get('automatic',True):return False
+    if mcp.catalog(db,user_id):return True
     from .routing import connection_catalog,project_hint
     if project_hint(question) or selection.get('rag_mode')=='always':return True
     if selection.get('rag_mode','auto')!='off' and knowledge.automatic_available(db,user_id,conversation_id):return True

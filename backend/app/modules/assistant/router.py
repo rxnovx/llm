@@ -32,7 +32,7 @@ def catalog(context: Authenticated,db: Database):
     values=[]
     for server in mcp.servers(db):
         if not server.enabled or server.allowed_users and context.user.username not in server.allowed_users and not context.user.is_global_admin:continue
-        values.append({'id':server.id,'name':server.name,'read_tools':server.read_tools,'write_tools':server.write_tools})
+        values.append({'id':server.id,'name':server.name,'read_tools':server.read_tools,'write_tools':server.write_tools,'description':server.description,'auto_select':server.auto_select})
     return {'servers':values}
 
 @router.get('/preferences')

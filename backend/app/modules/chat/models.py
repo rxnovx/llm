@@ -8,6 +8,7 @@ from app.db.base import Base
 from app.modules.integrations.models import MessageContext
 from app.modules.workspaces.models import ToolTrace
 from app.modules.assistant.models import TurnContext,TurnDecision
+from app.modules.workflows.models import MessageVersion,MessageState,Artifact,ArtifactScope,Feedback
 
 
 class Conversation(Base):
@@ -47,6 +48,11 @@ class Message(Base):
     tool_traces = relationship(ToolTrace,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True,order_by=ToolTrace.created_at)
     assistant_context = relationship(TurnContext,uselist=False,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True)
     decision_record = relationship(TurnDecision,uselist=False,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True)
+    versions = relationship(MessageVersion,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True,order_by=MessageVersion.sequence)
+    workflow_state = relationship(MessageState,uselist=False,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True)
+    generated_files = relationship(Artifact,lazy='selectin',passive_deletes=True)
+    file_links = relationship(ArtifactScope,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True)
+    answer_feedback = relationship(Feedback,lazy='selectin',cascade='all, delete-orphan',passive_deletes=True)
 
 
 class GenerationRun(Base):

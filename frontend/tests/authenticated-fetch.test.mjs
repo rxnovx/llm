@@ -58,3 +58,27 @@ test("outages do not expire sessions and interrupted response bodies are never a
   await assert.rejects(() => response.text(), /stream broke/);
   assert.equal(stream.calls.length, 1);
 });
+
+function uploadEnvironment(statuses){
+  const exports={},calls=[];let refreshes=0;
+  class XHR{
+    upload={};headers={};status=0;responseText='';
+    open(method,url){this.method=method;this.url=url;}
+    setRequestHeader(k,v){this.headers[k]=v;}
+    send(body){calls.push(this);this.body=body;queueMicrotask(()=>{this.upload.onprogress?.({lengthComputable:true,loaded:50,total:100});this.status=statuses.shift();this.responseText=JSON.stringify(this.status===201?{id:'document'}:{detail:'실패'});this.onload();});}
+    abort(){this.onabort?.();}
+  }
+  vm.runInNewContext(code,{exports,Headers,FormData,DOMException,XMLHttpRequest:XHR,require:()=>({getAccessToken:()=> 'before',refreshAccessToken:async()=>{refreshes++;return 'after';},notifyAuthExpired:()=>{}})});
+  return {...exports,calls,refreshes:()=>refreshes};
+}
+test('XHR upload reports real progress and retries only an unauthenticated attempt',async()=>{
+  const env=uploadEnvironment([401,201]),progress=[],body=new FormData();body.set('file',new Blob(['hello']),'a.txt');
+  const result=await env.authenticatedUpload('/api/knowledge/documents',body,new AbortController().signal,(...v)=>progress.push(v));
+  assert.equal(result.id,'document');assert.equal(env.refreshes(),1);assert.equal(env.calls.length,2);assert.equal(env.calls[1].headers.authorization,'Bearer after');
+  assert.equal(env.calls[0].headers['x-llm-account'],'1');assert.equal(env.calls[0].headers['Content-Type'],undefined);assert.deepEqual(progress,[[50,100],[50,100]]);
+});
+test('aborted XHR never uploads or refreshes and server errors are not replayed',async()=>{
+  const env=uploadEnvironment([503]),abort=new AbortController();abort.abort();
+  await assert.rejects(()=>env.authenticatedUpload('/upload',new FormData(),abort.signal,()=>{}),e=>e.name==='AbortError');assert.equal(env.calls.length,0);
+  await assert.rejects(()=>env.authenticatedUpload('/upload',new FormData(),new AbortController().signal,()=>{}),e=>e.status===503);assert.equal(env.calls.length,1);assert.equal(env.refreshes(),0);
+});

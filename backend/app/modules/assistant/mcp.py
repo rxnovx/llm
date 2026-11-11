@@ -17,6 +17,9 @@ class ServerInput(BaseModel):
     id: str=Field(pattern=r'^[a-zA-Z0-9_-]{1,40}$')
     name: str=Field(min_length=1,max_length=80)
     url: str=Field(max_length=500)
+    description: str=Field('',max_length=400)
+    keywords: list[str]=Field(default_factory=list,max_length=8)
+    auto_select: bool=True
     secret_ref: str=Field('',max_length=80,pattern=r'^[a-zA-Z0-9_-]*$')
     enabled: bool=True
     read_tools: list[str]=Field(default_factory=list,max_length=20)
@@ -33,6 +36,7 @@ class ServerInput(BaseModel):
         if set(self.read_tools)&set(self.write_tools):raise ValueError('읽기·쓰기 도구 이름이 겹칩니다.')
         if any(not re.fullmatch(r'[A-Za-z0-9_.:-]{1,100}',t) for t in self.read_tools+self.write_tools):raise ValueError('도구 이름 형식을 확인하세요.')
         if len(set(self.read_tools+self.write_tools))!=len(self.read_tools+self.write_tools):raise ValueError('중복된 도구 이름입니다.')
+        if any(not k or len(k)>80 for k in self.keywords):raise ValueError('자동 선택 키워드는 1~80자입니다.')
         self.allowed_users=sorted(set(u.strip().lower() for u in self.allowed_users))
         return self
 
@@ -123,3 +127,13 @@ async def call(bind,user_id,mapping,name,args,allow_writes=False):
     value=result.structured_content
     if value is None:value={'text':'\n'.join(getattr(part,'text','') for part in result.content)}
     return {'server':server.name,'tool':tool,'result':value}
+
+
+def catalog(db,user_id):
+    result=[]
+    for candidate in servers(db):
+        if not candidate.auto_select or not candidate.read_tools:continue
+        try:server=allowed(db,user_id,candidate.id)
+        except HTTPException:continue
+        result.append({'id':server.id,'name':server.name,'description':server.description,'keywords':server.keywords,'read_tools':server.read_tools[:8]})
+    return result[:20]

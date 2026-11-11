@@ -183,6 +183,44 @@ def model_controls_smoke(client, access):
         assert stats['generating']==0 and stats['queued']==0
     finally:
         release.set(); server.shutdown(); server.server_close(); thread.join(timeout=2)
+def workflows_smoke(client,access):
+    """Real BFF, upload session, branch, version, output bytes and feedback routes."""
+    project=client.post('/api/workflows/projects',headers=access,json={'name':'HTTP 프로젝트','instructions':'한국어로 설명'});assert project.status_code==201,project.text
+    p=project.json();conversation=client.post('/api/chat/conversations',headers=access,json={'project_id':p['id']}).json()['id']
+    path='/api/chat/conversations/'+conversation
+    blocked=client.post('/api/workflows/projects',headers=access|{'origin':'https://untrusted.invalid'},json={'name':'차단 확인'})
+    assert blocked.status_code==403
+    def run(text,retry=False):
+        r=client.post(path+'/messages',headers=access,json={'content':text,'request_id':str(uuid.uuid4()),'retry':retry});assert 'event: done' in r.text,r.text[-2000:]
+        return client.get(path,headers=access).json()['messages'][-1]
+    answer=run('http 본문 고유 검색');run('http 본문 고유 검색',True)
+    versions=client.get('/api/workflows/messages/'+answer['id']+'/versions',headers=access).json()['items'];assert len(versions)==2
+    selected=client.post('/api/workflows/messages/'+answer['id']+'/versions/'+versions[0]['id']+'/select',headers=access)
+    assert selected.status_code==200,selected.text
+    matches=client.get('/api/chat/conversations',headers=access,params={'q':'고유 검색','project_id':p['id']}).json()['items'];assert matches[0]['match']['message_id']
+    attempt=client.post('/api/workflows/uploads',headers=access,json={'filename':'첨부.md','conversation_id':conversation}).json()['id']
+    doc=client.post('/api/knowledge/documents',headers=access,data={'conversation_id':conversation,'upload_id':attempt},files={'file':('첨부.md','한글 검증 자료'.encode())});assert doc.status_code==201,doc.text
+    assert client.post('/api/workflows/uploads/'+attempt+'/cancel',headers=access).status_code==200
+    assert client.get('/api/knowledge/documents',headers=access,params={'conversation_id':conversation}).json()['items']==[]
+    for format in ['md','txt','csv','xlsx','pdf']:
+        r=client.post('/api/workflows/messages/'+answer['id']+'/export',headers=access,json={'format':format,'name':'한글 결과'});assert r.status_code==201,r.text
+        file=r.json();assert client.get('/api/workflows/artifacts/'+file['id'],headers=access).status_code==200
+        downloaded=client.get('/api/workflows/artifacts/'+file['id']+'/download',headers=access);assert downloaded.status_code==200 and 'filename*=' in downloaded.headers['content-disposition']
+        if format=='pdf':assert downloaded.content.startswith(b'%PDF-')
+        if format=='xlsx':assert downloaded.content.startswith(b'PK')
+        assert client.delete('/api/workflows/artifacts/'+file['id'],headers=access).status_code==200
+    result=client.post('/api/workflows/conversations/'+conversation+'/fork',headers=access,json={'message_id':answer['id']});assert result.status_code==201,result.text
+    assert result.json()['conversation']['parent_id']==conversation
+    report=client.post('/api/workflows/messages/'+answer['id']+'/feedback',headers=access,json={'category':'source','detail':'HTTP 신고 흐름 검증'});assert report.status_code==201
+    assert client.get('/api/workflows/feedback',headers=access).json()['items'][0]['answer']
+    assert client.patch('/api/workflows/feedback/'+report.json()['id'],headers=access,json={'status':'resolved'}).status_code==200
+    artifact_answer=run('테스트 pdf 파일로 만들어줘');assert artifact_answer['artifacts']
+    assert client.post('/api/workflows/conversations/'+conversation+'/continue',headers=access).status_code==201
+    assert client.patch('/api/workflows/conversations/'+conversation+'/auto-summary',headers=access,json={'enabled':False}).status_code==200
+    assert client.delete('/api/workflows/projects/'+p['id'],headers=access).status_code==200
+    print('PASS: workflows BFF, project context/search, versions, branches, upload cancellation, five real export formats and operator feedback')
+
+
 if not (web / ".next/standalone/server.js").is_file():
     raise SystemExit("Install backend dev dependencies in the active venv and run frontend npm run build first.")
 
@@ -383,6 +421,7 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             assert client.get('/api/assistant/catalog',headers=access).status_code==200
             assert client.get('/api/assistant/operations',headers=access).json()['documents']['ready']==1
             assert client.delete('/api/knowledge/bases/'+knowledge_id,headers=access).status_code==200
+            workflows_smoke(client,access)
             assert client.get('/api/admin/overview').status_code == 401
             assert client.get('/admin').status_code == 200
             response = client.post("/api/auth/refresh")

@@ -31,8 +31,12 @@ def document_access(db,user_id,document_id,*,conversation_id=None,write=False):
     row=db.get(Document,str(document_id))
     if not row:raise HTTPException(404,'문서를 찾을 수 없습니다.')
     if row.base_id:base_access(db,user_id,row.base_id,write=write)
-    elif row.owner_id!=user_id or conversation_id and row.conversation_id!=conversation_id or row.expires_at and row.expires_at<=time.time():
+    elif row.owner_id!=user_id or row.expires_at and row.expires_at<=time.time():
         raise HTTPException(404,'대화 첨부 문서를 찾을 수 없습니다.')
+    if not row.base_id and conversation_id and row.conversation_id!=conversation_id:
+        from app.modules.workflows.models import AttachmentScope
+        grant=db.get(AttachmentScope,(row.id,str(conversation_id)))
+        if not grant or grant.user_id!=user_id:raise HTTPException(404,'대화 첨부 문서를 찾을 수 없습니다.')
     return row
 
 def public(row):
@@ -196,9 +200,15 @@ def automatic_query(user_id,conversation_id):
     bases=select(KnowledgeBase.id).join(User,User.id==KnowledgeBase.owner_id).where(
         User.is_active.is_(True),User.registration_status=='approved',
         or_(KnowledgeBase.owner_id==user_id,KnowledgeBase.id.in_(shared)))
+    from app.modules.workflows.models import Project,ProjectConversation,AttachmentScope
+    project_base=select(Project.base_id).join(ProjectConversation,Project.id==ProjectConversation.project_id).where(ProjectConversation.conversation_id==conversation_id,Project.user_id==user_id)
+    project_exists=select(ProjectConversation.conversation_id).where(ProjectConversation.conversation_id==conversation_id).exists()
+    project_bases=select(Project.base_id).where(Project.user_id==user_id,Project.base_id.is_not(None))
+    bases=bases.where(or_((~project_exists)&(~KnowledgeBase.id.in_(project_bases)),KnowledgeBase.id.in_(project_base)))
+    grants=select(AttachmentScope.document_id).where(AttachmentScope.user_id==user_id,AttachmentScope.conversation_id==conversation_id)
     return select(Document).where(Document.status=='ready',Document.index_profile==providers.profile(),or_(
         Document.base_id.in_(bases),
-        (Document.base_id.is_(None))&(Document.owner_id==user_id)&(Document.conversation_id==conversation_id)&(Document.expires_at>int(time.time()))))
+        (Document.base_id.is_(None))&(Document.owner_id==user_id)&(or_(Document.conversation_id==conversation_id,Document.id.in_(grants)))&(Document.expires_at>int(time.time()))))
 
 def automatic_available(db,user_id,conversation_id):
     if not get_settings().knowledge_enabled:return False

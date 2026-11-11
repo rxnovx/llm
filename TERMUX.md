@@ -126,3 +126,7 @@ PSYCOPG_IMPL=python python main.py
 - [Python의 tzdata fallback](https://docs.python.org/3/library/zoneinfo.html): 시스템 시간대 DB가 없는 환경에서도 `Asia/Seoul` 같은 계정 시간대 검증이 가능하도록 `tzdata`를 기본 의존성에 포함합니다.
 
 범용 파일·지식 검색은 [ASSISTANT.md](ASSISTANT.md)를 참고하세요. 텍스트 검색은 기본 의존성으로 동작하며 PDF/DOCX/XLSX는 `requirements-knowledge.txt`를 설치합니다. SQLite 기본 검색을 사용하거나 내부 임베딩·Qdrant 서버를 연결할 수 있습니다.
+
+## 대화·프로젝트와 결과 파일
+
+질문 수정·분기·버전·본문 검색·프로젝트·자동 요약은 기존 개별 실행에서 동작합니다. 실제 PDF/XLSX 결과 파일 생성은 가상환경에서 `python -m pip install -r requirements-artifacts.txt`를 추가로 실행하세요. 임베딩·Docker·Rust를 새로 요구하지 않습니다. 기본 PDF의 한글 표시와 TTF 경로 설정, 첨부·파일 한도는 [USER_WORKFLOWS.md](USER_WORKFLOWS.md)를 참고하세요. 실제 Android의 설치·화면 동작은 해당 단말에서 확인해야 합니다.

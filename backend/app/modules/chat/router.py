@@ -25,6 +25,8 @@ from app.modules.workspaces import agent as workspace_agent
 from app.modules.workspaces import client as workspace_client
 from app.modules.assistant import context as assistant_context
 from app.modules.assistant.models import TurnContext
+from app.modules.workflows import conversations as workflows
+from app.modules.workflows.models import AutoSummary
 
 router = APIRouter(prefix='/chat', tags=['chat'])
 Database = Annotated[Session, Depends(get_db)]
@@ -36,6 +38,10 @@ class ConversationInput(BaseModel):
     model: str = Field('', max_length=200)
 
 
+class CreateConversationInput(ConversationInput):
+    project_id: UUID|None=None
+
+
 class TitleInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     title: str = Field(min_length=1, max_length=120)
@@ -45,6 +51,7 @@ class TurnInput(ConversationInput):
     content: str = Field(min_length=1, max_length=16000)
     request_id: UUID
     retry: bool = False
+    confirm_write_retry: bool = False
     apps: list[GitlabSelection] | None = Field(None,max_length=1)
     assistant: assistant_context.Selection | None = None
 
@@ -66,16 +73,11 @@ class NoteInput(BaseModel):
 
 def conversation_data(item: Conversation):
     return {key: getattr(item, key) for key in ('id', 'title', 'connection_id', 'model', 'created_at', 'updated_at')} | {
-        'busy': bool(item.generation_id and item.generation_until > time.time())}
+        'busy': bool(item.generation_id and item.generation_until > time.time()),**workflows.conversation_extra(item)}
 
 
 def message_data(item: Message):
-    record = item.source_record
-    return {key: getattr(item, key) for key in ('id', 'role', 'content', 'status', 'model', 'is_test', 'error', 'created_at')} | {
-        'apps':json.loads(record.apps_json) if record else [], 'sources':json.loads(record.sources_json) if record else [],
-        'assistant':json.loads(item.assistant_context.data_json) if item.assistant_context else {},
-        'routing':json.loads(item.decision_record.data_json) if item.decision_record else {},
-        'tools':[{'name':trace.name,'step':trace.step,'status':trace.status,'detail':trace.detail} for trace in item.tool_traces[-80:]]}
+    return workflows.payload(item)
 
 
 def owned(db: Session, conversation_id: UUID, user_id: str) -> Conversation:
@@ -115,14 +117,12 @@ async def check_connection(connection_id: str, context: Authenticated, db: Datab
 
 
 @router.get('/conversations')
-def list_conversations(context: Authenticated, db: Database, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
-    items = db.scalars(select(Conversation).where(Conversation.user_id == context.user.id)
-        .order_by(Conversation.updated_at.desc(), Conversation.id.desc()).offset(offset).limit(limit + 1)).all()
-    return {'items': [conversation_data(item) for item in items[:limit]], 'has_more': len(items) > limit}
+def list_conversations(context: Authenticated, db: Database, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0),q: str=Query('',max_length=300),project_id: UUID|None=None):
+    return workflows.search(db,context.user.id,q,str(project_id) if project_id else None,limit,offset)
 
 
 @router.post('/conversations', status_code=201)
-def create_conversation(data: ConversationInput, context: Authenticated, db: Database):
+def create_conversation(data: CreateConversationInput, context: Authenticated, db: Database):
     connection = connection_for(data.connection_id, db, context.user)
     if data.model or connection.model:
         try:
@@ -130,7 +130,9 @@ def create_conversation(data: ConversationInput, context: Authenticated, db: Dat
         except providers.ProviderError as error:
             raise HTTPException(422, str(error)) from None
     item = Conversation(user_id=context.user.id, connection_id=connection.id, model=data.model or connection.model)
-    db.add(item)
+    if data.project_id:workflows.project_owned(db,context.user.id,data.project_id)
+    db.add(item);db.flush()
+    if data.project_id:workflows.attach_project(db,context.user.id,item.id,data.project_id)
     db.commit()
     return conversation_data(item)
 
@@ -139,6 +141,18 @@ def create_conversation(data: ConversationInput, context: Authenticated, db: Dat
 def get_conversation(conversation_id: UUID, context: Authenticated, db: Database):
     item = owned(db, conversation_id, context.user.id)
     messages = db.scalars(select(Message).where(Message.conversation_id == item.id).order_by(Message.position)).all()
+    if item.generation_until<=time.time() and any(m.status=='pending' for m in messages):
+        scheduler.lock(db);db.refresh(item)
+        if item.generation_until<=time.time():
+            for message in messages:
+                if message.status=='pending':
+                    message.status='error';message.error='이전 응답의 연결 또는 서버 작업이 중단되었습니다. 저장된 부분 답변을 확인하고 재시도하세요.'
+                    state=workflows.state_for(db,message);state.error_code='interrupted'
+            if item.generation_id:
+                scheduler.finish(db,item.generation_id,'error')
+                run=db.get(GenerationRun,item.generation_id)
+                if run and run.status in {'queued','running','tool_waiting'}:run.status='error';run.error_code='interrupted';run.finished_at=int(time.time())
+            item.generation_id=None;item.generation_until=0;db.commit()
     admission = db.scalar(select(Admission).where(Admission.request_id == item.generation_id)) if item.generation_id else None
     position = db.scalar(select(func.count(Admission.id)).join(GenerationRun).where(
         Admission.state == 'queued', Admission.id <= admission.id, Admission.expires_at > int(time.time()),
@@ -203,11 +217,9 @@ async def delete_conversation(conversation_id: UUID, context: Authenticated, db:
     user_id=context.user.id
     db.rollback()
     await close_copies(db.get_bind(),user_id,conversation_id=str(conversation_id))
-    item=owned(db,conversation_id,user_id)
+    scheduler.lock(db);item=owned(db,conversation_id,user_id)
     if item.generation_id and item.generation_until>time.time():raise HTTPException(409,'응답을 중지한 뒤 대화를 삭제해 주세요.')
-    from app.modules.knowledge.models import Document
-    from app.modules.knowledge.service import remove as remove_document
-    for doc in db.scalars(select(Document).where(Document.conversation_id==item.id)):remove_document(db,doc)
+    workflows.preserve_shared_files(db,item.id)
     db.delete(item)
     db.commit()
     return Response(status_code=204)
@@ -275,6 +287,9 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         note = db.get(ContextNote, item.id)
         if note and note.summary and note.through_position >= assistant.position:
             raise HTTPException(409, '이 답변이 요약 메모에 포함되어 있습니다. 요약 범위를 조정한 뒤 다시 생성하세요.')
+        workflows.before_retry(db,assistant)
+        auto=db.get(AutoSummary,item.id)
+        if auto and auto.through_position>=assistant.position:db.delete(auto)
         if assistant.status == 'complete':
             previous_message, previous_connection = message_data(assistant), item.connection_id
         else:
@@ -294,6 +309,8 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     for app in apps:
         if app.get('mode')=='files':app.pop('mode',None)
         if app.get('workspace_id') is None:app.pop('workspace_id',None)
+    if data.retry and (any(a.get('mode')=='execute' for a in apps) or (data.assistant.allow_writes if data.assistant else assistant.assistant_context and json.loads(assistant.assistant_context.data_json).get('allow_writes'))) and not data.confirm_write_retry:
+        raise HTTPException(409,'외부 변경·명령이 다시 실행될 수 있습니다. 쓰기 재시도를 명시적으로 확인하세요.')
     workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute'})
     if workspace_mode:
         if not workspace_client.enabled():raise HTTPException(503,'운영자가 Terminal MCP 서버를 연결해야 합니다.')
@@ -320,6 +337,8 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         db.execute(update(Conversation).where(Conversation.id == item.id, Conversation.title == '새 대화')
             .values(title=content.splitlines()[0][:60]))
         db.refresh(item, attribute_names=['title'])
+    message_state=workflows.state_for(db,assistant)
+    message_state.last_run=str(data.request_id);message_state.error_code=None;message_state.phase='queued'
     run = GenerationRun(id=str(data.request_id), user_id=user_id, conversation_id=item.id,
         connection_id=connection.id, provider=connection.provider, model=model,
         is_test=connection.provider == 'test', status='queued', started_at=now,
@@ -382,6 +401,18 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
         saved = None
         sources = []
         workspace_selection=None
+        phase='queued';last_checkpoint=0.0
+        def checkpoint(force=False):
+            nonlocal last_checkpoint
+            if not force and time.monotonic()-last_checkpoint<.75:return
+            with Session(bind) as session:
+                active=session.get(Conversation,turn.conversation_id);message=session.get(Message,turn.assistant_id)
+                if active and active.generation_id==turn.request_id and message:
+                    message.content=text
+                    workflow=workflows.state_for(session,message);workflow.phase=phase
+                    if message.source_record:message.source_record.sources_json=json.dumps(sources,ensure_ascii=False)
+                    session.commit()
+            last_checkpoint=time.monotonic()
         def cancelled():
             with Session(bind) as session:
                 active = session.get(Conversation, turn.conversation_id)
@@ -405,6 +436,13 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
             if state == 'expired':
                 raise TimeoutError('queue')
             if state == 'running':
+                from app.modules.workflows.summary import ensure_summary
+                async for summary_event in ensure_summary(bind,user_id,turn,admitted,settings,cancelled):
+                    yield event(*summary_event)
+                with Session(bind) as session:
+                    turn.history,report=context_budget.plan(session,turn.conversation_id,admitted,turn.start['conversation']['model'],data.content.strip())
+                    turn.start['context']=report
+                phase='model'
                 yield event('queue', {'status': 'running', 'position': 0, 'request_id': turn.request_id})
                 apps = turn.start['assistant_message']['apps']
                 workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute'})
@@ -423,8 +461,11 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                                 elif kind=='sources':sources=payload['sources']
                                 elif kind=='workspace' and payload.get('selection'):
                                     workspace_selection=GitlabSelection.model_validate(payload['selection'])
+                                if kind=='activity':phase=payload.get('name','model')
+                                checkpoint()
                                 yield event(kind,payload)
                     elif apps:
+                        phase='gitlab_read'
                         yield event('tool', {'app':'gitlab','status':'reading','detail':'선택한 GitLab 파일을 읽고 있습니다.'})
                         with Session(bind) as session:
                             budget = context_budget.reference_budget(session,turn.conversation_id,admitted,
@@ -447,6 +488,7 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                                 text += part
                                 if first_token_ms is None:
                                     first_token_ms = max(0, int((time.monotonic() - turn.started_clock) * 1000))
+                                checkpoint()
                                 yield event('delta', {'content': part})
                     if not text.strip():
                         raise providers.ProviderError('모델이 빈 응답을 보냈습니다. 다시 시도해 주세요.')
@@ -461,7 +503,7 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
             error = str(caught) if isinstance(caught, (providers.ProviderError,GitlabError)) else '대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.' if str(caught) == 'queue' else '응답 시간이 초과되었습니다. 다시 시도해 주세요.'
         except HTTPException as caught:
             status,error='error',str(caught.detail)
-            error_code='workspace_error' if turn.start['assistant_message']['apps'] and turn.start['assistant_message']['apps'][0].get('mode') in {'workspace','execute'} else 'context_limit'
+            error_code='app_connection' if phase.startswith(('mcp','gitlab')) or caught.status_code in {401,403,502,503} else 'workspace_error' if workspace_selection else 'context_limit'
         except Exception:
             status, error = 'error', '응답을 처리하지 못했습니다. 다시 시도해 주세요.'
             error_code = 'internal_error'
@@ -482,6 +524,7 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                 scheduler.finish(session, turn.request_id, status)
                 if item and message:
                     message.content, message.status, message.error = text, status, error
+                    workflow=workflows.state_for(session,message);workflow.error_code=error_code;workflow.phase=phase
                     if message.source_record:
                         message.source_record.sources_json = json.dumps(sources,ensure_ascii=False)
                         if workspace_selection and workspace_selection.workspace_id:
@@ -503,6 +546,13 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
                         if message.assistant_context:message.assistant_context.data_json=json.dumps(previous.get('assistant',{}))
                         if message.decision_record:message.decision_record.data_json=json.dumps(previous.get('routing',{}),ensure_ascii=False)
                         item.connection_id, item.model = turn.previous_connection, previous['model']
+                    if status!='complete':
+                        from app.modules.workflows.models import Artifact
+                        from sqlalchemy import delete
+                        session.execute(delete(Artifact).where(Artifact.run_id==turn.request_id,Artifact.owner_id==user_id))
+                    if status=='complete':
+                        session.expire(message,['generated_files'])
+                        workflows.capture(session,message,turn.request_id)
                     item.generation_id, item.generation_until, item.cancel_requested = None, 0, False
                     item.updated_at = int(time.time())
                     session.commit()

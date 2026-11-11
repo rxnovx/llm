@@ -258,7 +258,8 @@ def test_literal_mention_does_not_invoke_tools_and_failures_restore_retry_source
     response = send(client,headers,conversation,content='코드 확인',retry=True)
     assert events(response)[-1][0]=='error'
     after = client.get(f'/chat/conversations/{conversation}',headers=headers).json()['messages'][-1]
-    assert after==before
+    assert after['recovery']['preserved_previous'] and after['recovery']['code']=='gitlab_error'
+    assert after|{'recovery':None}==before
     with client.db_factory() as db:
         assert db.scalar(select(Admission).where(Admission.state.in_(['queued','running']))) is None
 

@@ -1,18 +1,21 @@
 import type { GitlabSelection, GitlabSource } from "@/lib/app-connections";
 import type { AssistantSelection,KnowledgeSource } from "@/lib/knowledge";
-export type MessageSource=GitlabSource|KnowledgeSource;
+import type { ResultFile,Coverage,McpSource } from '@/lib/workflows';
+export type MessageSource=GitlabSource|KnowledgeSource|McpSource;
 export type ModelProfile = { name: string; context_window: number; max_output_tokens: number; max_concurrent: number; supports_tools?: boolean };
 export type Connection = { id: string; name: string; provider: "test" | "vllm" | "ollama"; default_model: string; is_test: boolean;
   models: ModelProfile[]; context_window: number; max_output_tokens: number; max_concurrent: number; supports_tools?: boolean };
 export type ContextReport = { context_window: number; input_budget: number; reserved_output_tokens: number; estimated_input_tokens: number;
   is_estimate: boolean; included_turns: number; omitted_turns: number; summarized_turns: number; summary_included: boolean; too_large: boolean;
-  summary: string; through_position: number; last_complete_position: number; revision: number };
+  summary: string; through_position: number; last_complete_position: number; revision: number; auto_summary_enabled?:boolean;auto_summary?:string;auto_through_position?:number;project_name?:string|null };
 export type QueueState = { status: "queued" | "running" | "tool_waiting"; position: number; request_id: string };
 export type ToolActivity = { name: string; step: number; status: "running"|"complete"|"error"; detail: string };
 export type Workspace = { id: string; conversation_id: string; status: string; allow_execution: boolean; ref: string; project_id: number; source: {project?:string;commit?:string} };
-export type Conversation = { id: string; title: string; connection_id: string; model: string; created_at: number; updated_at: number; busy: boolean };
+export type Conversation = { id: string; title: string; connection_id: string; model: string; created_at: number; updated_at: number; busy: boolean;project_id?:string|null;project_name?:string|null;parent_id?:string|null;auto_summary?:boolean;match?:{message_id:string;role:string;excerpt:string}|null };
 export type ChatMessage = { id: string; role: "user" | "assistant"; content: string; status: "pending" | "complete" | "cancelled" | "error";
-  model: string; is_test: boolean; error: string | null; created_at: number; apps?: GitlabSelection[]; sources?: MessageSource[]; tools?: ToolActivity[];assistant?:AssistantSelection;routing?:{automatic?:boolean;automatic_project?:boolean;route?:string;status?:string;rounds?:number;grounding?:{verdict:string;issues_count:number}} };
+  artifacts?:ResultFile[];versions?:{id:string;sequence:number;model:string;created_at:number}[];active_version?:string|null;feedback_count?:number;
+  recovery?:{code:string;phase:string;requires_confirmation:boolean;preserved_previous?:boolean;can_retry:boolean;can_resume_execution:boolean;actions:string[]}|null;
+  model: string; is_test: boolean; error: string | null; created_at: number; apps?: GitlabSelection[]; sources?: MessageSource[]; tools?: ToolActivity[];assistant?:AssistantSelection;routing?:{coverage?:Coverage;mcp_ids?:string[];automatic?:boolean;automatic_project?:boolean;route?:string;status?:string;rounds?:number;grounding?:{verdict:string;issues_count:number}} };
 export type ConversationDetail = { conversation: Conversation; messages: ChatMessage[]; generation?: QueueState | null };
 export type ChatEvent =
   | { event: "start"; data: { conversation: Conversation; user_message: ChatMessage; assistant_message: ChatMessage; context?: ContextReport } }
@@ -22,5 +25,7 @@ export type ChatEvent =
   | { event: "sources"; data: { sources: MessageSource[] } }
   | { event: "activity"; data: ToolActivity }
   | { event: "workspace"; data: Workspace & {selection?:GitlabSelection;automatic?:boolean} }
+  | { event: "artifact"; data: ResultFile }
+  | { event: "coverage"; data: Coverage }
   | { event: "delta"; data: { content: string } }
   | { event: "done" | "error" | "cancelled"; data: { conversation: Conversation; message: ChatMessage; detail?: string | null } };

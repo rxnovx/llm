@@ -203,6 +203,15 @@ async def tool_reply(connection,model,history,tools,settings):
     """One structured agent step; tools are executed exclusively by the application host."""
     if connection.provider=='test':
         names={t['function']['name'] for t in tools}
+        if 'create_document' in names:
+            if not any(m.get('tool_name')=='create_document' for m in history):
+                import re
+                question=next((m['content'] for m in reversed(history) if m['role']=='user'),'')
+                format=next((f for f in ['xlsx','csv','pdf','txt','md'] if f in question.lower()),'xlsx' if '엑셀' in question else 'md')
+                return {'role':'assistant','content':'','tool_calls':[{'id':'demo-document','type':'function','function':{'name':'create_document','arguments':{'name':'테스트 결과','format':format,'content':'테스트 모드에서 생성한 예시 문서입니다.','columns':['항목','내용'],'rows':[['실행','파일 생성 검증'],['모드','테스트']]}}}]}
+            result=next((m for m in reversed(history) if m.get('tool_name')=='create_document'),None)
+            if result and 'error' in json.loads(result['content']):return {'role':'assistant','content':'테스트 파일을 생성하지 못했습니다. 작업 기록과 문서 생성 의존성·입력 제한을 확인하세요.','tool_calls':[]}
+            return {'role':'assistant','content':'테스트 문서를 생성했습니다. 아래 결과 파일에서 미리보기와 다운로드를 사용할 수 있습니다. 실제 모델의 생성 결과는 아닙니다.','tool_calls':[]}
         if 'repo_map' not in names:
             return {'role':'assistant','content':'테스트 모드에서 선택한 자료와 앱 연결 흐름을 확인했습니다. '+('[KS1]' if any('[KS1]' in m.get('content','') for m in history) else '')+'\n\n실제 모델이 작성한 분석은 아닙니다. 실제 연결을 선택하면 자료 검색과 도구 호출을 사용해 답변합니다.','tool_calls':[]}
         if any('[GL1]' in m.get('content','') for m in history):

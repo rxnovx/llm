@@ -13,11 +13,12 @@ from app.modules.chat.models import Message
 from app.modules.workspaces.models import ToolTrace
 from . import engine,routing
 from .models import TurnDecision
+from app.modules.workflows import artifacts
 
 ABSTAIN='현재 확인 가능한 근거로는 질문의 사실 관계를 충분히 검증하지 못했습니다. 확실하지 않은 내용을 단정하지 않겠습니다. 관련 자료를 추가하거나 질문 범위를 좁혀 주세요.'
 
 
-async def stream(bind,user_id,turn,selection,connection,settings,cancelled,options=None):
+async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,options=None):
     options=dict(options or {})
     deadline=int(time.time())+settings.terminal_agent_timeout_seconds+15
     model=turn.start['conversation']['model'];question=turn.history[-1]['content']
@@ -55,7 +56,7 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
 
     await release()
     available=routing.resources(bind,user_id,turn.conversation_id,options)
-    plan=routing.Plan(route='gitlab' if selection else 'direct',needs_review=bool(manual_knowledge or selection and selection.mode=='workspace'))
+    plan=routing.Plan(route='gitlab' if selection else 'direct',needs_review=bool(manual_knowledge or options.get('mcp_ids') or selection and selection.mode=='workspace'))
     if enabled and not explicit:
         yield 'activity',record('route_decision','running','질문에 필요한 앱과 문서 검색을 판단하고 있습니다.')
         await acquire()
@@ -67,7 +68,7 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
         if hint and plan.route=='direct':plan.needs_review=True
         if plan.uncertain and available['retrieval_allowed'] and available['knowledge_ready'] and plan.route=='direct':plan.route='knowledge'
         decision.update(route=plan.route,uncertain=plan.uncertain,status='running');save()
-        label={'direct':'일반 답변','knowledge':'문서 검색','gitlab':'GitLab 소스 분석','both':'GitLab 분석과 문서 검색','clarify':'대상 확인'}[plan.route]
+        label={'direct':'일반 답변','knowledge':'문서 검색','gitlab':'GitLab 소스 분석','both':'GitLab 분석과 문서 검색','clarify':'대상 확인','mcp':'연결된 앱 조회'}[plan.route]
         yield 'activity',record('route_decision','complete',label+' 경로를 선택했습니다.')
         if plan.route=='clarify':
             decision['status']='clarification';save()
@@ -85,6 +86,13 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
                 message.source_record.apps_json=json.dumps(turn.start['assistant_message']['apps']);db.commit()
             yield 'activity',record('gitlab_resolve','complete','프로젝트를 확인했습니다. 읽기 전용 작업공간을 준비합니다.')
 
+    if enabled and not explicit and plan.route=='mcp' and not plan.mcp_ids:raise HTTPException(409,'사용할 앱을 선택하지 못했습니다. 앱 설정에서 연결 상태를 확인하고 @ 앱으로 선택하세요.')
+    if enabled and not explicit and plan.mcp_ids:
+        permitted={a['id'] for a in available.get('mcp_apps',[])}
+        if not set(plan.mcp_ids)<=permitted:raise HTTPException(403,'자동 선택할 수 없는 MCP 앱입니다.')
+        if connection.provider!='test' and not connection.profile(model).supports_tools:raise HTTPException(422,'앱 자동 사용에는 도구 호출 모델이 필요합니다. 모델을 변경하세요.')
+        options['mcp_ids']=plan.mcp_ids;options['allow_writes']=False
+        decision['mcp_ids']=plan.mcp_ids
     auto_knowledge=enabled and available['retrieval_allowed'] and available['knowledge_ready']
     if auto_knowledge and not manual_knowledge and (plan.route in {'knowledge','both'} or options.get('rag_mode')=='always'):
         options['_auto_scope']=True
@@ -93,7 +101,7 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
         yield 'activity',record('knowledge_scope','complete',decision['retrieval_notice'])
     options['_query']=plan.query or question
     decision.setdefault('route',plan.route);decision['status']='running';save()
-    hold=enabled and bool(plan.needs_review or plan.uncertain or manual_knowledge or auto_knowledge or selection and selection.mode=='workspace')
+    hold=enabled and bool(plan.needs_review or plan.uncertain or manual_knowledge or auto_knowledge or options.get('mcp_ids') or selection and selection.mode=='workspace')
     # Never replay execution or external writes merely because an answer needs more evidence.
     replay_safe=not options.get('allow_writes') and not (selection and selection.mode=='execute')
     attempts=settings.assistant_max_retrieval_rounds if enabled and replay_safe else 1
@@ -101,7 +109,7 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
     for attempt in range(attempts):
         if cancelled():raise engine.AnalysisCancelled()
         decision['rounds']=attempt+1
-        text='';sources=[]
+        text='';sources=[];files=[];coverage={}
         async with aclosing(engine.stream(bind,user_id,turn,selection,connection,settings,cancelled,options=options)) as iterator:
             async for kind,payload in iterator:
                 if kind=='delta':
@@ -109,6 +117,10 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
                     if len(text)>200000:raise providers.ProviderError('자동 답변 길이 제한을 초과했습니다.')
                     if not hold:yield kind,payload
                 else:
+                    if kind=='artifact':
+                        files.append(payload);continue
+                    if kind=='coverage':
+                        coverage.update(payload);continue
                     if kind=='sources':sources=payload['sources']
                     if kind=='workspace':
                         payload=dict(payload,selection=selection.model_dump(mode='json'),automatic=bool(decision.get('automatic_project')))
@@ -119,10 +131,15 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
         wants_review=hold and settings.assistant_grounding_review and bool(plan.needs_review or plan.uncertain or uncertain or sources or auto_knowledge and not explicit)
         if wants_review:
             yield 'activity',record('evidence_review','running','초안의 사실 주장과 실제 조회한 근거를 점검하고 있습니다.')
+            review_text=text
+            if files:
+                from app.modules.workflows.models import Artifact
+                with Session(bind) as db:
+                    review_text+='\n\nGenerated file payloads (must also be grounded):\n'+'\n'.join(db.get(Artifact,f['id']).payload_json for f in files)
             snippets=await routing.evidence(bind,user_id,turn.conversation_id,selection,sources,text)
             await acquire()
             try:
-                async with asyncio.timeout(settings.llm_timeout_seconds):review=await routing.assess(connection,model,question,text,snippets,settings)
+                async with asyncio.timeout(settings.llm_timeout_seconds):review=await routing.assess(connection,model,question,review_text,snippets,settings)
             finally:await release()
         # A revoked source must not be carried into a new model request as retry feedback.
         await routing.verify(bind,user_id,turn.conversation_id,selection,sources)
@@ -136,10 +153,15 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
                 yield 'activity',record('evidence_review','complete',label)
         if review.verdict=='supported':
             await routing.verify(bind,user_id,turn.conversation_id,selection,sources)
-            decision['status']='complete';save()
+            artifacts.finalize(bind,user_id,turn.request_id,[f['id'] for f in files],approve=True)
+            coverage.update(source_files=len({s['path'] for s in sources if s.get('app')=='gitlab'}),documents=len({s['document_id'] for s in sources if s.get('app')=='knowledge'}),excerpts=len(sources),app_results=len([s for s in sources if s.get('app')=='mcp']),limitations=['정적 색인과 실제 조회한 발췌 범위입니다. 전체 실행 경로나 답변의 정확성을 보증하지 않습니다.'])
+            decision['coverage']=coverage;decision['status']='complete';save()
+            yield 'coverage',coverage
+            for file in files:yield 'artifact',file
             if hold:
                 for start in range(0,len(text),120):yield 'delta',{'content':text[start:start+120]}
             return
+        artifacts.finalize(bind,user_id,turn.request_id,[],approve=False)
         if attempt+1<attempts and (manual_knowledge or auto_knowledge):
             if not manual_knowledge:options['_auto_scope']=True
             decision.setdefault('initial_route',decision['route']);decision['route']='both' if selection else 'knowledge'
@@ -151,3 +173,12 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
         decision['status']='unverified';save()
         yield 'delta',{'content':ABSTAIN+('\n\n'+decision['retrieval_notice'] if decision.get('retrieval_notice') else '')}
         return
+
+
+async def stream(bind,user_id,turn,selection,connection,settings,cancelled,options=None):
+    try:
+        async with aclosing(_stream(bind,user_id,turn,selection,connection,settings,cancelled,options)) as iterator:
+            async for event in iterator:yield event
+    finally:
+        # Any draft that did not pass the final review is inaccessible and removed.
+        artifacts.finalize(bind,user_id,turn.request_id,[],approve=False)

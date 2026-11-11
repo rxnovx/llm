@@ -27,3 +27,24 @@ export async function authenticatedFetch(url: string, init: RequestInit = {}): P
   }
   return response;
 }
+
+/** XHR supplies real browser-to-BFF upload progress while sharing the auth refresh flow. */
+export async function authenticatedUpload<T>(url:string,body:FormData,signal:AbortSignal,onProgress:(loaded:number,total:number)=>void):Promise<T>{
+  let token=getAccessToken()??await refreshAccessToken();
+  const request=()=>new Promise<{status:number;data:unknown}>((resolve,reject)=>{
+    if(signal.aborted){reject(new DOMException('업로드 취소','AbortError'));return;}
+    const xhr=new XMLHttpRequest();xhr.open('POST',url);xhr.withCredentials=true;
+    xhr.timeout=180000;xhr.setRequestHeader('x-llm-account','1');if(token)xhr.setRequestHeader('authorization',`Bearer ${token}`);
+    const abort=()=>xhr.abort();signal.addEventListener('abort',abort,{once:true});
+    const cleanup=()=>signal.removeEventListener('abort',abort);
+    xhr.upload.onprogress=e=>{if(e.lengthComputable)onProgress(e.loaded,e.total);};
+    xhr.onload=()=>{cleanup();let data:unknown=null;try{data=JSON.parse(xhr.responseText);}catch{}resolve({status:xhr.status,data});};
+    xhr.onabort=()=>{cleanup();reject(new DOMException('업로드 취소','AbortError'));};
+    xhr.onerror=()=>{cleanup();reject(new Error('파일 전송 연결이 끊겼습니다. 다시 첨부하세요.'));};
+    xhr.ontimeout=()=>{cleanup();reject(new Error('파일 전송 시간이 초과되었습니다.'));};xhr.send(body);
+  });
+  let result=await request();
+  if(result.status===401&&!signal.aborted){token=await refreshAccessToken();if(token)result=await request();if(result.status===401)notifyAuthExpired();}
+  if(result.status<200||result.status>=300){const payload=result.data as {detail?:unknown}|null;throw new ApiRequestError(typeof payload?.detail==='string'?payload.detail:'파일을 첨부하지 못했습니다.',result.status);}
+  return result.data as T;
+}

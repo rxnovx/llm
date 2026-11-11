@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     assistant_grounding_review: bool = True
     assistant_max_retrieval_rounds: int = Field(2, ge=1, le=3)
 
+    artifact_pdf_font_path: str = ''
     knowledge_enabled: bool = True
     knowledge_worker_enabled: bool = True
     knowledge_max_upload_bytes: int = Field(10*1024*1024,ge=1024,le=20*1024*1024)
