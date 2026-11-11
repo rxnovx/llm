@@ -2,10 +2,9 @@
 import asyncio,json,re
 from fastapi import HTTPException
 from pydantic import BaseModel,ConfigDict,Field
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.modules.chat import context,providers
-from app.modules.chat.models import Conversation,Message,ContextNote
+from app.modules.chat.models import Conversation,ContextNote
 from .models import ConversationState,AutoSummary
 
 class Summary(BaseModel):
@@ -17,7 +16,7 @@ async def ensure_summary(bind,user_id,turn,connection,settings,cancelled):
         state=db.get(ConversationState,turn.conversation_id)
         if state and not state.auto_summary:return
         _,report=context.plan(db,turn.conversation_id,connection,turn.start['conversation']['model'],turn.history[-1]['content'])
-        rows=list(db.scalars(select(Message).where(Message.conversation_id==turn.conversation_id).order_by(Message.position)))
+        rows=context.message_rows(db,turn.conversation_id)
         pairs=context.completed_history(rows);old=db.get(AutoSummary,turn.conversation_id);manual=db.get(ContextNote,turn.conversation_id)
         through=max(old.through_position if old else -1,manual.through_position if manual and manual.summary else -1)
         pending=[p for p in pairs if p[0]>through]

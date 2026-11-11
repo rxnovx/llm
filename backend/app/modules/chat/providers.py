@@ -4,6 +4,7 @@ from base64 import b64encode
 from collections.abc import AsyncIterator, Sequence
 import json
 import secrets
+import ssl
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
@@ -128,13 +129,51 @@ def resolve(settings: Settings, connection_id: str, db=None, user=None) -> Conne
 
 def client(connection: Connection, timeout: float) -> httpx.AsyncClient:
     key = connection.api_key.get_secret_value()
+    try:
+        verify = assistant_tls()
+    except OSError:
+        raise ProviderError('모델 서버의 CA 번들을 읽지 못했습니다. ASSISTANT_CA_BUNDLE을 확인해 주세요.') from None
     return httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(10, timeout)),
         headers={'Authorization': f'Bearer {key}'} if key else {},
-        follow_redirects=False, trust_env=False,verify=assistant_tls())
+        follow_redirects=False, trust_env=False, verify=verify)
 
 
 def endpoint(connection: Connection, suffix: str) -> str:
     return f'{connection.base_url.rstrip("/")}/{suffix}'
+
+
+def require_success(response, action, invalid_request):
+    if response.is_success:
+        return
+    status = response.status_code
+    if status in {401, 403}:
+        detail = '모델 서버의 API 키와 접근 권한을 확인해 주세요.'
+    elif status == 404:
+        detail = '서버 기본 주소, API 경로와 등록한 모델 ID를 확인해 주세요.'
+    elif status == 429:
+        detail = '모델 서버의 동시 요청 한도와 부하를 확인해 주세요.'
+    elif status >= 500:
+        detail = '모델 서버의 준비 상태와 추론 로그를 확인해 주세요.'
+    elif 300 <= status < 400:
+        detail = '리디렉션을 거치지 않는 실제 API 주소를 등록해 주세요.'
+    else:
+        detail = invalid_request
+    raise ProviderError(f'{action} (HTTP {status}) · {detail}')
+
+
+def transport_error(error):
+    if isinstance(error, httpx.ConnectTimeout):
+        return ProviderError('모델 서버 접속 시간이 초과되었습니다. FastAPI 실행 환경의 주소·포트·방화벽을 확인해 주세요.')
+    if isinstance(error, httpx.TimeoutException):
+        return ProviderError('모델 서버 응답 시간이 초과되었습니다. 모델 로딩·서버 부하·시간 제한을 확인해 주세요.')
+    cause = error.__cause__
+    while cause:
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            return ProviderError('모델 서버의 TLS 인증서를 확인할 수 없습니다. 호스트 이름과 ASSISTANT_CA_BUNDLE을 확인해 주세요.')
+        cause = cause.__cause__
+    if isinstance(error, httpx.ConnectError):
+        return ProviderError('모델 서버에 연결할 수 없습니다. FastAPI 실행 환경에서 주소·포트·방화벽을 확인해 주세요.')
+    return ProviderError('모델 서버와의 HTTP 통신이 중단되었습니다. 서버와 중간 프록시의 로그를 확인해 주세요.')
 
 
 async def list_models(connection: Connection) -> list[str]:
@@ -144,13 +183,15 @@ async def list_models(connection: Connection) -> list[str]:
     try:
         async with client(connection, 10) as session:
             response = await session.get(endpoint(connection, path))
-            response.raise_for_status()
+            require_success(response, '모델 목록 요청 거부', '서버 종류와 모델 목록 API를 확인해 주세요.')
             payload = response.json()
         field = 'id' if connection.provider == 'vllm' else 'name'
         names = [item[field] for item in payload[key] if isinstance(item.get(field), str)]
         return list(dict.fromkeys(names))[:200]
-    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
-        raise ProviderError('모델 목록을 가져오지 못했습니다. 서버 주소와 인증 설정을 확인해 주세요.') from None
+    except httpx.HTTPError as error:
+        raise transport_error(error) from None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise ProviderError('모델 목록의 응답 형식이 올바르지 않습니다. 서버 종류와 API 경로를 확인해 주세요.') from None
 
 
 DEMO_REPLIES = [
@@ -207,8 +248,8 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
         try:
             async with client(connection, settings.llm_timeout_seconds) as session:
                 async with session.stream('POST', endpoint(connection, 'chat/completions' if vllm else 'api/chat'), json=request_payload) as response:
-                    if not response.is_success:
-                        raise ProviderError('모델 서버가 요청을 거부했습니다. 모델 이름과 서버 인증을 확인해 주세요.')
+                    require_success(response, '모델 채팅 요청 거부',
+                        '서빙 모델 ID, 채팅 템플릿, 문맥 한도와 이미지 입력 지원을 확인해 주세요.')
                     meter.accepted = True
                     async for line in response.aiter_lines():
                         if not line or (vllm and not line.startswith('data:')):
@@ -244,10 +285,10 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
                             break
             if not complete:
                 raise ProviderError('모델 서버의 응답이 중간에 끊겼습니다. 다시 시도해 주세요.')
-        except httpx.TimeoutException:
-            raise ProviderError('모델 서버 응답 시간이 초과되었습니다. 다시 시도해 주세요.') from None
-        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
-            raise ProviderError('모델 서버에 연결할 수 없거나 응답 형식이 올바르지 않습니다.') from None
+        except httpx.HTTPError as error:
+            raise transport_error(error) from None
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            raise ProviderError('모델 스트림의 응답 형식이 올바르지 않습니다. 서버 종류와 API 경로를 확인해 주세요.') from None
 
 
 async def tool_reply(connection,model,history,tools,settings):
@@ -309,7 +350,7 @@ async def tool_reply(connection,model,history,tools,settings):
         try:
             async with client(connection,settings.llm_timeout_seconds) as session:
                 async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=payload) as response:
-                    if not response.is_success:raise ProviderError('모델의 도구 호출 요청이 거절되었습니다. 도구 지원과 서버 parser 설정을 확인하세요.')
+                    require_success(response, '모델 도구 호출 요청 거부', '모델의 도구 지원과 서버 파서 설정을 확인해 주세요.')
                     meter.accepted = True
                     raw=bytearray()
                     async for part in response.aiter_bytes():
@@ -332,8 +373,9 @@ async def tool_reply(connection,model,history,tools,settings):
             meter.output(content)
             meter.output(json.dumps(normalized, ensure_ascii=False))
             return {'role':'assistant','content':content,'tool_calls':normalized}
-        except ProviderError:raise
-        except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError):
+        except httpx.HTTPError as error:
+            raise transport_error(error) from None
+        except (ValueError,KeyError,IndexError,TypeError,AttributeError):
             raise ProviderError('모델 도구 응답을 처리하지 못했습니다. 도구 호출을 지원하는 모델과 parser 설정을 확인하세요.') from None
 
 async def structured_reply(connection,model,messages,schema,settings):
@@ -350,7 +392,7 @@ async def structured_reply(connection,model,messages,schema,settings):
         try:
             async with client(connection,settings.llm_timeout_seconds) as session:
                 async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=payload) as response:
-                    if not response.is_success:raise ProviderError('자동 판단 요청이 거절되었습니다. 모델 서버의 구조화 출력 지원을 확인하세요.')
+                    require_success(response, '모델 구조화 요청 거부', '모델 서버의 JSON 스키마 출력 지원을 확인해 주세요.')
                     meter.accepted = True
                     raw=bytearray()
                     async for part in response.aiter_bytes():
@@ -365,6 +407,7 @@ async def structured_reply(connection,model,messages,schema,settings):
             result=json.loads(content)
             if not isinstance(result,dict):raise ValueError()
             return result
-        except ProviderError:raise
-        except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError,AttributeError):
+        except httpx.HTTPError as error:
+            raise transport_error(error) from None
+        except (ValueError,KeyError,IndexError,TypeError,AttributeError):
             raise ProviderError('자동 판단 응답을 처리하지 못했습니다. 구조화 출력 설정을 확인하세요.') from None

@@ -21,7 +21,8 @@ export type ChatMessage = { id: string; role: "user" | "assistant"; content: str
   artifacts?:ResultFile[];versions?:{id:string;sequence:number;model:string;created_at:number}[];active_version?:string|null;feedback_count?:number;
   recovery?:{code:string;phase:string;requires_confirmation:boolean;preserved_previous?:boolean;can_retry:boolean;can_resume_execution:boolean;actions:string[]}|null;
   model: string; is_test: boolean; error: string | null; created_at: number; apps?: GitlabSelection[]; sources?: MessageSource[]; tools?: ToolActivity[];assistant?:AssistantSelection;routing?:{coverage?:Coverage;mcp_ids?:string[];automatic?:boolean;automatic_project?:boolean;route?:string;status?:string;rounds?:number;grounding?:{verdict:string;issues_count:number}} };
-export type ConversationDetail = { conversation: Conversation; messages: ChatMessage[]; generation?: QueueState | null };
+export type MessagePage = { older_before: number | null; newer_after: number | null };
+export type ConversationDetail = { conversation: Conversation; messages: ChatMessage[]; generation?: QueueState | null; message_page?: MessagePage };
 export type ChatEvent =
   | { event: "start"; data: { conversation: Conversation; user_message: ChatMessage; assistant_message: ChatMessage; context?: ContextReport } }
   | { event: "queue"; data: QueueState }

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
 from app.modules.auth.models import User
+from app.modules.chat import history
 from app.modules.chat.models import Conversation,Message
 from app.modules.chat.scheduler import lock
 from app.modules.knowledge.models import KnowledgeBase,Document
@@ -81,10 +82,11 @@ def project_data(row, role):
     return {k:getattr(row,k) for k in ['id','name','instructions','base_id','revision','created_at']} | {'role': role}
 
 
-def detail(db,user_id,item):
-    from app.modules.chat.router import conversation_data
-    messages=list(db.scalars(select(Message).where(Message.conversation_id==item.id).order_by(Message.position)))
-    return {'conversation':conversation_data(item),'messages':[service.payload(m) for m in messages],'generation':None}
+def detail(db,item,message_limit):
+    from app.modules.chat.router import conversation_data,message_data
+    messages, page = history.read(db, item.id, message_limit)
+    return {'conversation':conversation_data(item),'messages':[message_data(m) for m in messages],'generation':None} | (
+        {'message_page':page} if page is not None else {})
 
 
 @router.get('/projects')
@@ -194,18 +196,18 @@ def set_auto_summary(conversation_id: UUID,data: SummaryInput,context: Authentic
 
 
 @router.post('/conversations/{conversation_id}/fork',status_code=201)
-def fork(conversation_id: UUID,data: ForkInput,context: Authenticated,db: Database):
+def fork(conversation_id: UUID,data: ForkInput,context: Authenticated,db: Database,message_limit: history.MessageLimit = None):
     child,carry=service.fork(db,context.user.id,str(conversation_id),str(data.message_id),content=data.content)
-    db.commit();return detail(db,context.user.id,child)|carry
+    db.commit();return detail(db,child,message_limit)|carry
 
 
 @router.post('/conversations/{conversation_id}/continue',status_code=201)
-def continue_conversation(conversation_id: UUID,context: Authenticated,db: Database):
+def continue_conversation(conversation_id: UUID,context: Authenticated,db: Database,message_limit: history.MessageLimit = None):
     parent=service.owned(db,context.user.id,conversation_id,idle=True)
     target=db.scalar(select(Message).where(Message.conversation_id==parent.id,Message.role=='assistant',Message.status=='complete').order_by(Message.position.desc()))
     if not target:raise HTTPException(422,'완료된 답변이 있어야 이어갈 수 있습니다.')
     child,carry=service.fork(db,context.user.id,parent.id,target.id,tail_only=True);db.commit()
-    return detail(db,context.user.id,child)|carry
+    return detail(db,child,message_limit)|carry
 
 
 @router.get('/messages/{message_id}/versions')
@@ -215,7 +217,7 @@ def versions(message_id: UUID,context: Authenticated,db: Database):
 
 
 @router.post('/messages/{message_id}/versions/{version_id}/select')
-def select_version(message_id: UUID,version_id: UUID,context: Authenticated,db: Database):
+def select_version(message_id: UUID,version_id: UUID,context: Authenticated,db: Database,message_limit: history.MessageLimit = None):
     lock(db);message,conversation=service.message_owned(db,context.user.id,message_id,idle=True)
     version=db.get(MessageVersion,str(version_id))
     if not version or version.message_id!=message.id:raise HTTPException(404,'답변 버전을 찾을 수 없습니다.')
@@ -224,7 +226,7 @@ def select_version(message_id: UUID,version_id: UUID,context: Authenticated,db: 
     note=db.get(ContextNote,conversation.id)
     if message.position!=last or note and note.summary and note.through_position>=message.position:
         child,carry=service.fork(db,context.user.id,conversation.id,message.id,version=version)
-        db.commit();return detail(db,context.user.id,child)|carry|{'forked':True}
+        db.commit();return detail(db,child,message_limit)|carry|{'forked':True}
     if not message.versions:service.capture(db,message)
     data=json.loads(version.payload_json);service.apply_payload(db,message,data)
     state=service.state_for(db,message);state.active_version=version.id
@@ -232,7 +234,7 @@ def select_version(message_id: UUID,version_id: UUID,context: Authenticated,db: 
     auto=db.get(AutoSummary,conversation.id)
     if auto and auto.through_position>=message.position:db.delete(auto)
     conversation.updated_at=int(time.time());db.commit()
-    return detail(db,context.user.id,conversation)|{'forked':False}
+    return detail(db,conversation,message_limit)|{'forked':False}
 
 
 @router.get('/formats')

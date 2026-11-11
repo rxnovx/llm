@@ -26,9 +26,14 @@ def completed_history(rows):
     return history
 
 
+def message_rows(db, conversation_id):
+    return db.execute(select(Message.position, Message.role, Message.status, Message.content)
+        .where(Message.conversation_id == conversation_id).order_by(Message.position)).all()
+
+
 def plan(db, conversation_id, connection, model, content='', *, retry=False, strict=True, extra_context='', extra_input_tokens=0):
     profile = connection.profile(model)
-    rows = list(db.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.position)))
+    rows = message_rows(db, conversation_id)
     history = completed_history(rows[:-1] if retry else rows)
     note = db.get(ContextNote, conversation_id)
     auto=db.get(AutoSummary,conversation_id);state=db.get(ConversationState,conversation_id)

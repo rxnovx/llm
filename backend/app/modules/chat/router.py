@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
 from app.modules.chat.models import Admission, ContextNote, Conversation, GenerationRun, Message
-from app.modules.chat import context as context_budget, providers, scheduler
+from app.modules.chat import context as context_budget, history, providers, scheduler
 from app.modules.integrations import config as gitlab_config, service as gitlab_connections
 from app.modules.integrations import merge_requests
 from app.modules.integrations.models import MessageContext
@@ -160,32 +160,35 @@ def active_conversations(context: Authenticated, db: Database):
 
 
 @router.get('/conversations/{conversation_id}')
-def get_conversation(conversation_id: UUID, context: Authenticated, db: Database):
+def get_conversation(conversation_id: UUID, context: Authenticated, db: Database,
+                     message_limit: history.MessageLimit = None, before_position: history.MessagePosition = None,
+                     after_position: history.MessagePosition = None, around_message_id: UUID | None = None):
     item = db.get(Conversation, str(conversation_id))
     if item is None:
         raise HTTPException(404, '대화를 찾을 수 없습니다.')
+    page_options = dict(before=before_position, after=after_position, around=around_message_id)
     if item.user_id != context.user.id:
         project = workflows.project_for(db, item.id)
         if not project_role(db, project, context.user.id):
             raise HTTPException(404, '대화를 찾을 수 없습니다.')
-        messages = db.scalars(select(Message).where(Message.conversation_id == item.id, Message.status == 'complete')
-            .order_by(Message.position))
+        messages, page = history.read(db, item.id, message_limit, shared=True, **page_options)
         documents = set(db.scalars(select(Document.id).where(Document.base_id == project.base_id))) if project.base_id else set()
         return {'conversation': conversation_data(item, shared=True),
-            'messages': [workflows.shared_payload(message, documents) for message in messages], 'generation': None}
-    messages = db.scalars(select(Message).where(Message.conversation_id == item.id).order_by(Message.position)).all()
-    if item.generation_until<=time.time() and any(m.status=='pending' for m in messages):
+            'messages': [workflows.shared_payload(message, documents) for message in messages],
+            'generation': None} | ({'message_page': page} if page is not None else {})
+    pending = (Message.conversation_id == item.id, Message.status == 'pending')
+    if item.generation_until<=time.time() and db.scalar(select(Message.id).where(*pending).limit(1)):
         scheduler.lock(db);db.refresh(item)
         if item.generation_until<=time.time():
-            for message in messages:
-                if message.status=='pending':
-                    message.status='error';message.error='이전 응답의 연결 또는 서버 작업이 중단되었습니다. 저장된 부분 답변을 확인하고 재시도하세요.'
-                    state=workflows.state_for(db,message);state.error_code='interrupted'
+            for message in db.scalars(select(Message).where(*pending)):
+                message.status='error';message.error='이전 응답의 연결 또는 서버 작업이 중단되었습니다. 저장된 부분 답변을 확인하고 재시도하세요.'
+                state=workflows.state_for(db,message);state.error_code='interrupted'
             if item.generation_id:
                 scheduler.finish(db,item.generation_id,'error')
                 run=db.get(GenerationRun,item.generation_id)
                 if run and run.status in {'queued','running','tool_waiting'}:run.status='error';run.error_code='interrupted';run.finished_at=int(time.time())
             item.generation_id=None;item.generation_until=0;db.commit()
+    messages, page = history.read(db, item.id, message_limit, **page_options)
     admission = db.scalar(select(Admission).where(Admission.request_id == item.generation_id)) if item.generation_id else None
     position = db.scalar(select(func.count(Admission.id)).join(GenerationRun).where(
         Admission.state == 'queued', Admission.id <= admission.id, Admission.expires_at > int(time.time()),
@@ -196,7 +199,7 @@ def get_conversation(conversation_id: UUID, context: Authenticated, db: Database
             'request_id': item.generation_id, 'status': admission.state if admission else 'tool_waiting', 'position': position,
         }
     return {'conversation': conversation_data(item), 'messages': [message_data(message) for message in messages],
-        'generation': generation}
+        'generation': generation} | ({'message_page': page} if page is not None else {})
 
 
 @router.post('/conversations/{conversation_id}/context/preview')
@@ -322,12 +325,12 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         GenerationRun.status.in_(['running', 'queued','tool_waiting']), GenerationRun.deadline_at <= now).values(
             status='error', error_code='interrupted', finished_at=now,
             duration_ms=(now - GenerationRun.started_at) * 1000))
-    rows = list(db.scalars(select(Message).where(Message.conversation_id == item.id).order_by(Message.position)))
-    for message in rows:
-        if message.status == 'pending':
-            message.status, message.error = 'error', '이전 응답이 중단되었습니다.'
+    messages = select(Message).where(Message.conversation_id == item.id)
+    for message in db.scalars(messages.where(Message.status == 'pending')):
+        message.status, message.error = 'error', '이전 응답이 중단되었습니다.'
     previous_message, previous_connection = None, None
     if data.retry:
+        rows = list(db.scalars(messages.order_by(Message.position.desc()).limit(2)))[::-1]
         if len(rows) < 2 or rows[-2].role != 'user' or rows[-1].role != 'assistant' or rows[-2].content != content:
             raise HTTPException(409, '마지막 메시지만 다시 생성할 수 있습니다.')
         user_message, assistant = rows[-2:]
@@ -344,9 +347,11 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         assistant.error, assistant.status = None, 'pending'
         assistant.model, assistant.is_test = model, connection.provider == 'test'
     else:
-        if len(rows) >= 400:
-            raise HTTPException(422, '이 대화가 길어졌습니다. 새 대화를 시작해 주세요.')
-        position = rows[-1].position + 1 if rows else 0
+        count, last_position = db.execute(select(func.count(Message.id), func.max(Message.position))
+            .where(Message.conversation_id == item.id)).one()
+        if count >= 400:
+            raise HTTPException(422, '한 대화에 200턴까지 저장할 수 있습니다. 새 대화로 이어가세요.')
+        position = last_position + 1 if last_position is not None else 0
         user_message = Message(conversation_id=item.id, position=position, role='user', content=content, model=model)
         assistant = Message(conversation_id=item.id, position=position + 1, role='assistant', content='',
             status='pending', model=model, is_test=connection.provider == 'test')
@@ -411,7 +416,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     if assistant.assistant_context is None:assistant.assistant_context=TurnContext(data_json=json.dumps(options))
     else:assistant.assistant_context.data_json=json.dumps(options)
     item.connection_id, item.model, item.updated_at = connection.id, model, now
-    if not rows:
+    if not data.retry and user_message.position == 0:
         db.execute(update(Conversation).where(Conversation.id == item.id, Conversation.title == '새 대화')
             .values(title=content.splitlines()[0][:60]))
         db.refresh(item, attribute_names=['title'])

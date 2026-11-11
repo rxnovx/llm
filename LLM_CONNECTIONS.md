@@ -76,6 +76,23 @@ LLM_PROVIDER_KEYS_JSON='{"office-key":"your-internal-server-key"}'
 
 운영 화면 설정은 DB에 저장되며 같은 ID의 `LLM_CONNECTIONS_JSON` 항목보다 우선합니다. 환경파일을 덮어쓰지 않습니다. 화면에서 수정한 연결의 값을 되돌릴 때는 운영 화면에서 원래 값을 다시 저장하세요. 연결 등록·변경은 감사 기록에 남기되 주소·인증키 값은 기록하지 않습니다.
 
+## 첫 연결 확인과 실패 원인
+
+1. FastAPI가 실행되는 기기나 Compose의 `api` 컨테이너에서 서버에 접근할 수 있는지 확인합니다. vLLM은 `/v1/models`, Ollama는 `/api/tags`의 실제 모델 ID를 사용합니다. [vLLM 서버](https://docs.vllm.ai/en/stable/serving/online_serving/openai_compatible_server/) · [Ollama 모델 목록](https://docs.ollama.com/api/tags)
+2. **운영 → 모델 관리 → 테스트 응답**에서 목록 조회와 짧은 스트리밍 답변을 확인합니다. 첫 모델 로딩이 길면 운영 시험의 45초 제한에 걸릴 수 있습니다. 이후 채팅에서 짧은 질문과 긴 답변을 보내 처음 출력까지 걸린 시간과 정상 종료 여부를 확인합니다.
+3. 사용할 기능별로 실제 요청을 한 번씩 보냅니다. 자동 판단·요약에는 JSON 스키마 출력, GitLab·MCP에는 도구 호출 지원, 이미지 분석에는 이미지 입력 지원이 필요합니다. 앱의 기능 설정은 서버와 모델에서 해당 기능을 지원할 때 켭니다. [vLLM 구조화 출력](https://docs.vllm.ai/en/stable/features/structured_outputs/) · [vLLM 도구 호출](https://docs.vllm.ai/en/stable/features/tool_calling/) · [Ollama 구조화 출력](https://docs.ollama.com/capabilities/structured-outputs) · [Ollama 도구 호출](https://docs.ollama.com/capabilities/tool-calling)
+
+| 증상 | 확인할 곳 |
+| --- | --- |
+| 접속 실패 또는 TLS 오류 | FastAPI 기준 주소·포트·방화벽, HTTPS 호스트 이름과 사설 CA의 `ASSISTANT_CA_BUNDLE` |
+| HTTP 401·403 | 추론 서버 API 키와 접근 권한 |
+| HTTP 404 또는 목록 형식 오류 | vLLM의 `/v1`까지 포함한 기본 주소, Ollama의 서버 루트, 등록된 모델 ID |
+| 목록 성공 후 답변 요청 거부 | 채팅 템플릿, 실제 서버 문맥 한도와 최대 출력, 이미지 입력 지원 여부 |
+| 텍스트 성공 후 자동 판단·도구 실패 | JSON 스키마 호환성, 도구를 지원하는 모델·템플릿, vLLM에서 사용하는 도구 파서 |
+| 시간 초과·HTTP 429·5xx·중간 종료 | 첫 모델 로딩 시간, GPU 메모리와 동시 요청 수, 모델 서버·프록시 로그, 대기 및 생성 제한 시간 |
+
+실제 배포의 실패율은 해당 서버에서 **실패한 시도 ÷ 전체 시도 × 100**으로 계산합니다. 콜드 스타트와 이미 로딩된 상태, 동시 요청 수, 텍스트와 도구·이미지 요청을 구분해 측정합니다. 로컬 모의 서버 검증은 앱의 요청·응답 형식과 오류 복구를 확인하는 데 사용합니다.
+
 ## 환경파일 연결·전환·해제
 
 `LLM_CONNECTIONS_JSON` 배열에 연결을 추가하면 여러 vLLM/Ollama 서버를 함께 등록할 수 있습니다. `id`는 고유한 영문·숫자·밑줄·하이픈 조합이며 최대 64자입니다. `demo`는 테스트 연결의 예약 ID입니다. 서버의 API 인증이 필요한 경우 `api_key`를 지정합니다. 이 값은 브라우저에 전달되지 않습니다.

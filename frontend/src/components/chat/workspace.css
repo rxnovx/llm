@@ -219,6 +219,8 @@
 .cw-message-error,.cw-inline-error { color:var(--error); font-size:12px; line-height:1.7; }
 .cw-stopped { color:var(--cw-muted); font-size:11px; margin-top:12px; }
 .cw-loading { text-align:center; margin-top:15px; color:var(--cw-muted); font-size:11px; }
+.cw-history-boundary { display:grid; justify-items:center; gap:6px; margin-block:4px 16px; }
+.cw-history-boundary p { margin:0; color:var(--cw-muted); font-size:12px; text-align:center; }
 .cw-error-toast { position:absolute; left:24px; right:24px; bottom:18px; display:flex; gap:12px; justify-content:space-between; align-items:center; margin:auto; max-width:700px; background:var(--error-soft); color:var(--error); border:1px solid color-mix(in srgb,var(--error) 25%,transparent); border-radius:8px; padding:12px 15px; font-size:12px; box-shadow:var(--shadow-md); z-index:40; }
 .cw-mobile-only,.cw-sidebar-scrim { display:none; }
 .cw-dialog { width:510px; --dialog-height-limit:85dvh; padding:27px; overflow-y:auto; }
