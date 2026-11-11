@@ -8,13 +8,14 @@ import time
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.modules.chat import context as context_budget
 from app.modules.chat import providers,scheduler
 from app.modules.chat.models import Message
 from app.modules.integrations import config as gitlab_config, service as gitlab_connections
 from app.modules.workspaces.models import ToolTrace
 from . import engine,gitlab,routing
 from .models import TurnDecision
-from app.modules.workflows import artifacts, images
+from app.modules.workflows import artifacts, image_inputs, image_queue, images
 
 ABSTAIN='현재 확인 가능한 근거로는 질문의 사실 관계를 충분히 검증하지 못했습니다. 확실하지 않은 내용을 단정하지 않겠습니다. 관련 자료를 추가하거나 질문 범위를 좁혀 주세요.'
 
@@ -23,10 +24,11 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
     options=dict(options or {})
     deadline=int(time.time())+settings.terminal_agent_timeout_seconds+15
     model=turn.start['conversation']['model'];question=turn.history[-1]['content']
+    image_mode = options.get('image_mode', 'auto')
     enabled=settings.assistant_automatic_enabled and options.get('automatic',True)
     manual_knowledge=bool(options.get('base_ids') or options.get('document_ids'))
     request = turn.gitlab_request
-    explicit=bool(request or selection or manual_knowledge or options.get('mcp_ids') or turn.start['assistant_message']['apps'])
+    explicit=bool(image_mode != 'auto' or request or selection or manual_knowledge or options.get('mcp_ids') or turn.start['assistant_message']['apps'])
     decision={'automatic':enabled and not explicit}
     if selection and (turn.previous_message or {}).get('routing',{}).get('automatic_project'):decision['automatic_project']=True
 
@@ -55,6 +57,69 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             if state=='running':connection=current;return
             if state!='queued':raise HTTPException(409,'자동 처리의 모델 대기가 중단되었습니다.')
             await asyncio.sleep(.25)
+
+    async def render_image(mode, prompt, reference_id=None):
+        editing = mode == 'edit'
+        phase = 'edit_image' if editing else 'generate_image'
+        label = '이미지 편집' if editing else '이미지 생성'
+        url = settings.image_edit_url if editing else settings.image_generation_url
+        decision.update(route='image_edit' if editing else 'image', status='running');save()
+        try:
+            if connection.provider == 'test' or not url.strip():
+                raise HTTPException(503, f'{label} 서버가 설정되어 있지 않습니다.')
+            source_options = options | {'image_artifact_id': reference_id} if reference_id else options
+            if editing and not (source_options.get('image_artifact_id') or source_options.get('document_ids')):
+                raise HTTPException(422, '편집할 이미지를 선택하거나 첨부하세요.')
+            async for state in image_queue.wait(bind, user_id, turn.request_id, settings):
+                yield 'queue', state
+            if cancelled():raise engine.AnalysisCancelled()
+            yield 'activity', record(phase, 'running', f'{label} 중입니다.')
+            if editing:
+                source, = await image_inputs.load(bind, user_id, turn.conversation_id, source_options,
+                    mode='edit', before_message_id=turn.assistant_id)
+                if cancelled():raise engine.AnalysisCancelled()
+                file = await images.edit(bind, user_id, turn.assistant_id, turn.request_id, prompt, source, settings)
+            else:
+                file = await images.generate(bind, user_id, turn.assistant_id, turn.request_id, prompt, settings)
+        except image_queue.Cancelled:
+            raise engine.AnalysisCancelled() from None
+        except HTTPException as error:
+            yield 'activity', record(phase, 'error', str(error.detail))
+            raise
+        finally:
+            image_queue.finish(bind, turn.request_id)
+        if cancelled():raise engine.AnalysisCancelled()
+        artifacts.finalize(bind, user_id, turn.request_id, [file['id']], approve=True)
+        decision['status'] = 'complete';save()
+        detail = '이미지를 편집했습니다.' if editing else '이미지를 생성했습니다.'
+        yield 'activity', record(phase, 'complete', detail)
+        yield 'artifact', file
+        yield 'delta', {'content': detail}
+
+    if image_mode in {'generate', 'edit'}:
+        async with aclosing(render_image(image_mode, question)) as iterator:
+            async for event in iterator:yield event
+        return
+    if image_mode == 'vision':
+        decision.update(route='vision', status='running');save()
+        yield 'activity', record('analyze_image', 'running', '첨부 이미지를 분석하고 있습니다.')
+        try:
+            inputs = await image_inputs.load(bind, user_id, turn.conversation_id, options,
+                mode='vision', before_message_id=turn.assistant_id)
+            with Session(bind) as db:
+                history, report = context_budget.plan(db, turn.conversation_id, connection, model, question,
+                    extra_input_tokens=len(inputs) * providers.VISION_IMAGE_TOKENS)
+            yield 'context', report
+            if cancelled():raise engine.AnalysisCancelled()
+            async for part in providers.stream_reply(connection, model, history, settings, images=inputs):
+                yield 'delta', {'content': part}
+        except (HTTPException, providers.ProviderError) as error:
+            detail = str(error.detail) if isinstance(error, HTTPException) else str(error)
+            yield 'activity', record('analyze_image', 'error', detail)
+            raise
+        decision['status'] = 'complete';save()
+        yield 'activity', record('analyze_image', 'complete', '이미지 분석을 마쳤습니다.')
+        return
 
     await release()
     available=routing.resources(bind,user_id,turn.conversation_id,options)
@@ -91,34 +156,45 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             selection = None  # The existing file-only path handles explicit file scope.
     if enabled and not explicit:
         available['image_generation'] = bool(settings.image_generation_url.strip() and connection.provider != 'test')
+        reference_id = None
+        if settings.image_edit_url.strip() and connection.provider != 'test':
+            with Session(bind) as db:
+                reference_id = image_inputs.latest_artifact_id(db, user_id, turn.conversation_id,
+                    before_message_id=turn.assistant_id)
+        available['image_edit'] = bool(reference_id)
         yield 'activity',record('route_decision','running','요청에 필요한 처리 방식을 판단하고 있습니다.')
         await acquire()
+        fallback = False
         try:
-            async with asyncio.timeout(settings.llm_timeout_seconds):plan=await routing.decide(connection,model,question,available,settings)
+            async with asyncio.timeout(settings.llm_timeout_seconds):
+                plan = await routing.decide(connection, model, question, available, settings)
+        except (providers.ProviderError, TimeoutError):
+            fallback = True
         finally:await release()
+        if fallback:
+            decision.update(route='direct', fallback='route_decision', status='running');save()
+            yield 'activity', record('route_decision', 'error', '자동 판단을 완료하지 못해 일반 채팅으로 이어갑니다.')
+            await acquire()
+            try:
+                yield 'context', turn.start['context']
+                async with asyncio.timeout(settings.llm_timeout_seconds):
+                    async for part in providers.stream_reply(connection, model, turn.history, settings):
+                        yield 'delta', {'content': part}
+            finally:await release()
+            decision['status'] = 'complete';save()
+            return
         hint=routing.project_hint(question)
         if hint and plan.route in {'gitlab','both'} and not plan.project:plan.project=hint
         if hint and plan.route=='direct':plan.needs_review=True
         if plan.uncertain and available['retrieval_allowed'] and available['knowledge_ready'] and plan.route=='direct':plan.route='knowledge'
         decision.update(route=plan.route,uncertain=plan.uncertain,status='running');save()
-        label={'direct':'일반 답변','knowledge':'문서 검색','gitlab':'GitLab 소스 분석','both':'GitLab 분석과 문서 검색','clarify':'대상 확인','mcp':'연결된 앱 조회','image':'이미지 생성'}[plan.route]
+        label={'direct':'일반 답변','knowledge':'문서 검색','gitlab':'GitLab 소스 분석','both':'GitLab 분석과 문서 검색','clarify':'대상 확인','mcp':'연결된 앱 조회','image':'이미지 생성','image_edit':'이미지 편집'}[plan.route]
         yield 'activity',record('route_decision','complete',label+' 경로를 선택했습니다.')
-        if plan.route == 'image':
-            yield 'activity', record('generate_image', 'running', '이미지를 생성하고 있습니다.')
-            try:
-                if not available['image_generation']:
-                    raise HTTPException(503, '이미지 생성 서버가 설정되어 있지 않습니다.')
-                file = await images.generate(bind, user_id, turn.assistant_id, turn.request_id,
-                    plan.image_prompt.strip() or question, settings)
-            except HTTPException as error:
-                yield 'activity', record('generate_image', 'error', str(error.detail))
-                raise
-            artifacts.finalize(bind, user_id, turn.request_id, [file['id']], approve=True)
-            decision['status'] = 'complete'
-            save()
-            yield 'activity', record('generate_image', 'complete', '이미지를 생성했습니다.')
-            yield 'artifact', file
-            yield 'delta', {'content': '이미지를 생성했습니다.'}
+        if plan.route in {'image', 'image_edit'}:
+            editing = plan.route == 'image_edit'
+            async with aclosing(render_image('edit' if editing else 'generate',
+                    plan.image_prompt.strip() or question, reference_id if editing else None)) as iterator:
+                async for event in iterator:yield event
             return
         if plan.route=='clarify':
             decision['status']='clarification';save()

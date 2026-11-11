@@ -266,6 +266,29 @@ test("connection edits forward JSON and authorization, enforce CSRF and bound th
   assert.equal(received,before);
 });
 
+test("image diagnostics proxy forwards only the status read and same-origin probe", async () => {
+  mode = "tokens";
+  const status = `${origin}/api/admin/images`;
+  const probe = `${status}/probe`;
+  const authorization = "Bearer operator";
+  assert.equal((await fetch(status, { headers: { authorization, cookie: "private=value" } })).status, 200);
+  assert.equal(received.path, "/admin/images");
+  assert.equal(received.headers.authorization, authorization);
+  assert.equal(received.headers.cookie, undefined);
+  assert.equal((await fetch(probe, { method: "POST", body: '{"mode":"edit"}' })).status, 403);
+  assert.equal((await fetch(probe, { method: "POST", headers: { ...csrf, origin: "https://elsewhere.example" } })).status, 403);
+  assert.equal((await fetch(probe, { method: "POST", headers: { ...csrf, authorization }, body: '{"mode":"edit"}' })).status, 200);
+  assert.equal(received.path, "/admin/images/probe");
+  assert.deepEqual(JSON.parse(received.body), { mode: "edit" });
+  const cancel = "/admin/images/probe/32847bb8-028d-4824-a8bc-a063f1ae08ff/cancel";
+  assert.equal((await fetch(`${origin}/api${cancel}`, { method: "POST" })).status, 403);
+  assert.equal((await fetch(`${origin}/api${cancel}`, { method: "POST", headers: { ...csrf, authorization } })).status, 200);
+  assert.equal(received.path, cancel);
+  assert.equal((await fetch(`${probe}/invalid-id/cancel`, { method: "POST", headers: csrf })).status, 404);
+  assert.equal((await fetch(probe)).status, 404);
+  assert.equal((await fetch(status, { method: "PATCH", headers: csrf })).status, 404);
+});
+
 test("context preview and summary edits keep chat route and CSRF boundaries", async () => {
   mode = "tokens";
   const path = "conversations/12345678-1234-1234-1234-123456789abc/context";

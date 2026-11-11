@@ -1,9 +1,10 @@
 """Server-configured adapters. No request can supply an upstream URL or API key."""
 import asyncio
-from collections.abc import AsyncIterator
+from base64 import b64encode
+from collections.abc import AsyncIterator, Sequence
 import json
 import secrets
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -12,6 +13,13 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, m
 from app.core.config import Settings
 from app.core.tls import assistant_tls
 from . import usage
+
+if TYPE_CHECKING:
+    from app.modules.workflows.images import ImageData
+
+# Providers report actual image token usage when available. This allowance is
+# used for context planning and for quotas before the provider returns counts.
+VISION_IMAGE_TOKENS = 1024
 
 
 class ProviderError(Exception):
@@ -25,6 +33,7 @@ class ModelProfile(BaseModel):
     max_output_tokens: int = Field(2048, ge=64, le=16384)
     max_concurrent: int = Field(2, ge=1, le=64)
     supports_tools: bool = False
+    supports_vision: bool = False
 
     @model_validator(mode='after')
     def budget(self):
@@ -52,6 +61,7 @@ class Connection(BaseModel):
     max_output_tokens: int = Field(2048, ge=64, le=16384)
     max_concurrent: int = Field(2, ge=1, le=64)
     supports_tools: bool = False
+    supports_vision: bool = False
 
     @model_validator(mode='after')
     def validate_url(self):
@@ -76,14 +86,16 @@ class Connection(BaseModel):
         if self.models:
             raise ProviderError('이 연결에서 허용되지 않은 모델입니다.')
         return ModelProfile(name=model or self.model or 'demo', context_window=self.context_window,
-            max_output_tokens=self.max_output_tokens, max_concurrent=self.max_concurrent,supports_tools=self.supports_tools)
+            max_output_tokens=self.max_output_tokens, max_concurrent=self.max_concurrent,
+            supports_tools=self.supports_tools, supports_vision=self.supports_vision)
 
     def public(self):
         return {'id': self.id, 'name': self.name, 'provider': self.provider,
                 'default_model': self.model, 'is_test': self.provider == 'test',
                 'models': [item.model_dump() for item in self.models],
                 'context_window': self.context_window, 'max_output_tokens': self.max_output_tokens,
-                'max_concurrent': self.max_concurrent,'supports_tools':self.supports_tools}
+                'max_concurrent': self.max_concurrent, 'supports_tools': self.supports_tools,
+                'supports_vision': self.supports_vision}
 
 
 def connections(settings: Settings, db=None, user=None, *, include_disabled=False) -> list[Connection]:
@@ -152,8 +164,11 @@ DEMO_REPLIES = [
 
 
 async def stream_reply(connection: Connection, model: str, history: list[dict], settings: Settings, *,
-                       max_tokens=None, temperature=None, top_p=None, stop=None, metadata=None) -> AsyncIterator[str]:
+                       max_tokens=None, temperature=None, top_p=None, stop=None, metadata=None,
+                       images: Sequence['ImageData'] = ()) -> AsyncIterator[str]:
     if connection.provider == 'test':
+        if images:
+            raise ProviderError('이미지 분석을 지원하는 실제 채팅 모델을 선택하세요.')
         reply = secrets.choice(DEMO_REPLIES)
         for index in range(0, len(reply), 9):
             await asyncio.sleep(0.025)
@@ -170,11 +185,28 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
             payload['stream_options'] = {'include_usage': True}
     else:
         payload['options'] = options | {'num_predict': output_limit, 'num_ctx': profile.context_window}
+    request_payload = payload
+    if images:
+        if not profile.supports_vision:
+            raise ProviderError('선택한 모델에 이미지 입력 지원이 설정되어 있지 않습니다.')
+        if not history or history[-1].get('role') != 'user' or not isinstance(history[-1].get('content'), str):
+            raise ProviderError('이미지와 함께 보낼 사용자 메시지를 확인하세요.')
+        latest = history[-1]
+        encoded = [b64encode(image.data).decode('ascii') for image in images]
+        if vllm:
+            parts = [{'type': 'text', 'text': latest['content']}]
+            parts.extend({'type': 'image_url', 'image_url': {'url': f'data:{image.mime_type};base64,{value}'}}
+                for image, value in zip(images, encoded))
+            latest = latest | {'content': parts}
+        else:
+            latest = latest | {'images': encoded}
+        request_payload = payload | {'messages': [*history[:-1], latest]}
     complete = False
-    with usage.measure(connection, model, payload, output_limit, settings.llm_timeout_seconds) as meter:
+    with usage.measure(connection, model, payload, output_limit, settings.llm_timeout_seconds,
+                       extra_input_tokens=len(images) * VISION_IMAGE_TOKENS) as meter:
         try:
             async with client(connection, settings.llm_timeout_seconds) as session:
-                async with session.stream('POST', endpoint(connection, 'chat/completions' if vllm else 'api/chat'), json=payload) as response:
+                async with session.stream('POST', endpoint(connection, 'chat/completions' if vllm else 'api/chat'), json=request_payload) as response:
                     if not response.is_success:
                         raise ProviderError('모델 서버가 요청을 거부했습니다. 모델 이름과 서버 인증을 확인해 주세요.')
                     meter.accepted = True

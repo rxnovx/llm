@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.orm import Session, aliased
@@ -21,6 +22,7 @@ from app.modules.chat.models import ConnectionSetting, Conversation, GenerationR
 from app.modules.chat import providers, registry, scheduler, usage
 from app.modules.chat.independent import admitted
 from app.modules.auth.audit import add_audit_log
+from app.modules.workflows import image_queue, images
 
 router = APIRouter(prefix='/admin', tags=['operations'])
 Database = Annotated[Session, Depends(get_db)]
@@ -175,6 +177,104 @@ def managed_connections(context: Admin, db: Database):
         return registry.management_data(get_settings(), db)
     except providers.ProviderError as error:
         raise HTTPException(503, str(error)) from None
+
+
+class ImageProbeInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    mode: Literal['generate', 'edit']
+    request_id: UUID = Field(default_factory=uuid4)
+
+
+def image_providers(settings):
+    return {
+        'generate': {'configured': bool(settings.image_generation_url.strip()),
+                     'model': settings.image_generation_model.strip() or None},
+        'edit': {'configured': bool(settings.image_edit_url.strip()),
+                 'model': settings.image_edit_model.strip() or None},
+    }
+
+
+@router.get('/images')
+def image_status(context: Admin, db: Database):
+    settings = get_settings()
+    return image_providers(settings) | {
+        'limits': {
+            'max_concurrent': settings.image_max_concurrent,
+            'user_concurrency': settings.image_user_concurrency,
+            'queue_capacity': settings.image_queue_capacity,
+            'queue_wait_seconds': settings.image_queue_wait_seconds,
+            'timeout_seconds': settings.image_generation_timeout_seconds,
+        },
+        'queue': image_queue.counts(db),
+    }
+
+
+@router.post('/images/probe')
+async def probe_image(data: ImageProbeInput, request: Request, context: Admin, db: Database):
+    settings = get_settings()
+    if not image_providers(settings)[data.mode]['configured']:
+        return JSONResponse(status_code=503, content={
+            'code': 'disabled', 'detail': '이미지 서버 주소를 환경 설정에 등록해 주세요.',
+        })
+
+    bind, user_id, request_id = db.get_bind(), context.user.id, str(uuid4())
+    db.rollback()
+    started = time.monotonic()
+    running = False
+
+    def cancelled():
+        with Session(bind) as session:
+            return image_queue.probe_cancelled(session, user_id, request_id)
+
+    async def run():
+        nonlocal running
+        wait = image_queue.wait(bind, user_id, request_id, settings, chat=False, probe_id=str(data.request_id))
+        async with aclosing(wait) as queue:
+            async for _ in queue:
+                pass
+        running = True
+        if cancelled():
+            raise image_queue.Cancelled()
+        return await images.probe(settings, data.mode)
+
+    task = asyncio.create_task(run())
+    code, status, headers = 'ok', 200, None
+    try:
+        while not task.done():
+            if await request.is_disconnected() or running and cancelled():
+                raise image_queue.Cancelled()
+            await asyncio.wait({task}, timeout=0.5)
+        result = task.result()
+        payload = result | {'elapsed_ms': round((time.monotonic() - started) * 1000)}
+    except image_queue.Cancelled:
+        code, status = 'cancelled', 409
+        payload = {'code': code, 'detail': '이미지 서버 진단이 취소되었습니다.'}
+    except images.ImageError as error:
+        code, status = error.code, error.status_code
+        payload = {'code': code, 'detail': str(error.detail)}
+    except HTTPException as error:
+        status, headers = error.status_code, error.headers
+        code = {429: 'queue_full', 504: 'queue_timeout'}.get(status, 'queue_error')
+        payload = {'code': code, 'detail': str(error.detail)}
+    finally:
+        task.cancel()
+        try:
+            await asyncio.gather(task, return_exceptions=True)
+        finally:
+            image_queue.finish(bind, request_id)
+
+    add_audit_log(db, action='admin.image.probe', outcome='success' if status == 200 else 'failure',
+                  actor_user_id=user_id, request=request, details={'mode': data.mode, 'code': code})
+    db.commit()
+    return JSONResponse(status_code=status, content=payload, headers=headers)
+
+
+@router.post('/images/probe/{request_id}/cancel', status_code=204)
+def cancel_image_probe(request_id: UUID, context: Admin, db: Database):
+    if not image_queue.request_probe_cancel(db, context.user.id, str(request_id)):
+        raise HTTPException(404, '진단 요청이 아직 접수되지 않았거나 이미 종료되었습니다.')
+    db.commit()
+    return Response(status_code=204)
 
 
 def save_connection(data: registry.ConnectionInput, context, db, *, creating=False):

@@ -26,22 +26,37 @@ Ollama의 base URL은 `/api` 없이 서버 루트로 지정합니다. 앱은 `GE
 
 ## 이미지 생성 서버 연결
 
-Compose는 루트 `.env`, 개별 실행은 `backend/.env`에 FastAPI가 접속할 수 있는 전체 이미지 생성 API 주소를 추가합니다.
+Compose는 루트 `.env`, 개별 실행은 `backend/.env`에 FastAPI가 접속할 수 있는 전체 API 주소를 추가합니다.
 
 ```dotenv
 IMAGE_GENERATION_URL=http://192.168.0.20:8091/v1/images/generations
 IMAGE_GENERATION_MODEL=
 IMAGE_GENERATION_API_KEY=
+IMAGE_EDIT_URL=http://192.168.0.20:8092/v1/images/edits
+IMAGE_EDIT_MODEL=
+IMAGE_EDIT_API_KEY=
 IMAGE_GENERATION_TIMEOUT_SECONDS=180
+IMAGE_MAX_CONCURRENT=1
+IMAGE_USER_CONCURRENCY=1
+IMAGE_QUEUE_CAPACITY=20
+IMAGE_QUEUE_WAIT_SECONDS=120
 ```
 
-서버가 기본 모델을 지정한 경우 모델 ID를 비워 둘 수 있습니다. 서버 인증을 사용하는 경우에만 키를 입력합니다. URL을 비우면 이미지 생성 기능이 꺼집니다. 설정을 바꾼 뒤 개별 실행에서는 `python main.py`로 백엔드를 다시 시작하고, Compose에서는 `docker compose up -d --force-recreate api`로 API 컨테이너를 다시 만듭니다.
+필요한 기능의 URL만 설정합니다. 서버 기본 모델을 사용하면 모델 ID를 비워 두고, 서버 인증을 사용할 경우 키를 입력합니다. 설정 변경 후 개별 실행에서는 `python main.py`로 백엔드를 다시 시작하고, Compose에서는 `docker compose up -d --force-recreate api`로 API 컨테이너를 다시 만듭니다.
 
-채팅에서 구조화 출력을 지원하는 실제 vLLM 또는 Ollama 모델을 선택한 후 “안개 낀 숲의 수채화 이미지를 만들어줘”처럼 요청합니다. 자동 처리가 켜진 일반 대화에서는 채팅 모델이 생성 요청을 판단하고 백엔드가 이미지 서버에 프롬프트를 보냅니다. 앱·자료를 직접 선택한 요청은 해당 도구를 우선 사용합니다. 테스트 연결은 이미지 서버를 호출하지 않습니다.
+운영 화면 **모델 관리 → 이미지 서버 진단**에서 생성·편집 서버에 시험 요청을 보냅니다. 접속, 인증, 응답 형식, 시간 초과를 구분하며 시험 결과는 채팅 파일로 저장하지 않습니다. 각 시험은 실제 추론을 한 번 요청합니다.
 
-vLLM-Omni처럼 한 장의 `data[0].b64_json`을 반환하는 이미지 생성 API에 연결합니다. 지원 형식은 PNG·JPEG·WebP이며 한 장당 최대 10MiB, 1,600만 픽셀입니다. 생성 결과는 해당 계정의 대화에 저장되어 다시 열거나 다운로드할 수 있습니다. [vLLM-Omni 이미지 생성 API](https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/image_generation_api/)
+채팅 입력창 **요청 유형**에서 **이미지 생성**을 선택하면 입력한 프롬프트로 바로 생성합니다. **이미지 편집**은 첨부 한 장이나 해당 대화의 최신 생성 결과를 사용합니다. 생성물의 **이 이미지 편집**을 누르면 그 결과를 참조합니다. 편집 결과는 새 답변으로 저장됩니다. 구조화 출력을 지원하는 모델과 자동 처리에서는 “방금 만든 이미지 배경만 파란색으로 바꿔줘”처럼 요청할 수 있고, 판단 응답이 실패하면 일반 채팅으로 이어집니다.
 
-`IMAGE_GENERATION_TIMEOUT_SECONDS`는 이미지 서버 호출 시간에 적용됩니다. 자동 판단과 생성을 합친 작업은 기존 `TERMINAL_AGENT_TIMEOUT_SECONDS` 안에 마쳐야 합니다. 이미지 생성 중에는 채팅 모델의 추론 허가를 반납하므로 다른 대화에서 텍스트 답변을 받을 수 있습니다. 이미지 생성의 동시 처리 수는 이미지 서버에서 관리합니다.
+생성과 편집은 한 장의 `data[0].b64_json`을 받으며 편집은 원본을 `image` 필드에 담아 multipart로 보냅니다. PNG·JPEG·WebP를 지원하며 파일당 최대 10MiB와 1,600만 픽셀입니다. 결과는 해당 계정의 대화에 보관합니다. [생성 API](https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/image_generation_api/) · [편집 API](https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/image_edit_api/)
+
+생성·편집·시험 요청은 같은 DB 대기열을 공유합니다. 앱이 이미지 서버에 보내는 동시 요청은 기본 전체 1건, 계정당 1건입니다. 대기 중 순서와 취소 버튼이 표시되며 대화를 다시 열어도 확인할 수 있습니다. 이미지 작업 중에도 다른 대화에서 채팅 모델을 사용할 수 있습니다. `IMAGE_GENERATION_TIMEOUT_SECONDS`는 서버 호출에, `IMAGE_QUEUE_WAIT_SECONDS`는 대기에 적용됩니다. 자동 판단을 거치는 요청은 `TERMINAL_AGENT_TIMEOUT_SECONDS` 안에 마쳐야 합니다. 설정을 늘리면 프론트엔드 `LLM_REQUEST_TIMEOUT_MS`도 전체 요청 시간에 맞춥니다. 취소 시 앱은 서버 연결을 닫으며, GPU 작업의 종료는 이미지 서버의 취소 동작에 따릅니다.
+
+## 첨부 이미지 분석
+
+운영 화면 **모델 관리**에서 이미지 입력을 지원하는 연결 또는 모델의 **이미지 입력 사용**을 켭니다. 환경설정에서는 연결 또는 개별 `models` 항목에 `"supports_vision": true`를 지정합니다. 채팅 입력창에서 **이미지 분석**을 선택한 뒤 PNG·JPEG·WebP를 첨부하고 질문합니다. 한 번에 네 장, 전체 10MiB까지 지원합니다. 대화 첨부는 24시간 동안 분석과 편집에서 다시 선택할 수 있습니다.
+
+선택한 이미지 원본을 현재 메시지에 포함해 vLLM 또는 Ollama로 보냅니다. 이미지 사용량은 서버의 보고값을 우선하며, 보고값이 없으면 장당 1,024토큰으로 추정합니다. 지식 검색에 이미지를 첨부하는 기존 OCR 흐름도 사용할 수 있습니다. [vLLM 이미지 입력](https://docs.vllm.ai/en/latest/features/multimodal_inputs/) · [Ollama 이미지 입력](https://docs.ollama.com/capabilities/vision)
 
 ## 운영 화면에서 연결 관리
 
@@ -83,7 +98,7 @@ LLM_PROVIDER_KEYS_JSON='{"office-key":"your-internal-server-key"}'
 
 채팅의 **문맥**에서 입력 추정·제외 턴·출력 예약을 확인하고 요약 메모를 직접 작성합니다. 메모가 요약한 범위를 선택하면 해당 범위 원문 대신 메모를 다음 요청에 포함합니다. 오래된 대화는 자동 요약 설정으로 관리합니다. 요약된 중요 조건은 문맥 화면에서 확인할 수 있습니다. 요약에 포함한 마지막 답변을 재생성하려면 먼저 요약 범위를 조정하세요. 대화 기록은 삭제하지 않습니다.
 
-`LLM_TIMEOUT_SECONDS`는 모델 생성 단계의 제한 시간입니다. 대기 시간은 `LLM_QUEUE_WAIT_SECONDS`로 별도 제한합니다. 프론트엔드의 `LLM_REQUEST_TIMEOUT_MS`는 두 시간의 합보다 여유 있게, Nginx의 `proxy_read_timeout`도 그보다 길게 맞춥니다. 기본값은 생성 120초 + 대기 30초, 프록시 180초, Nginx 210초입니다. **기존 `.env`의 150000 값은 자동으로 바뀌지 않으므로 180000 이상으로 직접 수정하세요.** BFF와 Nginx는 답변을 버퍼링하지 않도록 구성합니다.
+`LLM_TIMEOUT_SECONDS`는 모델 생성 단계의 제한 시간입니다. 대기 시간은 `LLM_QUEUE_WAIT_SECONDS`로 별도 제한합니다. 기본값은 생성 120초, 대기 30초, 프론트엔드의 전체 요청 제한 `LLM_REQUEST_TIMEOUT_MS` 900초입니다. 예전 `.env`에 더 짧은 전체 제한이 있다면 사용하는 작업의 대기·추론 시간에 맞추세요. 채팅 스트림은 15초마다 연결을 유지하는 신호를 보내며, BFF와 Nginx는 답변을 버퍼링하지 않도록 구성합니다.
 
 ## 동시 요청과 대기열
 

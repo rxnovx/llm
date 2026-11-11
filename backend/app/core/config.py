@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     image_generation_model: str = Field('', max_length=200)
     image_generation_api_key: SecretStr = SecretStr('')
     image_generation_timeout_seconds: int = Field(180, ge=5, le=600)
+    image_edit_url: str = ''
+    image_edit_model: str = Field('', max_length=200)
+    image_edit_api_key: SecretStr = SecretStr('')
+    image_max_concurrent: int = Field(1, ge=1, le=64)
+    image_user_concurrency: int = Field(1, ge=1, le=64)
+    image_queue_capacity: int = Field(20, ge=1, le=500)
+    image_queue_wait_seconds: int = Field(120, ge=1, le=600)
     knowledge_enabled: bool = True
     knowledge_worker_enabled: bool = True
     knowledge_ocr_enabled: bool = True

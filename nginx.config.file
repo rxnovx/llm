@@ -28,6 +28,10 @@ server {
         client_max_body_size 21m;
         proxy_pass http://127.0.0.1:3000;
     }
+    location = /api/admin/images/probe {
+        proxy_read_timeout 1215s;
+        proxy_pass http://127.0.0.1:3000;
+    }
     location / {
         # Compose web is bound to loopback; the bundled Nginx may be omitted.
         proxy_pass http://127.0.0.1:3000;

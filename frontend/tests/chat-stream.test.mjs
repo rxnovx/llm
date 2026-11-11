@@ -55,11 +55,20 @@ test("queue and estimated context events survive split UTF-8 and remain nontermi
 });
 
 test("invalid queue positions and states fail and release the reader", async () => {
-  for (const data of [{status:"queued",position:-1}, {status:"queued",position:1.5}, {status:"unknown",position:0}]) {
+  for (const data of [{status:"queued",position:-1}, {status:"queued",position:1.5}, {status:"unknown",position:0}, {status:"queued",position:1,kind:"unknown"}]) {
     const source = stream(encoder.encode(`event: queue\ndata: ${JSON.stringify(data)}\n\n`));
     await assert.rejects(() => readChatStream(source, () => {}), /대기열/);
     assert.equal(source.locked, false);
   }
+});
+
+test("image admission preserves queue kind through the running event", async () => {
+  const queued = { status: "queued", position: 2, request_id: "image-request", kind: "image" };
+  const running = { ...queued, status: "running", position: 0 };
+  const value = [queued, running].map(data => `event: queue\ndata: ${JSON.stringify(data)}\n\n`).join("") + events;
+  const received = [];
+  await readChatStream(stream(encoder.encode(value), 5), event => received.push(event));
+  assert.deepEqual(received.filter(event => event.event === "queue").map(event => event.data), [queued, running]);
 });
 
 test("app reading and bounded source events arrive before a terminal answer", async () => {

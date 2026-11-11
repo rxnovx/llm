@@ -17,3 +17,10 @@ export type OpsRequest = { id: string; username: string | null; model: string; c
 export type OpsUser = { id: string; username: string; display_name: string | null; is_active: boolean; is_admin: boolean; created_at: number; last_login_at: number | null; sessions: number };
 export type OpsAudit = { id: string; action: string; outcome: string; actor: string | null; target: string | null; created_at: number };
 export type OpsPage<T> = { items: T[]; has_more: boolean };
+
+export type ImageProbeMode = "generate" | "edit";
+export type ImageServers = Record<ImageProbeMode, { configured: boolean; model: string | null }> & {
+  limits: { max_concurrent: number; user_concurrency: number; queue_capacity: number; queue_wait_seconds: number; timeout_seconds: number };
+  queue: { queued: number; running: number };
+};
+export type ImageProbeResult = { status: "ok"; format: string; size: number; elapsed_ms: number };

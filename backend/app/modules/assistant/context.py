@@ -3,7 +3,7 @@ from uuid import UUID
 from typing import Literal
 from app.core.config import get_settings
 from fastapi import HTTPException
-from pydantic import BaseModel,ConfigDict,Field,field_validator
+from pydantic import BaseModel,ConfigDict,Field,field_validator,model_validator
 from sqlalchemy import select
 from app.modules.knowledge import service as knowledge
 from .models import Memory,Preference
@@ -18,6 +18,14 @@ class Selection(BaseModel):
     parallel_agents: bool=False
     automatic: bool=True
     rag_mode: Literal['auto','always','off']='auto'
+    image_mode: Literal['auto','generate','vision','edit']='auto'
+    image_artifact_id: UUID|None=None
+
+    @model_validator(mode='after')
+    def image_reference(self):
+        if self.image_artifact_id and self.image_mode not in {'vision', 'edit'}:
+            raise ValueError('이미지 참조는 이미지 이해 또는 편집에서 사용할 수 있습니다.')
+        return self
 
     @field_validator('mcp_ids')
     @classmethod
@@ -28,6 +36,21 @@ class Selection(BaseModel):
         return value
 
 def validate(db,user_id,conversation_id,selection,connection,model):
+    mode = selection.get('image_mode', 'auto')
+    if mode != 'auto':
+        settings = get_settings()
+        if connection.provider == 'test':
+            raise HTTPException(422, '이미지 기능을 사용하려면 실제 모델 연결을 선택하세요.')
+        if mode == 'vision':
+            if not connection.profile(model).supports_vision:
+                raise HTTPException(422, '이미지 입력을 지원하도록 설정된 모델을 선택하세요.')
+            if not selection.get('document_ids') and not selection.get('image_artifact_id'):
+                raise HTTPException(422, '분석할 이미지를 첨부하세요.')
+        if mode == 'generate' and not settings.image_generation_url.strip():
+            raise HTTPException(503, '이미지 생성 서버가 설정되어 있지 않습니다.')
+        if mode == 'edit' and not settings.image_edit_url.strip():
+            raise HTTPException(503, '이미지 편집 서버가 설정되어 있지 않습니다.')
+        return
     if selection.get('base_ids') or selection.get('document_ids'):
         knowledge.selected_documents(db,user_id,selection,conversation_id)
     for server_id in selection.get('mcp_ids',[]):mcp.allowed(db,user_id,server_id)
@@ -52,7 +75,11 @@ def active(db,user_id,selection,*,question='',conversation_id='',connection=None
     if hint(question):return True
     settings = get_settings()
     if not settings.assistant_automatic_enabled or not selection.get('automatic',True):return False
-    if settings.image_generation_url.strip() and connection and connection.provider != 'test':return True
+    if connection and connection.provider != 'test':
+        if settings.image_generation_url.strip():return True
+        if settings.image_edit_url.strip():
+            from app.modules.workflows import image_inputs
+            if image_inputs.latest_artifact_id(db, user_id, conversation_id):return True
     if mcp.catalog(db,user_id):return True
     from .routing import connection_catalog,project_hint
     if project_hint(question) or selection.get('rag_mode')=='always':return True

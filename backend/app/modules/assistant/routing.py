@@ -24,7 +24,7 @@ from app.modules.workspaces.models import Workspace
 
 class Plan(BaseModel):
     model_config=ConfigDict(extra='forbid')
-    route: Literal['direct','knowledge','gitlab','both','mcp','image','clarify']='direct'
+    route: Literal['direct','knowledge','gitlab','both','mcp','image','image_edit','clarify']='direct'
     mcp_ids: list[str]=Field(default_factory=list,max_length=3)
     query: str=Field('',max_length=400)
     project: str=Field('',max_length=300)
@@ -108,9 +108,14 @@ async def decide(connection,model,question,available,settings):
             'Use the normal routes for writing an image prompt, explaining image generation or analyzing an attachment.')
     else:
         instruction += ' Image generation is unavailable; choose another route.'
+    if available.get('image_edit'):
+        instruction += (' Use image_edit when the user explicitly wants to change the previous generated image. '
+            'Put the requested changes in image_prompt. The application selects the reference from this conversation.')
+    else:
+        instruction += ' Editing a previous image is unavailable; choose another route.'
     messages=[{'role':'system','content':instruction},{'role':'user','content':json.dumps(
         {'question':question.encode()[:5000].decode(errors='ignore'),'available':available,'project_hint':hint},ensure_ascii=False)}]
-    if not fits(connection,model,messages,Plan.model_json_schema()):raise HTTPException(422,'자동 판단의 문맥 예산이 부족합니다. 질문을 줄이거나 더 큰 문맥의 모델을 선택하세요.')
+    if not fits(connection,model,messages,Plan.model_json_schema()):raise providers.ProviderError('자동 판단의 문맥 예산이 부족합니다.')
     try:return Plan.model_validate(await providers.structured_reply(connection,model,messages,Plan.model_json_schema(),settings))
     except ValidationError:raise providers.ProviderError('자동 판단의 프로젝트·검색 응답 형식이 올바르지 않습니다.') from None
 

@@ -302,3 +302,15 @@
   text-align:center;
 }
 .cw-result-image-status p { margin:0 0 4px; }
+.cw-image-mode { color:var(--cw-ink); max-inline-size:100%; }
+.cw-image-mode option { background:var(--cw-panel); color:var(--cw-ink); }
+.cw-image-inputs { display:flex; flex-wrap:wrap; gap:6px; list-style:none; padding:0; margin:0 0 8px; }
+.cw-image-inputs li {
+  display:flex; align-items:center; gap:6px; min-width:0; max-width:100%;
+  border:1px solid var(--cw-line); border-radius:var(--radius-control);
+  background:var(--cw-soft); padding:2px 4px 2px 8px; font-size:11px;
+}
+.cw-image-inputs li span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cw-image-inputs button { flex-shrink:0; }
+.cw-existing-images { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-top:6px; }
+.cw-existing-images select { min-width:0; max-width:min(100%, 280px); }

@@ -71,7 +71,7 @@ app.add_middleware(CORSMiddleware, allow_origins=[h.strip() for h in settings.co
 async def validation_error(request, error):
     if request.url.path.startswith('/v1/'):
         return JSONResponse(status_code=400, content=error_data(400, '모델과 메시지 형식을 확인하세요.'))
-    if request.url.path.startswith(('/admin/connections', '/apps', '/workspaces','/assistant','/knowledge','/workflows')):
+    if request.url.path.startswith(('/admin/connections', '/admin/images', '/apps', '/workspaces','/assistant','/knowledge','/workflows')):
         return JSONResponse(status_code=422, content={'detail': [
             {key: item[key] for key in ('loc', 'msg', 'type')} for item in error.errors()]})
     return await request_validation_exception_handler(request, error)

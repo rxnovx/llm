@@ -98,6 +98,19 @@ class ArtifactScope(Base):
     artifact=relationship(Artifact,lazy='selectin')
 
 
+class ImageAdmission(Base):
+    __tablename__ = 'assistant_image_admissions'
+    __table_args__ = (CheckConstraint("state IN ('queued', 'running')"), UniqueConstraint('user_id', 'probe_id'))
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(36), unique=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
+    probe_id: Mapped[str | None] = mapped_column(String(36))
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    state: Mapped[str] = mapped_column(String(10))
+    expires_at: Mapped[int] = mapped_column(Integer, index=True)
+
+
 class ToolEvidence(Base):
     __tablename__='assistant_tool_evidence'
     id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)

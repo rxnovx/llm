@@ -39,7 +39,7 @@ def document_access(db,user_id,document_id,*,conversation_id=None,write=False):
     row=db.get(Document,str(document_id))
     if not row:raise HTTPException(404,'문서를 찾을 수 없습니다.')
     if row.base_id:base_access(db,user_id,row.base_id,write=write)
-    elif row.owner_id!=user_id or row.expires_at and row.expires_at<=time.time():
+    elif row.owner_id!=user_id or (row.expires_at is not None and row.expires_at<=time.time()):
         raise HTTPException(404,'대화 첨부 문서를 찾을 수 없습니다.')
     if not row.base_id and conversation_id and row.conversation_id!=conversation_id:
         grant=db.get(AttachmentScope,(row.id,str(conversation_id)))
@@ -48,7 +48,7 @@ def document_access(db,user_id,document_id,*,conversation_id=None,write=False):
 
 def public(row):
     return {k:getattr(row,k) for k in ['id','base_id','conversation_id','filename','sha256','status','error','revision','created_at','chunk_count','expires_at']}|{
-        'search_mode':'lexical' if row.index_profile==providers.profile() and get_settings().knowledge_embedding_provider=='disabled' else 'hybrid',
+        'search_mode':'image' if row.status=='image' else 'lexical' if row.index_profile==providers.profile() and get_settings().knowledge_embedding_provider=='disabled' else 'hybrid',
         'needs_reindex':row.status=='ready' and row.index_profile!=providers.profile()}
 
 def remove(db,row):
@@ -151,6 +151,8 @@ def selected_documents(db,user_id,selection,conversation_id):
     query=select(Document).where(or_(Document.base_id.in_(bases),Document.id.in_(ids)))
     documents=list(db.scalars(query)) if bases or ids else []
     if len(documents)>200:raise HTTPException(422,'검색 범위가 큽니다. 지식베이스를 나눠 선택하세요.')
+    if any(d.status=='image' for d in documents):
+        raise HTTPException(422, '참조 이미지는 이미지 분석 또는 편집에서 사용하세요.')
     if any(d.status!='ready' for d in documents):raise HTTPException(409,'선택한 자료의 색인이 완료되지 않았습니다. 지식 관리에서 상태를 확인하세요.')
     if any(d.index_profile!=providers.profile() for d in documents):raise HTTPException(409,'검색 모델 설정이 변경되었습니다. 자료를 다시 색인하세요.')
     return documents

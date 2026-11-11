@@ -145,13 +145,13 @@ class Meter:
 
 
 @contextmanager
-def measure(connection, model, payload, output_limit, timeout):
+def measure(connection, model, payload, output_limit, timeout, *, extra_input_tokens=0):
     meter = Meter()
     current = scope.get()
     if not current or connection.provider == 'test':
         yield meter
         return
-    input_estimate = len(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+    input_estimate = len(json.dumps(payload, ensure_ascii=False).encode('utf-8')) + extra_input_tokens
     identifier = reserve(current, connection.id, model, input_estimate + output_limit, timeout)
     try:
         yield meter
