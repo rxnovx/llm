@@ -121,9 +121,9 @@ def test_mr_link_or_number_reads_review_and_ci_without_a_worker(client, account,
     assert TRACE not in reply.text  # Remote logs go to the model, not the activity payload.
 
 
-@pytest.mark.parametrize('cancel_in_flight', [False, True])
+@pytest.mark.parametrize('cancel_in_flight, from_prompt', [(False, True), (True, False)])
 def test_updates_selected_mr_fork_source_with_guarded_files_and_recovers_commit(
-        client, account, workspace_stack, monkeypatch, cancel_in_flight):
+        client, account, workspace_stack, monkeypatch, cancel_in_flight, from_prompt):
     terminal, base_sha = workspace_stack
     enable_publishing(monkeypatch)
     use_model(monkeypatch, supports_tools=True)
@@ -215,9 +215,13 @@ def test_updates_selected_mr_fork_source_with_guarded_files_and_recovers_commit(
     selection = resolved.json()['selection'] | {'mode': 'execute'}
     assert selection['project_id'] == 7 and selection['merge_request']['project_id'] == 8
 
-    def run(publish=False):
-        response = send(client, headers, conversation, content='리뷰와 CI 오류를 수정하고 테스트해서 같은 MR에 커밋해 줘',
-            connection_id='local', model='local', apps=[selection], publish_gitlab=publish)
+    def run(publish=False, prompt_grant=False):
+        question = '리뷰와 CI 오류를 수정하고 테스트해서 같은 MR에 커밋해 줘' if publish else '리뷰와 CI 오류를 수정하고 테스트해 줘'
+        if prompt_grant:
+            question = f'@gitlab {mr_link(base_url)} 리뷰와 CI 오류를 수정하고 테스트해서 같은 MR에 푸시해 줘'
+        response = send(client, headers, conversation, content=question,
+            connection_id='local', model='local', apps=[] if prompt_grant else [selection],
+            publish_gitlab=publish and not prompt_grant)
         return events(response), response
 
     stream, response = run()
@@ -230,7 +234,7 @@ def test_updates_selected_mr_fork_source_with_guarded_files_and_recovers_commit(
     moved = False
 
     mode = 'update'
-    stream, response = run(True)
+    stream, response = run(True, prompt_grant=from_prompt)
     assert stream[-1][0] == ('cancelled' if cancel_in_flight else 'done'), response.text[-2400:]
     assert posts == ['/api/v4/projects/7/repository/commits']
     workspace_id = next(data['id'] for kind, data in stream if kind == 'workspace')

@@ -7,7 +7,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { api } from "@/lib/api";
 import { getAuthSessionVersion } from "@/lib/auth";
 import { getApiErrorMessage } from "@/lib/api-error";
-import { AvatarSection, ProfileSection, EmailChangeSection, EmailVerificationSection,
+import { AvatarSection, ProfileSection, EmailVerificationSection,
   OAuthConnectionSection, PasswordSection, SessionSection, DangerSection } from "./AccountSections";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
 import type { AccountSession } from "@/types/auth";
@@ -79,7 +79,6 @@ export function AccountPage({ initialSection = "general" }: { initialSection?: S
       {tab === "apps" && <AppConnections />}
       {tab === "security" && <>
         <EmailVerificationSection user={user} onSuccess={setMessage} onError={fail} />
-        <EmailChangeSection user={user} onSuccess={setMessage} onError={fail} />
         <OAuthConnectionSection user={user} onSuccess={success} onError={fail} />
         <PasswordSection hasPassword={user.has_password} onSuccess={(sessionVersion) => logout(false, sessionVersion)} onError={fail} />
       </>}
@@ -92,7 +91,7 @@ export function AccountPage({ initialSection = "general" }: { initialSection?: S
         }} />}
         <div className="flex justify-end"><button className="text-sm underline" disabled={loggingOut} onClick={() => void logout(true)}>모든 기기에서 로그아웃</button></div>
       </>}
-      {tab === "account" && <><div className="settings-row"><div><h3>이메일</h3><p>{user.email}</p></div><button className="settings-text-button" onClick={() => setTab("security")}>변경</button></div>
+      {tab === "account" && <><div className="settings-row"><div><h3>로그인 이메일</h3><p>{user.email}</p></div></div>
         <div className="settings-row"><div><h3>현재 기기에서 로그아웃</h3><p>저장한 대화는 다시 로그인하면 볼 수 있습니다.</p></div><button className="settings-outline-button" disabled={loggingOut} onClick={() => void logout()}>로그아웃</button></div>
         <DangerSection hasPassword={user.has_password} onDeactivate={async (password) => {
           const sessionVersion = getAuthSessionVersion();

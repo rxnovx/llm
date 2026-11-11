@@ -8,8 +8,8 @@ import type { AuthSessionResponse, AuthUser } from "@/types/auth";
 type State = {
   user: AuthUser | null; initialized: boolean; error: string | null;
   initialize: () => Promise<void>; refreshUser: () => Promise<void>;
-  login: (data: { loginId: string; password: string }) => Promise<void>;
-  loginWithGoogle: (credential: string, acceptTerms?: boolean) => Promise<void>;
+  login: (data: { loginId: string; password: string }, beforeActivate?: () => void) => Promise<void>;
+  loginWithGoogle: (credential: string, acceptTerms?: boolean, beforeActivate?: () => void) => Promise<void>;
   logout: (allSessions?: boolean, expectedSessionVersion?: number) => Promise<boolean>;
   clear: () => void;
 };
@@ -36,13 +36,15 @@ export const useAuthStore = create<State>((set, get) => ({
     const response = await api.get<AuthUser>("/users/me");
     if (version === getAuthSessionVersion()) set({ user: response.data, initialized: true, error: null });
   },
-  login: async (data) => withAuthSessionLock(async () => {
+  login: async (data, beforeActivate) => withAuthSessionLock(async () => {
     const response = await authApi.post<AuthSessionResponse>("/login", data);
+    beforeActivate?.();
     setAccessToken(response.data.access_token);
     set({ user: response.data.user, initialized: true, error: null });
   }),
-  loginWithGoogle: async (credential, acceptTerms = false) => withAuthSessionLock(async () => {
+  loginWithGoogle: async (credential, acceptTerms = false, beforeActivate) => withAuthSessionLock(async () => {
     const response = await authApi.post<AuthSessionResponse>("/google", { credential, accept_terms: acceptTerms });
+    beforeActivate?.();
     setAccessToken(response.data.access_token);
     set({ user: response.data.user, initialized: true, error: null });
   }),

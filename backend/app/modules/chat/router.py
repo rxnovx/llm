@@ -26,6 +26,7 @@ from app.modules.integrations.transport import GitlabError
 from app.modules.workspaces import agent as workspace_agent
 from app.modules.workspaces import client as workspace_client
 from app.modules.assistant import context as assistant_context
+from app.modules.assistant import gitlab as gitlab_prompt
 from app.modules.assistant.models import TurnContext
 from app.modules.knowledge.models import Document
 from app.modules.workflows import conversations as workflows
@@ -277,9 +278,13 @@ class Turn:
     parallel_used: bool = False
     publish_gitlab: bool = False
     gitlab_generation: int | None = None
+    gitlab_request: gitlab_prompt.Prompt | None = None
+    gitlab_publication: str = 'merge_request'
+    gitlab_local_commit: bool = False
 
 
-def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, connection: providers.Connection) -> Turn:
+def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, connection: providers.Connection,
+            *, gitlab_request: gitlab_prompt.Prompt | None = None) -> Turn:
     started_clock = time.monotonic()
     scheduler.lock(db)
     item = owned(db, conversation_id, user_id)
@@ -400,7 +405,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     return Turn(item.id, str(data.request_id), assistant.id, history,
         {'conversation': conversation_data(item), 'user_message': message_data(user_message),
          'assistant_message': message_data(assistant) | {'content': ''}, 'context': report}, previous_message, previous_connection, started_clock,
-        publish_gitlab=data.publish_gitlab, gitlab_generation=gitlab_generation)
+        publish_gitlab=data.publish_gitlab, gitlab_generation=gitlab_generation, gitlab_request=gitlab_request)
 
 
 def event(name: str, data: dict) -> str:
@@ -438,8 +443,9 @@ async def guarded_parts(iterator, cancelled):
 @router.post('/conversations/{conversation_id}/messages')
 async def send(conversation_id: UUID, data: TurnInput, request: Request, context: Authenticated, db: Database):
     user_id = context.user.id
-    if not data.apps and not data.retry and not data.publish_gitlab:
-        candidate = merge_requests.automatic_connection(db, user_id, data.content)
+    gitlab_request = None if data.retry or data.publish_gitlab else gitlab_prompt.prompt(data.content)
+    if not data.apps and not data.retry and not data.publish_gitlab and not gitlab_request:
+        candidate = merge_requests.automatic_connection(db, user_id, gitlab_prompt.unquoted(data.content))
         if candidate:
             owned(db, conversation_id, user_id)
             bind = db.get_bind()
@@ -447,7 +453,7 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
             resolved = await merge_requests.resolve(bind, user_id, candidate)
             data.apps = [GitlabSelection.model_validate(resolved['selection'])]
     connection = connection_for(data.connection_id, db, context.user)
-    turn = prepare(db, conversation_id, context.user.id, data, connection)
+    turn = prepare(db, conversation_id, context.user.id, data, connection, gitlab_request=gitlab_request)
     settings, bind = get_settings(), db.get_bind()
 
     async def generate():
@@ -502,10 +508,12 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                 apps = turn.start['assistant_message']['apps']
                 workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute','merge_request'})
                 options=turn.start['assistant_message']['assistant']
-                with Session(bind) as session:general_mode=assistant_context.active(session,user_id,options,question=data.content.strip(),conversation_id=turn.conversation_id,connection=admitted)
+                with Session(bind) as session:
+                    general_mode = bool(turn.gitlab_request) or assistant_context.active(
+                        session, user_id, options, question=data.content.strip(), conversation_id=turn.conversation_id, connection=admitted)
                 async with asyncio.timeout(settings.terminal_agent_timeout_seconds if workspace_mode or general_mode else settings.llm_timeout_seconds):
                     if workspace_mode or general_mode:
-                        workspace_selection=GitlabSelection.model_validate(apps[0]) if workspace_mode else None
+                        workspace_selection=GitlabSelection.model_validate(apps[0]) if apps and (workspace_mode or turn.gitlab_request) else None
                         iterator=workspace_agent.stream(bind,user_id,turn,workspace_selection,admitted,settings,cancelled,options=options)
                         async with aclosing(guarded_parts(iterator,cancelled)) as parts:
                             async for kind,payload in parts:

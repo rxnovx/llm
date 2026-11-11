@@ -10,8 +10,9 @@ from sqlalchemy.orm import Session
 
 from app.modules.chat import providers,scheduler
 from app.modules.chat.models import Message
+from app.modules.integrations import config as gitlab_config, service as gitlab_connections
 from app.modules.workspaces.models import ToolTrace
-from . import engine,routing
+from . import engine,gitlab,routing
 from .models import TurnDecision
 from app.modules.workflows import artifacts
 
@@ -24,7 +25,8 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
     model=turn.start['conversation']['model'];question=turn.history[-1]['content']
     enabled=settings.assistant_automatic_enabled and options.get('automatic',True)
     manual_knowledge=bool(options.get('base_ids') or options.get('document_ids'))
-    explicit=bool(selection or manual_knowledge or options.get('mcp_ids') or turn.start['assistant_message']['apps'])
+    request = turn.gitlab_request
+    explicit=bool(request or selection or manual_knowledge or options.get('mcp_ids') or turn.start['assistant_message']['apps'])
     decision={'automatic':enabled and not explicit}
     if selection and (turn.previous_message or {}).get('routing',{}).get('automatic_project'):decision['automatic_project']=True
 
@@ -57,6 +59,36 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
     await release()
     available=routing.resources(bind,user_id,turn.conversation_id,options)
     plan=routing.Plan(route='gitlab' if selection else 'direct',needs_review=bool(manual_knowledge or options.get('mcp_ids') or selection and selection.mode=='workspace'))
+    if request:
+        yield 'activity',record('gitlab_resolve','running','요청에서 GitLab 작업 범위와 연결 계정을 확인하고 있습니다.')
+        selection = await gitlab.resolve(bind, user_id, turn.conversation_id, request, selection, available['gitlab_connections'])
+        if selection is None:
+            decision.update(route='clarify',status='clarification');save()
+            detail = '작업할 GitLab 프로젝트의 그룹/프로젝트 경로나 MR 링크를 알려 주세요.'
+            yield 'activity',record('gitlab_resolve','complete',detail)
+            yield 'delta',{'content':detail}
+            return
+        if request.execute and connection.provider == 'test':
+            raise HTTPException(422, 'GitLab 수정·커밋·게시는 도구 호출을 지원하는 실제 모델을 선택해야 합니다.')
+        if selection.mode in {'workspace','execute'} and connection.provider!='test' and not connection.profile(model).supports_tools:
+            raise HTTPException(422,'이 모델의 도구 호출 사용이 설정되지 않았습니다. 다른 모델을 선택하세요.')
+        with Session(bind) as db:
+            account = gitlab_connections.owned(db, user_id, selection.connection_id)
+            if request.publication:
+                gitlab_connections.require_publish(account, gitlab_config.instance(account.provider_id))
+                turn.publish_gitlab = True
+                turn.gitlab_publication = request.publication
+            turn.gitlab_generation = account.generation
+            turn.gitlab_local_commit = bool(request.commit and not request.publication)
+            apps = [selection.model_dump(mode='json', exclude_none=True)]
+            turn.start['assistant_message']['apps'] = apps
+            db.get(Message,turn.assistant_id).source_record.apps_json = json.dumps(apps)
+            db.commit()
+        decision.update(route='gitlab', automatic_project=True, status='running');save()
+        plan = routing.Plan(route='gitlab', needs_review=selection.mode=='workspace')
+        yield 'activity',record('gitlab_resolve','complete','GitLab 대상을 확인했습니다. 요청한 작업에 필요한 도구를 준비합니다.')
+        if selection.mode == 'files':
+            selection = None  # The existing file-only path handles explicit file scope.
     if enabled and not explicit:
         yield 'activity',record('route_decision','running','질문에 필요한 앱과 문서 검색을 판단하고 있습니다.')
         await acquire()

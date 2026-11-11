@@ -96,7 +96,9 @@ def test_profile_authentication_and_immutable_fields(client, account):
     token = account()
     headers = bearer(token)
     assert client.patch("/users/me", headers=headers, json={"username": "bob"}).status_code == 409
-    assert client.patch("/users/me", headers=headers, json={"email": "new@example.com"}).status_code == 409
+    changed_email = client.patch("/users/me", headers=headers, json={"email": "new@example.com"})
+    assert changed_email.status_code == 409
+    assert changed_email.json()["detail"]["code"] == "email_immutable"
     assert client.patch("/users/me", headers=headers, json={"avatar_url": "javascript:alert(1)"}).status_code == 422
     response = client.patch("/users/me", headers=headers, json={"display_name": "  새 이름  "})
     assert response.json()["display_name"] == "새 이름"
@@ -193,20 +195,23 @@ def test_expired_email_token(client, account, monkeypatch):
     assert client.post("/auth/password-reset/confirm", json={"token": captured[0], "new_password": "ResetPassword123!"}).status_code == 400
 
 
-def test_email_change_reauth_confirmation_and_logout(client, account, monkeypatch):
-    old = account()
-    captured = []
-    monkeypatch.setattr(service.email_delivery, "send_email_change_confirmation", lambda email, token, username: captured.append(token) or True)
-    monkeypatch.setattr(service.email_delivery, "send_email_change_requested_notice", lambda *args: True)
-    monkeypatch.setattr(service.email_delivery, "send_email_changed_notice", lambda *args: True)
-    data = {"new_email": "changed@example.com", "current_password": "wrong"}
-    assert client.post("/users/me/email-change/request", headers=bearer(old), json=data).status_code == 400
-    data["current_password"] = "StrongPass123!"
-    assert client.post("/users/me/email-change/request", headers=bearer(old), json=data).status_code == 200
-    assert client.get("/users/me", headers=bearer(old)).json()["email"] == "alice@example.com"
-    assert client.post("/users/me/email-change/confirm", json={"token": captured[0]}).status_code == 200
-    assert client.get("/users/me", headers=bearer(old)).status_code == 401
-    assert client.post("/auth/login", data={"username": "changed@example.com", "password": "StrongPass123!"}).status_code == 200
+def test_email_change_and_previous_confirmation_links_cannot_update_account(client, account):
+    auth = account()
+    headers = bearer(auth)
+    new_email = "changed@example.com"
+    with client.db_factory() as db:
+        token = service.issue_one_time_token(
+            db, user=db.get(User, auth["user"]["subject"]), purpose="email_change",
+            expire_minutes=10, payload={"new_email": new_email},
+        )
+
+    data = {"new_email": new_email, "current_password": "StrongPass123!"}
+    assert client.post("/users/me/email-change/request", headers=headers, json=data).status_code == 404
+    assert client.post("/users/me/email-change/confirm", json={"token": token}).status_code == 404
+    assert client.post("/auth/email-verification/confirm", json={"token": token}).status_code == 400
+    profile = client.get("/users/me", headers=headers)
+    assert profile.status_code == 200
+    assert profile.json()["email"] == "alice@example.com"
 
 
 def test_deactivate_and_recover(client, account, monkeypatch):

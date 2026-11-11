@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
-import { appMentionAt, removeAppMention } from "../src/lib/app-mentions.ts";
+import { appMentionAt, insertGitlabMention, removeAppMention } from "../src/lib/app-mentions.ts";
 
 test("app mentions match standalone prefixes at the caret and preserve surrounding text", () => {
   for (const value of ["@", "@Git", "이 코드 @gitlab"]) assert.ok(appMentionAt(value,value.length));
@@ -12,6 +12,30 @@ test("app mentions match standalone prefixes at the caret and preserve surroundi
   const range = appMentionAt(value,7);
   assert.deepEqual(range,{ start:3,end:7,query:"Git" });
   assert.equal(removeAppMention(value,range),"질문  다음 내용");
+});
+
+test("GitLab replaces the complete typed token and preserves the surrounding draft", () => {
+  const prefix = "검토 @Git";
+  const value = prefix + "LaB 다음 내용";
+  const range = appMentionAt(value, prefix.length);
+  assert.deepEqual(range, { start: 3, end: 10, query: "Git" });
+  assert.deepEqual(insertGitlabMention(value, range), {
+    value: "검토 @gitlab 다음 내용", caret: "검토 @gitlab ".length,
+  });
+  assert.equal(appMentionAt("검토 @gitlab_extra", "검토 @gitlab".length), null);
+});
+
+test("GitLab insertion uses the selected range and only adds the necessary whitespace", () => {
+  assert.deepEqual(insertGitlabMention("", { start: 0, end: 0 }), { value: "@gitlab ", caret: 8 });
+  assert.deepEqual(insertGitlabMention("앞선택뒤", { start: 1, end: 3 }), {
+    value: "앞 @gitlab 뒤", caret: "앞 @gitlab ".length,
+  });
+  assert.deepEqual(insertGitlabMention("앞 뒤", { start: 2, end: 2 }), {
+    value: "앞 @gitlab 뒤", caret: "앞 @gitlab ".length,
+  });
+  assert.deepEqual(insertGitlabMention("앞 \n뒤", { start: 2, end: 2 }), {
+    value: "앞 @gitlab\n뒤", caret: "앞 @gitlab".length,
+  });
 });
 
 function environment({ popup = null, reply = {}, failure = null } = {}) {

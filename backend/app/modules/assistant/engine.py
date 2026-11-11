@@ -17,7 +17,7 @@ from app.modules.workspaces.models import ToolTrace
 from app.modules.knowledge import service as knowledge
 from app.modules.integrations import merge_requests, publishing
 from app.modules.integrations.service import GitlabClient
-from . import context,mcp
+from . import context,gitlab,mcp
 from app.modules.workflows import artifacts,evidence as tool_evidence
 
 INSTRUCTION=('You are a general-purpose assistant. Use selected knowledge and tools only when relevant to the user request. '
@@ -178,6 +178,8 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
             yield 'workspace',service.public(row)
             yield 'activity',record('gitlab_checkout','complete','프로젝트 작업공간을 준비했습니다.')
             tools=await client.manifest(row)
+            if turn.gitlab_request and not turn.gitlab_request.edit:
+                tools = [tool for tool in tools if tool['function']['name'] not in client.EXECUTION_TOOLS]
             if not tools:raise HTTPException(503,'실행 서버에서 사용 가능한 분석 도구가 없습니다.')
             if selection.mode=='workspace' and 'code_context' not in {t['function']['name'] for t in tools}:
                 raise HTTPException(503,'Terminal MCP 서버의 새 분석 도구가 없습니다. 백엔드와 Terminal MCP를 함께 업데이트하고 재시작하세요.')
@@ -189,10 +191,17 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
             yield 'activity',record('mcp_discovery','complete',f'사용 가능한 앱 도구 {len(extra)}개를 확인했습니다.')
         messages=[{'role':'system','content':MR_INSTRUCTION if mr else INSTRUCTION}]+turn.history
         publish_allowed = bool(row and selection.mode == 'execute' and turn.publish_gitlab)
+        commit_allowed = bool(row and selection.mode == 'execute' and turn.gitlab_local_commit)
+        open_mr = turn.gitlab_publication == 'merge_request'
+        publish_tool = publishing.UPDATE_TOOL if mr else publishing.TOOL_NAME if open_mr else publishing.PUSH_TOOL
         publication_started = False
+        commit_started = False
         if publish_allowed:
-            tools.append(publishing.tool(existing=bool(mr)))
+            tools.append(publishing.tool(existing=bool(mr), open_mr=open_mr))
             messages[0]['content'] += ' Report the GitLab link and the actual result returned by the publication tool.'
+        if commit_allowed:
+            tools.append(gitlab.local_commit_tool())
+            messages[0]['content'] += ' Use gitlab_commit_workspace for the requested local commit. Report its actual exit status and SHA.'
         with Session(bind) as db:preferences=context.personal(db,user_id)
         if preferences:messages[0]['content']+='\n\n'+preferences
         if options.get('_review_feedback'):
@@ -259,7 +268,7 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
         if mr:
             if connection.provider != 'test' and connection.profile(turn.start['conversation']['model']).supports_tools:
                 tools.append(merge_requests.read_tool())
-        if publish_allowed or (mr and row):
+        if publish_allowed or commit_allowed or (mr and row):
             profile = connection.profile(turn.start['conversation']['model'])
             input_budget = profile.context_window - profile.max_output_tokens - 256 - tool_schema_bytes(tools)
             # Keep room for a current tool exchange in small-context editing sessions.
@@ -322,25 +331,30 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
                     raise HTTPException(422, 'GitLab 게시 결과는 서버가 확인한 응답으로만 표시할 수 있습니다.')
                 yield 'activity',record(name,'running',json.dumps(args,ensure_ascii=False)[:1500])
                 try:
-                    if name in {publishing.TOOL_NAME, publishing.UPDATE_TOOL}:
-                        existing = name == publishing.UPDATE_TOOL
-                        if not publish_allowed or publication_started or existing != bool(mr):
-                            raise HTTPException(422, '이 요청의 GitLab MR 쓰기 권한을 확인하세요.')
-                        draft = publishing.parse(args, existing=existing)
+                    if name in {publishing.TOOL_NAME, publishing.UPDATE_TOOL, publishing.PUSH_TOOL}:
+                        if not publish_allowed or publication_started or name != publish_tool:
+                            raise HTTPException(422, '이 요청에서 허용된 GitLab 게시 작업을 확인하세요.')
+                        draft = publishing.parse(args, existing=bool(mr), open_mr=open_mr)
                         publication_started = True
-                        if existing:
+                        if mr:
                             def confirmed(publication):
                                 return record(publishing.RESULT_TRACE, 'complete', json.dumps(publication, ensure_ascii=False))
                             result, activity = await publishing.update_existing(
                                 bind, row, turn.request_id, mr, draft, confirmed=confirmed)
                             yield 'activity', activity
                         else:
-                            async with aclosing(publishing.publish(bind, row, turn.request_id, draft)) as publications:
+                            async with aclosing(publishing.publish(bind, row, turn.request_id, draft, open_mr=open_mr)) as publications:
                                 async for result in publications:
                                     status = 'running' if result['status'] == 'committed' else 'complete'
                                     if result.get('error'):
                                         status = 'error'
                                     yield 'activity', record(publishing.RESULT_TRACE, status, json.dumps(result, ensure_ascii=False))
+                    elif name == gitlab.LOCAL_COMMIT_TOOL:
+                        if not commit_allowed or commit_started:
+                            raise HTTPException(422, '이 요청에서 로컬 커밋을 허용했는지 확인하세요.')
+                        command = gitlab.local_commit_args(args)
+                        commit_started = True
+                        result = await service.invoke(bind,row,'terminal_exec',command)
                     elif name == merge_requests.READ_TOOL and mr:
                         upstream.ensure_current()
                         result = merge_requests.evidence_section(mr_evidence, args)
@@ -392,9 +406,13 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
                             source=tool_evidence.save(bind,user_id,turn.assistant_id,turn.request_id,server,original_tool,result,1+len([s for s in sources if s.get('app')=='mcp']))
                             result=dict(result,source_id=source['id']);sources.append(source)
                             yield 'sources',{'sources':sources}
-                    elif row:result=await service.invoke(bind,row,name,args)
+                    elif row:
+                        if turn.gitlab_request and not turn.gitlab_request.edit and name in client.EXECUTION_TOOLS:
+                            raise HTTPException(422, '이 요청에는 작업공간 수정·명령 실행이 허용되지 않았습니다.')
+                        result=await service.invoke(bind,row,name,args)
                     else:raise HTTPException(403,'이번 대화에서 허용하지 않은 도구입니다.')
-                    if name=='terminal_exec' and result.get('job_id'):
+                    command_tool = name in {'terminal_exec', gitlab.LOCAL_COMMIT_TOOL}
+                    if command_tool and result.get('job_id'):
                         job=result['job_id'];jobs.add(job);cursor=0;output=[]
                         while True:
                             if cancelled():raise AnalysisCancelled()
@@ -415,7 +433,7 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
                     if name=='code_context':
                         for section in result.get('sections',[]):source_for(section)
                         yield 'sources',{'sources':sources}
-                    failed = name == 'terminal_exec' and result.get('job_id') and result.get('exit_code') != 0
+                    failed = command_tool and result.get('job_id') and result.get('exit_code') != 0
                     detail = '선택한 MR 자료의 발췌를 모델에 전달했습니다.' if name == merge_requests.READ_TOOL else trim_result(result,6000)
                     yield 'activity',record(name,'error' if failed else 'complete',detail)
                 except RequestCancelled:

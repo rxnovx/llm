@@ -17,7 +17,7 @@ import { Icon, Wordmark, type IconName } from "./Icons";
 import "./workspace.css";
 import { replaceConversationLocation, workspaceHref } from "@/lib/workspace-navigation";
 import { backupOAuthDraft, takeOAuthDraft, OAUTH_LEAVING, gitlabMergeRequestLink, type GitlabSelection } from "@/lib/app-connections";
-import { appMentionAt, removeAppMention } from "@/lib/app-mentions";
+import { appMentionAt, GITLAB_MENTION, insertGitlabMention, removeAppMention } from "@/lib/app-mentions";
 import { GitlabScopeDialog } from "./GitlabScopeDialog";
 import { GitlabWorkProgress, gitlabWebUrl } from "./GitlabWorkProgress";
 import { MessageSources } from "./MessageSources";
@@ -36,12 +36,19 @@ const starters: { icon: IconName; title: string; prompt: string }[] = [
 ];
 const errorText = (error: unknown) => error instanceof Error ? error.message : "요청을 처리하지 못했습니다.";
 const shortDate = (timestamp: number) => new Date(timestamp * 1000).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" });
+const appOptions = [
+  { id: "gitlab", title: "GitLab", description: "입력창에 @gitlab 추가", icon: "code", names: ["gitlab"] },
+  { id: "knowledge", title: "지식·연결된 앱", description: "문서 검색과 MCP 도구 선택", icon: "plus", names: ["knowledge", "apps", "지식"] },
+  { id: "gitlab-scope", title: "GitLab 범위 직접 선택", description: "프로젝트·파일·MR 지정", icon: "settings", names: ["gitlab"] },
+] as const;
+type AppPicker = NonNullable<ReturnType<typeof appMentionAt>> & { hasTypedMention?: boolean };
+type AppOptionId = typeof appOptions[number]["id"];
 
 function GitlabPublication({ tools }: { tools: ChatMessage["tools"] }) {
   const publications = tools?.filter(tool => tool.name === "gitlab_publication") ?? [];
   const activity = publications.findLast(tool => tool.status !== "running") ?? publications.at(-1);
   if (!activity) return null;
-  let result: { url: string; status?: string; iid?: number; error?: string; commit_url?: string; parent_sha?: string; base_sha?: string };
+  let result: { url: string; status?: string; iid?: number; error?: string; commit_url?: string; branch_url?: string; parent_sha?: string; base_sha?: string };
   try {
     result = JSON.parse(activity.detail);
   } catch {
@@ -50,11 +57,13 @@ function GitlabPublication({ tools }: { tools: ChatMessage["tools"] }) {
   const url = gitlabWebUrl(result?.url);
   if (!url) return null;
   const commitUrl = gitlabWebUrl(result.commit_url);
+  const branchUrl = result.status === "pushed" ? gitlabWebUrl(result.branch_url) : "";
   const label = (result.status === "merge_request" || result.status === "updated") && Number.isInteger(result.iid)
     ? `GitLab MR !${result.iid} 열기`
     : "GitLab 커밋 열기";
   return <div className="cw-message-app">
     <a href={url} target="_blank" rel="noreferrer" className="cw-text-button">{label} ↗</a>
+    {branchUrl && <a href={branchUrl} target="_blank" rel="noreferrer" className="cw-text-button">푸시한 브랜치 보기 ↗</a>}
     {commitUrl && <a href={commitUrl} target="_blank" rel="noreferrer" className="cw-text-button">추가 커밋 보기 ↗</a>}
     {result.parent_sha && result.parent_sha !== result.base_sha && <span> · 게시 중 추가된 커밋 위에 반영되었습니다.</span>}
     {typeof result.error === "string" && <span> · {result.error}</span>}
@@ -97,7 +106,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const [queue, setQueue] = useState<QueueState | null>(null);
   const [appSelections, setAppSelections] = useState<GitlabSelection[]>([]);
   const [publishGitlab, setPublishGitlab] = useState(false);
-  const [mention, setMention] = useState<ReturnType<typeof appMentionAt>>(null);
+  const [mention, setMention] = useState<AppPicker | null>(null);
   const [mentionChoice,setMentionChoice]=useState(0);
   const [scopeOpen, setScopeOpen] = useState(false), [toolStatus, setToolStatus] = useState("");
   const [scopeReference, setScopeReference] = useState("");
@@ -118,6 +127,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const dismissAction = useDialogDismiss(closeAction, !actionBusy);
   const [scrollDown, setScrollDown] = useState(false);
   const editor = useRef<HTMLTextAreaElement>(null);
+  const composing = useRef(false);
   const searchInput = useRef<HTMLInputElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const actionDialog = useRef<HTMLDialogElement>(null);
@@ -154,19 +164,54 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const canSend = ready && !readOnly && (!user || !!connection && (connection.is_test || !!model.trim())) && !busy && !loading && !initializing && !uploading;
   const openModels = () => { if (user) setSettingsOpen(true); else router.push(workspaceHref("/login", window.location.search), { scroll: false }); };
   const openGitlabScope = (reference: string) => { setScopeReference(reference); setScopeOpen(true); };
-  const selectGitlab = () => {
-    if (mention) setDraft(removeAppMention(draft, mention));
-    setMention(null);
-    if (!user) { router.push(workspaceHref("/login?next=/user/settings/apps", window.location.search), { scroll: false }); return; }
-    openGitlabScope(gitlabMergeRequestLink(draft));
-  };
   const openAssistant=async()=>{
-    if(mention)setDraft(removeAppMention(draft,mention));setMention(null);
+    setMention(null);
     if(!user){router.push(workspaceHref('/login',window.location.search),{scroll:false});return;}
     try{
       if(!active){const next=await chatJson<Conversation>('/conversations',{method:'POST',body:JSON.stringify({connection_id:selected,model,project_id:projectId||null})});setActive(next);updateConversation(next);replaceConversationLocation(next.id);}
       setAssistantOpen(true);
     }catch(e){setError(errorText(e));}
+  };
+  const visibleAppOptions = mention ? appOptions.filter(option =>
+    (option.id !== "gitlab-scope" || user) && option.names.some(name => name.startsWith(mention.query.toLowerCase())),
+  ) : [];
+  const activeAppOption = visibleAppOptions[mentionChoice] ?? visibleAppOptions[0];
+  const updateTypedMention = (field: HTMLTextAreaElement) => {
+    if (composing.current) return;
+    const next = field.selectionStart === field.selectionEnd ? appMentionAt(field.value, field.selectionStart) : null;
+    setMention(next && `@${next.query.toLowerCase()}` !== GITLAB_MENTION ? { ...next, hasTypedMention: true } : null);
+    setMentionChoice(0);
+  };
+  const openAppPicker = () => {
+    const field = editor.current;
+    const start = field?.selectionStart ?? draft.length;
+    const end = field?.selectionEnd ?? start;
+    const typed = start === end ? appMentionAt(draft, start) : null;
+    setMention(typed ? { ...typed, query: "" } : { start, end, query: "" });
+    setMentionChoice(0);
+    field?.focus();
+  };
+  const chooseApp = (id: AppOptionId) => {
+    if (!mention) return;
+    setMention(null);
+    if (id === "gitlab") {
+      const { value, caret } = insertGitlabMention(draft, mention);
+      const field = editor.current;
+      if (field && value.length > field.maxLength) {
+        setError("메시지는 16,000자까지 입력할 수 있습니다.");
+        return;
+      }
+      setDraft(value);
+      requestAnimationFrame(() => {
+        if (field?.value !== value) return;
+        field.focus({ preventScroll: true });
+        field.setSelectionRange(caret, caret);
+      });
+      return;
+    }
+    if (mention.hasTypedMention) setDraft(removeAppMention(draft, mention));
+    if (id === "gitlab-scope") openGitlabScope(gitlabMergeRequestLink(draft));
+    else void openAssistant();
   };
 
   useEffect(() => {
@@ -531,28 +576,51 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       {publishGitlab && <button type="button" className="cw-text-button" aria-label="이번 요청의 MR 게시 허용 취소" onClick={() => setPublishGitlab(false)}>{selection.merge_request ? "커밋 허용 ×" : "MR 생성 허용 ×"}</button>}
       <button type="button" className="cw-icon-button" aria-label="GitLab 선택 제거" onClick={() => { setAppSelections([]); setPublishGitlab(false); }}><Icon name="close" size={13} /></button></div>)}</div>}
     {(assistantSelection.base_ids.length>0||assistantSelection.document_ids.length>0||assistantSelection.mcp_ids.length>0||assistantSelection.parallel_agents)&&<div className="cw-assistant-selection"><button type="button" onClick={()=>void openAssistant()}>지식 {assistantSelection.base_ids.length} · 첨부 {assistantSelection.document_ids.length} · 앱 {assistantSelection.mcp_ids.length}{assistantSelection.parallel_agents?' · 병렬 Agent':''}{assistantSelection.allow_writes?' · 쓰기 허용':''}</button><button type="button" aria-label="자료와 앱 선택 제거" onClick={()=>setAssistantSelection(emptySelection())}>×</button></div>}
-    {mention && <div className="cw-app-mention" id="chat-app-options" role="listbox" aria-label="사용할 앱"><button id="chat-app-gitlab" type="button" role="option" aria-selected={mentionChoice===0}
-      onMouseMove={()=>setMentionChoice(0)} onMouseDown={(e) => e.preventDefault()} onClick={selectGitlab}><Icon name="code" size={20} /><span><strong>GitLab</strong><small>내 프로젝트에서 파일 가져오기</small></span><kbd>↵</kbd></button><button id="chat-app-knowledge" type="button" role="option" aria-selected={mentionChoice===1} onMouseMove={()=>setMentionChoice(1)} onMouseDown={e=>e.preventDefault()} onClick={()=>void openAssistant()}><Icon name="plus" size={20}/><span><strong>지식·연결된 앱</strong><small>문서 검색과 MCP 도구 선택</small></span></button></div>}
+    {activeAppOption && <div className="cw-app-mention" id="chat-app-options" role="listbox" aria-label="사용할 앱"
+      onPointerDown={event => { if (event.button === 0) event.preventDefault(); }}>
+      {visibleAppOptions.map((option, index) => <button key={option.id} id={`chat-app-${option.id}`} type="button" role="option" tabIndex={-1}
+        aria-label={option.title} aria-selected={activeAppOption.id === option.id} onMouseMove={() => setMentionChoice(index)} onClick={() => chooseApp(option.id)}>
+        <Icon name={option.icon} size={20} /><span><strong>{option.title}</strong><small>{option.description}</small></span>
+        {activeAppOption.id === option.id && <kbd>↵</kbd>}
+      </button>)}
+    </div>}
     <label className="cw-sr-only" htmlFor="chat-message">메시지</label>
     <textarea ref={editor} id="chat-message" placeholder={!user || connection ? "무엇이든 편하게 물어보세요" : "모델을 연결하고 대화를 시작하세요"}
       value={draft} rows={2} maxLength={16000} disabled={loading || initializing || !!active?.busy && !streaming}
-      role="combobox" aria-expanded={!!mention} aria-autocomplete="list" aria-controls={mention ? "chat-app-options" : undefined} aria-activedescendant={mention ? mentionChoice===0?"chat-app-gitlab":"chat-app-knowledge" : undefined}
-      onBlur={() => setMention(null)} onChange={(event) => { setDraft(event.target.value); const next=appMentionAt(event.target.value,event.target.selectionStart);setMention(next);setMentionChoice(next?.query&&!"gitlab".startsWith(next.query.toLowerCase())?1:0); }}
-      onClick={(event) => setMention(appMentionAt(event.currentTarget.value,event.currentTarget.selectionStart))}
+      role="combobox" aria-expanded={!!activeAppOption} aria-autocomplete="list" aria-controls={activeAppOption ? "chat-app-options" : undefined}
+      aria-activedescendant={activeAppOption ? `chat-app-${activeAppOption.id}` : undefined}
+      onBlur={() => setMention(null)}
+      onChange={event => { setDraft(event.currentTarget.value); updateTypedMention(event.currentTarget); }}
+      onClick={event => updateTypedMention(event.currentTarget)}
+      onCompositionStart={() => { composing.current = true; setMention(null); }}
+      onCompositionEnd={event => {
+        composing.current = false;
+        setDraft(event.currentTarget.value);
+        updateTypedMention(event.currentTarget);
+      }}
+      onKeyUp={event => {
+        if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) updateTypedMention(event.currentTarget);
+      }}
       onKeyDown={(event) => {
-        if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
-        if (mention) {
+        if (composing.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+        if (activeAppOption) {
           if (event.key === "Escape") { event.preventDefault(); setMention(null); return; }
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault();setMentionChoice(v=>v===0?1:0);return; }
-          if (event.key === "Enter" && !event.shiftKey || event.key === "Tab") { event.preventDefault();if(mentionChoice===1)void openAssistant();else selectGitlab();return; }
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            const direction = event.key === "ArrowDown" ? 1 : -1;
+            setMentionChoice(index => (index + direction + visibleAppOptions.length) % visibleAppOptions.length);
+            return;
+          }
+          if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") { event.preventDefault(); chooseApp(activeAppOption.id); return; }
         }
-        if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
+        if (event.key === "Enter" && !event.shiftKey) {
           event.preventDefault(); void send();
         }
       }} />
     <div className="cw-composer-bottom"><button className="cw-model-picker" type="button" disabled={busy} onClick={openModels}>
       <Icon name={connection?.is_test ? "chat" : "server"} size={16} /><span>{connection?.is_test ? connection.name : model || connection?.name || "모델 연결"}</span><Icon name="chevron" size={14} /></button>
-      <button type="button" className="cw-context-button" aria-label="앱 추가" disabled={busy} onClick={() => { const caret = editor.current?.selectionStart ?? draft.length;setMentionChoice(0);setMention({ start: caret, end: caret, query: "" }); editor.current?.focus(); }}>@ 앱</button>
+      <button type="button" className="cw-context-button" aria-label="앱 추가" disabled={busy || loading || initializing}
+        onPointerDown={event => { if (event.button === 0 && !composing.current) event.preventDefault(); }} onClick={openAppPicker}>@ 앱</button>
       <button type="button" className="cw-context-button" disabled={busy||loading||initializing} onClick={()=>void attachFiles([])}>첨부</button>
       <button type="button" className="cw-context-button" disabled={busy||loading||initializing||uploading} onClick={()=>void openAssistant()}>파일·지식</button>
       {active && <button className="cw-context-button" type="button" disabled={busy || !connection} onClick={() => setContextOpen(true)}>문맥</button>}
@@ -614,7 +682,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
             {message.role === "user" ? <div className="cw-human-text">{message.content}</div> : <>
               {!!message.apps?.length && <p className="cw-message-app">GitLab · {message.apps[0].merge_request ? `기존 MR !${message.apps[0].merge_request.iid}` : message.apps[0].mode==='execute'?'프로젝트 분석·실행':message.apps[0].mode==='workspace'?'프로젝트 자동 분석':message.apps[0].paths.join(", ")}
                 {message.apps[0].workspace_id&&<button type="button" className="cw-text-button" onClick={()=>setWorkspaceOpen(true)}>작업공간 열기</button>}</p>}
-              {message.apps?.[0]?.merge_request && <GitlabWorkProgress message={message} onFollowup={canSend ? openGitlabScope : undefined} />}
+              {(message.apps?.[0]?.merge_request || message.tools?.some(tool => tool.name === "gitlab_mr_overview")) &&
+                <GitlabWorkProgress message={message} onFollowup={canSend ? openGitlabScope : undefined} />}
               <GitlabPublication tools={message.tools} />
               {(message.routing?.automatic||message.routing?.status==='unverified')&&<p className="cw-message-app">{message.routing.status==='unverified'?'근거 확인 보류':message.routing.route==='knowledge'?'자동 문서 검색':message.routing.route==='gitlab'?'자동 소스 분석':message.routing.route==='both'?'소스·문서 함께 확인':'질문 자동 처리'}</p>}
               {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {tool.name} · {tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}

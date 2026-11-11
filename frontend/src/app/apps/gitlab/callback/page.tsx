@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { WorkspaceLink } from "@/components/shared/WorkspaceLink";
 import { useModalNavigation } from "@/components/auth/modal-navigation";
 import { appsJson, notifyAppsChanged, oauthReturnPath } from "@/lib/app-connections";
-import { getSafeNextPath } from "@/lib/auth-router";
+import { getSafeNextPath } from "@/lib/workspace-navigation";
 import { useAuthStore } from "@/stores/authStore";
 
 export default function GitlabCallbackPage() {

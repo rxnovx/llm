@@ -155,6 +155,14 @@ test("proxy routes cannot reach the other application's API", async () => {
   assert.equal((await fetch(`${origin}/api/auth/admin`)).status, 404);
   assert.equal((await fetch(`${origin}/api/auth/config`, { method: "POST", headers: csrf })).status, 404);
 });
+test("account proxy no longer forwards requests to change the login email", async () => {
+  for (const action of ["request", "confirm"]) {
+    assert.equal((await fetch(`${origin}/api/account/users/me/email-change/${action}`, {
+      method: "POST", headers: { ...csrf, authorization: "Bearer test-access-token" },
+      body: "{}",
+    })).status, 404);
+  }
+});
 
 test("GitLab MR resolution forwards the caller's authenticated selection and applies the origin check", async () => {
   mode = "tokens";

@@ -27,8 +27,9 @@ test('프로젝트 분석 선택과 작업공간 모달이 작성 중인 질문�
   await page.getByLabel('비밀번호 확인',{exact:true}).fill('WorkspaceBrowserPass123!');
   await page.getByRole('checkbox').check();await page.getByRole('button',{name:'회원가입',exact:true}).click();
   await expect(page.getByRole('heading',{name:'무엇을 함께 해볼까요?'})).toBeVisible();
-  await page.getByLabel('메시지',{exact:true}).fill('프로젝트 분석 @Git');
-  await page.getByLabel('메시지',{exact:true}).press('Enter');
+  await page.getByLabel('메시지',{exact:true}).fill('프로젝트 분석');
+  await page.getByRole('button',{name:'앱 추가',exact:true}).click();
+  await page.getByRole('option',{name:'GitLab 범위 직접 선택',exact:true}).click();
   const scope=page.getByRole('dialog',{name:'GitLab에서 가져오기'});
   await scope.getByLabel('작업 방식').selectOption('workspace');
   await scope.getByRole('button',{name:/team\/service/}).click();

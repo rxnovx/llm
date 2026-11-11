@@ -1,4 +1,4 @@
-"""Explicit app selections, never authority inferred from the prompt text."""
+"""Validated GitLab selections and bounded source-file evidence."""
 import json
 import re
 from typing import Literal

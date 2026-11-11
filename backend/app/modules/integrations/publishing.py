@@ -23,6 +23,7 @@ from .transport import GitlabError
 
 TOOL_NAME = 'gitlab_open_merge_request'
 UPDATE_TOOL = 'gitlab_update_merge_request'
+PUSH_TOOL = 'gitlab_push_branch'
 RESULT_TRACE = 'gitlab_publication'
 
 
@@ -62,31 +63,34 @@ class Draft(Changes):
         return value.strip()
 
 
-def tool(*, existing=False):
+def tool(*, existing=False, open_mr=True):
     if existing:
-        return {'type': 'function', 'function': {
-            'name': UPDATE_TOOL,
-            'description': ('Commit selected changed files to the selected existing MR source branch. '
-                'Call only if the user asks to publish, after checking reviews, CI, diff and local test results.'),
-            'parameters': workspace_client.lean_schema(Changes.model_json_schema()),
-        }}
-    return {'type': 'function', 'function': {
-        'name': TOOL_NAME,
-        'description': (
-            'Create a commit and GitLab merge request from the requested changed workspace files. '
+        name, schema = UPDATE_TOOL, Changes
+        description = ('Commit selected changed files to the selected existing MR source branch. '
+            'Call only if the user asks to publish, after checking reviews, CI, diff and local test results.')
+    elif open_mr:
+        name, schema = TOOL_NAME, Draft
+        description = ('Create a commit and GitLab merge request from the requested changed workspace files. '
             'Call only if the user asks to publish, after reviewing the changes and test results. '
-            'Provide only the paths for this request. The app chooses the source branch and uses the selected target branch.'
-        ),
-        'parameters': workspace_client.lean_schema(Draft.model_json_schema()),
+            'Provide only the paths for this request. The app chooses the source branch and uses the selected target branch.')
+    else:
+        name, schema = PUSH_TOOL, Changes
+        description = ('Push the requested changed workspace files as a commit on an app-generated GitLab branch. '
+            'Call only if the user asks to push, after reviewing the changes and test results.')
+    return {'type': 'function', 'function': {
+        'name': name,
+        'description': description,
+        'parameters': workspace_client.lean_schema(schema.model_json_schema()),
     }}
 
 
-def parse(arguments, *, existing=False):
+def parse(arguments, *, existing=False, open_mr=True):
+    schema = Draft if open_mr and not existing else Changes
     try:
-        schema = Changes if existing else Draft
         return schema.model_validate(arguments)
     except ValidationError:
-        detail = '변경 파일 목록과 커밋 메시지를 확인해 주세요.' if existing else 'MR의 변경 파일 목록, 커밋 메시지, 제목과 설명을 확인해 주세요.'
+        detail = ('MR의 변경 파일 목록, 커밋 메시지, 제목과 설명을 확인해 주세요.' if schema is Draft
+            else '변경 파일 목록과 커밋 메시지를 확인해 주세요.')
         raise HTTPException(422, detail) from None
 
 
@@ -200,8 +204,8 @@ def request_result(merge_request, link, branch, target):
     }
 
 
-async def publish(bind, workspace, request_id, draft):
-    """Yield the commit once it is confirmed, then report the merge request."""
+async def publish(bind, workspace, request_id, draft, *, open_mr=True):
+    """Yield the confirmed GitLab commit and the merge request when requested."""
     def before_write():
         check_active(bind, workspace, request_id)
 
@@ -223,7 +227,7 @@ async def publish(bind, workspace, request_id, draft):
             raise HTTPException(502, 'GitLab 프로젝트와 대상 브랜치를 확인할 수 없습니다.') from None
         target_info = await get_optional(upstream, project + f'/repository/branches/{quote(target, safe="")}')
         if not isinstance(target_info, dict) or target_info.get('name') != target:
-            raise HTTPException(422, 'MR을 만들 대상 브랜치를 GitLab 선택 화면에서 다시 지정하세요.')
+            raise HTTPException(422, 'GitLab에 게시할 변경의 기준 브랜치를 확인해 주세요.')
 
         actions = await file_actions(upstream, project, base, workspace, draft.paths)
         digest = sha256(json.dumps([workspace.id, base, target, actions], ensure_ascii=False,
@@ -231,10 +235,11 @@ async def publish(bind, workspace, request_id, draft):
         branch = f'llm-mr-{digest[:24]}'
         marker = f'LLM-Publication: {digest}'
         link = upstream.provider.base_url + '/' + quote(namespace, safe='/')
-        existing = await existing_request(upstream, project, workspace.project_id, branch, target)
-        if existing:
-            yield request_result(existing, link, branch, target)
-            return
+        if open_mr:
+            existing = await existing_request(upstream, project, workspace.project_id, branch, target)
+            if existing:
+                yield request_result(existing, link, branch, target)
+                return
 
         branch_path = project + '/repository/branches/' + branch
         branch_info = await get_optional(upstream, branch_path)
@@ -259,6 +264,9 @@ async def publish(bind, workspace, request_id, draft):
 
         committed = {'status': 'committed', 'url': link + '/-/commit/' + commit_sha,
             'commit_sha': commit_sha, 'source_branch': branch, 'target_branch': target}
+        if not open_mr:
+            yield committed | {'status': 'pushed', 'branch_url': link + '/-/tree/' + branch}
+            return
         yield committed
         before_write()
         try:

@@ -4,12 +4,17 @@ import asyncio
 import json
 import re
 import sys
+import time
+from uuid import uuid4
 
 import httpx
 
 from app.core.config import get_settings
 from app.modules.chat import providers
+from app.modules.chat.models import Conversation
 from app.modules.integrations import config, publishing, transport
+from app.modules.integrations.models import AppConnection
+from app.modules.workspaces.models import Workspace
 from test_chat import auth, create, events, send
 from test_gitlab_apps import BROWSER, begin, connect, finish, gitlab
 from test_workspace_flow import workspace_stack
@@ -199,6 +204,91 @@ def test_model_edits_workspace_publishes_and_resumes_without_duplicate_writes(cl
     retry = send(client, headers, conversation, content='같은 변경에 해당하는 MR을 확인해 줘', connection_id='local', model='local',
         apps=[selection], publish_gitlab=True, retry=True, confirm_write_retry=True)
     assert retry.status_code == 422
+
+
+def test_push_only_recovers_commit_and_reuses_it_for_later_merge_request(client, account, gitlab, monkeypatch):
+    monkeypatch.setenv('TERMINAL_EXECUTION_ENABLED', 'true')
+    enable_publishing(monkeypatch)
+    request = transport.request
+    base_sha, commit_sha = 'a' * 40, 'b' * 40
+    project = '/api/v4/projects/7'
+    commit_path, mr_path = project + '/repository/commits', project + '/merge_requests'
+    calls, commits = [], {}
+
+    async def remote(provider, method, path, **kwargs):
+        calls.append((method, path))
+        if path == '/oauth/token':
+            return (await request(provider, method, path, **kwargs)) | {'scope': config.PUBLISH_SCOPES}
+        if path == project + '/repository/branches/main':
+            return {'name': 'main'}
+        if path.startswith(project + '/repository/branches/llm-mr-'):
+            branch = path.rsplit('/', 1)[-1]
+            if branch not in commits:
+                raise transport.GitlabError('branch missing', 404)
+            return {'name': branch, 'commit': commits[branch]}
+        if path == commit_path:
+            assert method == 'POST' and kwargs['token'].startswith('local-access-')
+            payload = kwargs['payload']
+            branch = payload['branch']
+            assert branch not in commits and re.fullmatch(r'llm-mr-[a-f0-9]{24}', branch)
+            assert payload['start_sha'] == base_sha
+            assert payload['actions'] == [{'action': 'update', 'file_path': 'main.py', 'content': 'return_value = True\n'}]
+            commits[branch] = {'id': commit_sha, 'parent_ids': [base_sha], 'message': payload['commit_message']}
+            raise transport.GitlabError('커밋 응답이 중단되었습니다.', 502)
+        if path == mr_path and method == 'GET':
+            return []
+        if path == mr_path and method == 'POST':
+            payload = kwargs['payload']
+            assert payload['source_branch'] in commits and payload['target_branch'] == 'main'
+            return {'iid': 29, 'source_project_id': 7, 'target_project_id': 7,
+                'source_branch': payload['source_branch'], 'target_branch': 'main', 'state': 'opened'}
+        return await request(provider, method, path, **kwargs)
+
+    async def export_files(row, name, args, *, provision):
+        assert provision and name == 'workspace_export_files'
+        assert args == {'workspace_id': row.id, 'paths': ['main.py']}
+        return {'files': [{'path': 'main.py', 'content': 'return_value = True\n'}]}
+
+    monkeypatch.setattr(transport, 'request', remote)
+    monkeypatch.setattr(publishing.workspace_client, 'call', export_files)
+    headers = auth(account())
+    connection_id = publish_connection(client, headers)
+    conversation_id = create(client, headers)
+    request_id = str(uuid4())
+    with client.db_factory() as db:
+        connection = db.get(AppConnection, connection_id)
+        conversation = db.get(Conversation, conversation_id)
+        conversation.generation_id, conversation.generation_until = request_id, int(time.time()) + 60
+        workspace = Workspace(user_id=connection.user_id, conversation_id=conversation_id, connection_id=connection_id,
+            connection_generation=connection.generation, project_id=7, ref='main', status='ready', allow_execution=True,
+            source_json=json.dumps({'commit': base_sha}))
+        db.add(workspace)
+        db.commit()
+        db.refresh(workspace)
+        db.expunge(workspace)
+        bind = db.get_bind()
+
+    tool = publishing.tool(open_mr=False)['function']
+    assert tool['name'] == publishing.PUSH_TOOL
+    assert set(tool['parameters']['properties']) == {'paths', 'commit_message'}
+    changes = {'paths': ['main.py'], 'commit_message': '변경 반영'}
+
+    async def results(args, *, open_mr):
+        draft = publishing.parse(args, open_mr=open_mr)
+        return [value async for value in publishing.publish(bind, workspace, request_id, draft, open_mr=open_mr)]
+
+    pushed, = asyncio.run(results(changes, open_mr=False))
+    assert pushed['status'] == 'pushed' and pushed['commit_sha'] == commit_sha
+    assert pushed['url'].endswith('/team/service/-/commit/' + commit_sha)
+    assert pushed['branch_url'].endswith('/team/service/-/tree/' + pushed['source_branch'])
+    assert all(path != mr_path for _, path in calls)
+    assert asyncio.run(results(changes, open_mr=False)) == [pushed]
+    assert all(path != mr_path for _, path in calls)
+
+    committed, opened = asyncio.run(results(changes | {'title': '변경 반영', 'description': ''}, open_mr=True))
+    assert committed['commit_sha'] == commit_sha
+    assert opened['status'] == 'merge_request' and opened['source_branch'] == pushed['source_branch']
+    assert [path for method, path in calls if method == 'POST' and path.startswith('/api/v4/')] == [commit_path, mr_path]
 
 
 def test_read_only_or_unrequested_publication_cannot_run(client, account, workspace_stack, monkeypatch):

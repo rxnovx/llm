@@ -1,7 +1,7 @@
 import re
 from typing import Literal
 from urllib.parse import urlparse
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from app.core.locale import validate_time_zone
 
 class LocalePreferencesRequest(BaseModel):
@@ -159,32 +159,6 @@ class UserUpdateRequest(BaseModel):
         ):
             raise ValueError("http 또는 https 프로필 사진 주소를 입력해주세요.")
         return normalized
-
-
-class EmailChangeRequest(BaseModel):
-    new_email: EmailStr
-    current_password: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=128,
-    )
-    google_credential: str | None = Field(
-        default=None,
-        min_length=100,
-        max_length=10_000,
-    )
-
-    @model_validator(mode="after")
-    def validate_reauthentication(self):
-        methods = (
-            self.current_password is not None,
-            self.google_credential is not None,
-        )
-        if sum(methods) != 1:
-            raise ValueError(
-                "현재 비밀번호 또는 Google 재인증 중 하나가 필요합니다."
-            )
-        return self
 
 
 class PasswordChangeRequest(BaseModel):

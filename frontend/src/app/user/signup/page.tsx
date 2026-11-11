@@ -3,17 +3,17 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { WorkspaceLink as Link } from "@/components/shared/WorkspaceLink";
 import { useRouter } from "next/navigation";
 import { AuthCard, AuthError, AuthField, AuthPageShell, authInputClassName } from "@/components/auth/AuthCard";
-import { useModalNavigation } from "@/components/auth/modal-navigation";
+import { useCompleteLogin, useModalNavigation } from "@/components/auth/modal-navigation";
 import { authApi } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/api-error";
 import { useAuthStore } from "@/stores/authStore";
 import type { AuthConfig, AuthUser } from "@/types/auth";
 import { workspaceHref } from "@/lib/workspace-navigation";
-import { getSafeNextPath } from "@/lib/auth-router";
 
 export default function SignupPage() {
   const router = useRouter();
   const canNavigate = useModalNavigation();
+  const complete = useCompleteLogin();
   const [config, setConfig] = useState<AuthConfig | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -40,9 +40,7 @@ export default function SignupPage() {
       });
       if (!canNavigate()) return;
       if (data.email_verification_required) { router.replace(workspaceHref(`/user/verify-email?email=${encodeURIComponent(values.email)}`, window.location.search), { scroll: false }); return; }
-      await useAuthStore.getState().login({ loginId: values.username, password: values.password });
-      if (!canNavigate()) return;
-      router.replace(workspaceHref(getSafeNextPath(new URLSearchParams(window.location.search).get("next")), window.location.search), { scroll: false });
+      await useAuthStore.getState().login({ loginId: values.username, password: values.password }, complete);
     } catch (caught) { setError(getApiErrorMessage(caught, "회원가입을 완료하지 못했습니다.")); }
     finally { setBusy(false); }
   };

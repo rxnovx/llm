@@ -51,12 +51,28 @@ test("회원가입부터 프로필·사진·재접속·로그아웃까지", asyn
   await expect(second.getByRole("link", { name: "로그인", exact: true })).toBeVisible();
   await second.reload();
   await expect(second.getByRole("link", { name: "로그인", exact: true })).toBeVisible();
+  const previousChat = "12345678-1234-1234-1234-123456789abc";
+  await page.goto(`/login?chat=${previousChat}`);
+  const previousChatRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === `/api/chat/conversations/${previousChat}`) previousChatRequests.push(request.url());
+  });
   await page.getByLabel("사용자명 또는 이메일", { exact: true }).fill(id);
   await page.getByLabel("비밀번호", { exact: true }).fill("BrowserPass123!");
   await page.getByRole("button", { name: "로그인", exact: true }).click();
+  await expect(page).toHaveURL(/\/$/);
   await expect(page.getByRole("heading", { name: "무엇을 함께 해볼까요?" })).toBeVisible();
   await page.goto("/user/profile");
   await expect(page.getByRole("dialog", { name: "설정", exact: true })).toBeVisible();
+  await expect(page.getByLabel("현재 로그인 이메일")).toHaveJSProperty("readOnly", true);
+  await page.getByRole("button", { name: "보안", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "로그인 이메일", exact: true })).toBeVisible();
+  await expect(page.getByText(`${id}@example.com`, { exact: true })).toBeVisible();
+  await expect(page.getByLabel("새 이메일", { exact: true })).toHaveCount(0);
+  expect(previousChatRequests).toEqual([]);
+  await page.goto("/user/verify-email?action=email-change&token=obsolete");
+  await expect(page.getByText("로그인 이메일은 가입 후 변경할 수 없습니다.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "확인", exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
