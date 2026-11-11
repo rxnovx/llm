@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
-from . import config, service, transport
+from . import config, merge_requests, service, transport
 
 router = APIRouter(prefix='/apps',tags=['apps'])
 Database = Annotated[Session,Depends(get_db)]
@@ -30,6 +30,14 @@ class CompleteInput(BaseModel):
 @router.get('/catalog')
 def catalog(context: Authenticated,db: Database):
     return service.catalog(db,context.user.id)
+
+
+@router.post('/gitlab/merge-request/resolve')
+async def resolve_merge_request(data: merge_requests.ResolveInput, context: Authenticated, db: Database):
+    bind, user_id = db.get_bind(), context.user.id
+    connection = merge_requests.find_connection(db, user_id, data.reference, data.connection_id, data.project_id)
+    db.rollback()
+    return await merge_requests.resolve(bind, user_id, connection)
 
 
 @router.post('/gitlab/{provider_id}/authorize')

@@ -88,11 +88,16 @@ def message_extra(item,run_id=None):
 
 def payload(item,run_id=None):
     record=item.source_record
+    traces = item.tool_traces[-80:]
+    if len(item.tool_traces) > len(traces):
+        pinned = [trace for trace in item.tool_traces[:-80]
+                  if trace.name.startswith('gitlab_mr_') or trace.name == 'gitlab_publication'][-12:]
+        traces = pinned + traces[len(pinned):]
     return {k:getattr(item,k) for k in ['id','role','content','status','model','is_test','error','created_at']}|{
         'apps':json.loads(record.apps_json) if record else [],'sources':json.loads(record.sources_json) if record else [],
         'assistant':json.loads(item.assistant_context.data_json) if item.assistant_context else {},
         'routing':json.loads(item.decision_record.data_json) if item.decision_record else {},
-        'tools':[{'name':t.name,'step':t.step,'status':t.status,'detail':t.detail} for t in item.tool_traces[-80:]],
+        'tools':[{'name':t.name,'step':t.step,'status':t.status,'detail':t.detail} for t in traces],
         **message_extra(item,run_id)}
 
 

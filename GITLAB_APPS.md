@@ -85,6 +85,16 @@ Termux의 cryptography `PyType_Type` 오류는 환경 변수 주소와 별개인
 
 한 요청에서 UTF-8 텍스트 파일 20개와 전체 변경 내용 1MiB까지 게시할 수 있습니다. 커밋은 완료되고 MR 요청이 실패하면 커밋 링크가 남습니다. 동일 작업공간의 같은 변경사항으로 다시 요청하면 기존 브랜치와 MR을 확인합니다. MR 생성 허용은 요청마다 선택합니다.
 
+## 기존 MR 검토와 후속 커밋
+
+1. 연결한 GitLab의 MR 링크를 채팅에 붙여넣고 리뷰나 CI를 물어봅니다. 등록된 서버와 일치하는 연결이 하나면 리뷰 댓글, 변경 파일, MR 파이프라인과 실패 작업 로그를 읽습니다. **@GitLab → 기존 MR 검토·후속 작업**에서 계정을 선택해 `그룹/프로젝트!27` 또는 프로젝트 선택 후 `!27`로 조회할 수도 있습니다.
+2. 코드를 수정할 때는 입력창의 **GitLab MR 후속 작업** 또는 이전 답변의 **이 MR에서 작업**을 누릅니다. MR을 확인한 뒤 **작업공간에서 코드 수정·테스트 허용**을 선택합니다. GitLab에 결과를 게시할 요청에는 **이번 요청의 기존 MR 커밋 허용**도 체크합니다. 기존 MR 생성과 같은 OAuth `api`, `allow_publish`, 도구 호출 모델 및 Terminal MCP 실행 구성을 사용합니다.
+3. “리뷰에서 지적된 반환값을 수정하고 테스트한 뒤 이 MR에 커밋해 줘”처럼 요청합니다. 채팅은 실제 조회·작업공간 준비·수정·실행·게시 단계와 검증된 MR·커밋 링크를 표시합니다. 다른 대화로 이동한 뒤 돌아와도 저장된 진행 기록을 확인할 수 있습니다.
+
+기존 MR의 대상 프로젝트와 소스 프로젝트를 각각 확인합니다. 포크 MR이라면 사용자의 권한으로 포크의 소스 브랜치에 추가 커밋합니다. 작업 사본은 확인된 MR의 커밋에서 체크아웃하며, 게시 직전 MR·브랜치가 이동했으면 중단합니다. 업데이트·삭제에는 파일별 `last_commit_id`를 전달합니다. 게시 요청의 응답이 끊기면 소스 브랜치에서 해당 커밋을 조회합니다. 게시 요청을 보낸 뒤 중지해도 GitLab에서 반영이 확인되면 커밋 링크를 기록합니다. 쓰기 허용은 해당 요청에만 적용합니다. [Merge requests API](https://docs.gitlab.com/api/merge_requests/) · [Commits API](https://docs.gitlab.com/api/commits/#create-a-commit) · [Repository files API](https://docs.gitlab.com/api/repository_files/)
+
+리뷰 조회는 최대 20개 스레드에서 미해결 의견을 우선해 8개 댓글을 발췌합니다. MR 변경 파일은 최대 12개, 실패 작업 로그는 최대 3개를 조회합니다. 큰 로그에는 끝부분 발췌를 사용하며 2MiB를 넘거나 권한이 없는 로그는 조회 상태를 표시합니다. 파이프라인 없음, 로그 조회 실패, 로컬 테스트 결과는 각각 구분합니다. 조회한 발췌는 선택한 모델 서버로 전송됩니다. [Discussions API](https://docs.gitlab.com/api/discussions/#list-all-merge-request-discussion-items) · [Jobs API](https://docs.gitlab.com/api/jobs/#retrieve-a-log-file-for-a-job)
+
 ## 파일 조회 범위와 제한
 
 - 사용자 계정마다 OAuth access/refresh token을 별도로 암호화합니다. 다른 사용자나 운영자의 연결로 대신 조회하지 않습니다. `state`는 10분·일회용이고 PKCE, 별도 HttpOnly 브라우저 nonce, 앱 사용자·로그인 세션 계열·인증 버전에 묶습니다. 앱 토큰 갱신은 같은 로그인으로 인정하지만 다른 로그인이나 계정으로 연결을 완료할 수 없습니다.
@@ -105,6 +115,7 @@ Nginx 기본 access log에서는 OAuth code가 있는 query string과 referrer�
 | `GET /api/apps/catalog` | 현재 사용자의 앱·서버·연결 목록 |
 | `POST /api/apps/gitlab/{provider}/authorize` | nonce cookie와 PKCE 인증 시작 |
 | `POST /api/apps/gitlab/oauth/complete` | 로그인한 사용자의 일회용 인증 완료 |
+| `POST /api/apps/gitlab/merge-request/resolve` | 내 연결을 사용해 기존 MR 링크 또는 번호 확인 |
 | `DELETE /api/apps/connections/{id}` | 내 연결 제거 및 원격 철회 시도 |
 | `GET /api/apps/connections/{id}/projects` | 내 권한으로 프로젝트 검색·페이지 조회 |
 | `GET /api/apps/connections/{id}/projects/{project}/branches` | 브랜치 페이지 조회 |

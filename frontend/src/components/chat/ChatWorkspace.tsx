@@ -15,9 +15,10 @@ import { CopyButton, MessageContent } from "./MessageContent";
 import { Icon, Wordmark, type IconName } from "./Icons";
 import "./workspace.css";
 import { replaceConversationLocation, workspaceHref } from "@/lib/workspace-navigation";
-import { backupOAuthDraft, takeOAuthDraft, OAUTH_LEAVING, type GitlabSelection } from "@/lib/app-connections";
+import { backupOAuthDraft, takeOAuthDraft, OAUTH_LEAVING, gitlabMergeRequestLink, type GitlabSelection } from "@/lib/app-connections";
 import { appMentionAt, removeAppMention } from "@/lib/app-mentions";
 import { GitlabScopeDialog } from "./GitlabScopeDialog";
+import { GitlabWorkProgress, gitlabWebUrl } from "./GitlabWorkProgress";
 import { MessageSources } from "./MessageSources";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { AssistantDialog } from './AssistantDialog';
@@ -39,20 +40,22 @@ function GitlabPublication({ tools }: { tools: ChatMessage["tools"] }) {
   const publications = tools?.filter(tool => tool.name === "gitlab_publication") ?? [];
   const activity = publications.findLast(tool => tool.status !== "running") ?? publications.at(-1);
   if (!activity) return null;
-  let result: { url: string; status?: string; iid?: number; error?: string };
-  let url: URL;
+  let result: { url: string; status?: string; iid?: number; error?: string; commit_url?: string; parent_sha?: string; base_sha?: string };
   try {
     result = JSON.parse(activity.detail);
-    url = new URL(result.url);
   } catch {
     return null;
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-  const label = result.status === "merge_request" && Number.isInteger(result.iid)
+  const url = gitlabWebUrl(result?.url);
+  if (!url) return null;
+  const commitUrl = gitlabWebUrl(result.commit_url);
+  const label = (result.status === "merge_request" || result.status === "updated") && Number.isInteger(result.iid)
     ? `GitLab MR !${result.iid} 열기`
     : "GitLab 커밋 열기";
   return <div className="cw-message-app">
-    <a href={url.href} target="_blank" rel="noreferrer" className="cw-text-button">{label} ↗</a>
+    <a href={url} target="_blank" rel="noreferrer" className="cw-text-button">{label} ↗</a>
+    {commitUrl && <a href={commitUrl} target="_blank" rel="noreferrer" className="cw-text-button">추가 커밋 보기 ↗</a>}
+    {result.parent_sha && result.parent_sha !== result.base_sha && <span> · 게시 중 추가된 커밋 위에 반영되었습니다.</span>}
     {typeof result.error === "string" && <span> · {result.error}</span>}
   </div>;
 }
@@ -96,6 +99,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const [mention, setMention] = useState<ReturnType<typeof appMentionAt>>(null);
   const [mentionChoice,setMentionChoice]=useState(0);
   const [scopeOpen, setScopeOpen] = useState(false), [toolStatus, setToolStatus] = useState("");
+  const [scopeReference, setScopeReference] = useState("");
   const [terminal,setTerminal]=useState({enabled:false,execution_enabled:false}),[workspaceOpen,setWorkspaceOpen]=useState(false);
   const [assistantOpen,setAssistantOpen]=useState(false),[assistantSelection,setAssistantSelection]=useState<AssistantSelection>(emptySelection);
   const [projects,setProjects]=useState<Project[]>([]),[projectId,setProjectId]=useState(''),[projectsOpen,setProjectsOpen]=useState(false);
@@ -144,11 +148,12 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const readOnly = !!active?.read_only || viewer;
   const canSend = ready && !readOnly && (!user || !!connection && (connection.is_test || !!model.trim())) && !busy && !loading && !initializing && !uploading;
   const openModels = () => { if (user) setSettingsOpen(true); else router.push(workspaceHref("/login", window.location.search), { scroll: false }); };
+  const openGitlabScope = (reference: string) => { setScopeReference(reference); setScopeOpen(true); };
   const selectGitlab = () => {
     if (mention) setDraft(removeAppMention(draft, mention));
     setMention(null);
     if (!user) { router.push(workspaceHref("/login?next=/user/settings/apps", window.location.search), { scroll: false }); return; }
-    setScopeOpen(true);
+    openGitlabScope(gitlabMergeRequestLink(draft));
   };
   const openAssistant=async()=>{
     if(mention)setDraft(removeAppMention(draft,mention));setMention(null);
@@ -348,7 +353,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       }
       const previousApp=detail.messages.at(-1)?.apps?.[0];
       setAssistantSelection({...emptySelection(),...detail.messages.at(-1)?.assistant});
-      setAppSelections(!detail.messages.at(-1)?.routing?.automatic_project&&(previousApp?.mode==='workspace'||previousApp?.mode==='execute')?[previousApp]:[]);setMention(null);setToolStatus("");
+      setAppSelections(!detail.messages.at(-1)?.routing?.automatic_project&&(previousApp?.mode==='workspace'||previousApp?.mode==='execute'||previousApp?.mode==='merge_request')?[previousApp]:[]);setMention(null);setToolStatus("");
       setPublishGitlab(false);
       replaceConversationLocation(item.id);
       if(item.match)requestAnimationFrame(()=>document.getElementById(`message-${item.match!.message_id}`)?.scrollIntoView({block:"center",behavior:"smooth"}));
@@ -420,7 +425,11 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           setMessages(old=>old.map(item=>item.id===assistantId?{...item,tools:[...(item.tools??[]),event.data].slice(-150)}:item));
         } else if(event.event==='workspace') {
           setMessages(old=>old.map(item=>item.id===assistantId?{...item,apps:event.data.selection?[event.data.selection]:item.apps?.map(selection=>({...selection,workspace_id:event.data.id}))}:item));
-          if(!retry&&!event.data.automatic)setAppSelections(old=>old.map(selection=>selection.connection_id===usedApps[0]?.connection_id&&selection.project_id===event.data.project_id?{...selection,workspace_id:event.data.id}:selection));
+          if(!retry&&!event.data.automatic)setAppSelections(old=>old.map(selection=>
+            selection.connection_id === usedApps[0]?.connection_id && selection.project_id === event.data.project_id
+            && selection.ref === event.data.ref && selection.merge_request?.iid === usedApps[0]?.merge_request?.iid
+            && selection.merge_request?.project_id === usedApps[0]?.merge_request?.project_id
+              ? {...selection,workspace_id:event.data.id} : selection));
         } else {
           generation.current = null;
           setQueue(null);
@@ -500,6 +509,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     catch (caught) { setError(errorText(caught)); }
   };
   const visible = conversations;
+  const draftMrLink = gitlabMergeRequestLink(draft);
   const composer = readOnly ? <p className="cw-composer-caption" role="status">프로젝트 대화 · 열람 전용</p> : <form className={`cw-composer ${streaming ? "is-streaming" : ""}`} onDragOver={e=>{if(e.dataTransfer.types.includes('Files'))e.preventDefault();}} onDrop={e=>{e.preventDefault();void attachFiles(Array.from(e.dataTransfer.files));}} onSubmit={(event) => { event.preventDefault(); void send(); }}>
     {uploadOpen&&active&&<UploadQueue key={active.id} ref={uploads} conversationId={active.id} disabled={busy} onBusy={setUploading} onReady={doc=>setAssistantSelection(old=>{
       if(old.document_ids.includes(doc.id))return old;
@@ -507,9 +517,11 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       return {...old,document_ids:[...old.document_ids,doc.id]};
     })}/>}
     {uploadOpen&&<p className="cw-upload-selection-note">직접 선택한 첨부 {assistantSelection.document_ids.length}/10 · 초과한 자료는 파일·지식에서 선택을 조정하세요.</p>}
-    {!!appSelections.length && <div className="cw-app-selection">{appSelections.map((selection) => <div key={selection.connection_id}><Icon name="code" size={15} /><span>GitLab · {selection.ref} · {selection.mode==='execute'?'분석·실행':selection.mode==='workspace'?'프로젝트 분석':`${selection.paths.length}개 파일`}</span>
-      {publishGitlab && <button type="button" className="cw-text-button" aria-label="이번 요청의 MR 생성 허용 취소" onClick={() => setPublishGitlab(false)}>MR 허용 ×</button>}
-      <button type="button" className="cw-icon-button" aria-label="GitLab 파일 선택 제거" onClick={() => { setAppSelections([]); setPublishGitlab(false); }}><Icon name="close" size={13} /></button></div>)}</div>}
+    {user && draftMrLink && <div className="cw-app-selection"><button type="button" className="cw-small-button" disabled={!canSend}
+      onClick={() => openGitlabScope(draftMrLink)}>GitLab MR 후속 작업</button></div>}
+    {!!appSelections.length && <div className="cw-app-selection">{appSelections.map((selection) => <div key={selection.connection_id}><Icon name="code" size={15} /><span>GitLab · {selection.merge_request ? `MR !${selection.merge_request.iid}` : selection.ref} · {selection.mode==='execute'?'수정·실행':selection.mode==='workspace'?'프로젝트 분석':selection.merge_request?'리뷰·CI 조회':`${selection.paths.length}개 파일`}</span>
+      {publishGitlab && <button type="button" className="cw-text-button" aria-label="이번 요청의 MR 게시 허용 취소" onClick={() => setPublishGitlab(false)}>{selection.merge_request ? "커밋 허용 ×" : "MR 생성 허용 ×"}</button>}
+      <button type="button" className="cw-icon-button" aria-label="GitLab 선택 제거" onClick={() => { setAppSelections([]); setPublishGitlab(false); }}><Icon name="close" size={13} /></button></div>)}</div>}
     {(assistantSelection.base_ids.length>0||assistantSelection.document_ids.length>0||assistantSelection.mcp_ids.length>0||assistantSelection.parallel_agents)&&<div className="cw-assistant-selection"><button type="button" onClick={()=>void openAssistant()}>지식 {assistantSelection.base_ids.length} · 첨부 {assistantSelection.document_ids.length} · 앱 {assistantSelection.mcp_ids.length}{assistantSelection.parallel_agents?' · 병렬 Agent':''}{assistantSelection.allow_writes?' · 쓰기 허용':''}</button><button type="button" aria-label="자료와 앱 선택 제거" onClick={()=>setAssistantSelection(emptySelection())}>×</button></div>}
     {mention && <div className="cw-app-mention" id="chat-app-options" role="listbox" aria-label="사용할 앱"><button id="chat-app-gitlab" type="button" role="option" aria-selected={mentionChoice===0}
       onMouseMove={()=>setMentionChoice(0)} onMouseDown={(e) => e.preventDefault()} onClick={selectGitlab}><Icon name="code" size={20} /><span><strong>GitLab</strong><small>내 프로젝트에서 파일 가져오기</small></span><kbd>↵</kbd></button><button id="chat-app-knowledge" type="button" role="option" aria-selected={mentionChoice===1} onMouseMove={()=>setMentionChoice(1)} onMouseDown={e=>e.preventDefault()} onClick={()=>void openAssistant()}><Icon name="plus" size={20}/><span><strong>지식·연결된 앱</strong><small>문서 검색과 MCP 도구 선택</small></span></button></div>}
@@ -592,12 +604,13 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           : <div className="cw-transcript" aria-label="대화 내용">{messages.map((message, index) => <article key={message.id} id={`message-${message.id}`} className={`cw-message cw-message-${message.role}`} aria-label={message.role === "user" ? "내 메시지" : "모델 답변"}>
             {message.role === "assistant" && <div className="cw-assistant-label"><Wordmark small /><span>{message.is_test ? "테스트 모델" : message.model}</span>{message.is_test && <small>예시 답변</small>}</div>}
             {message.role === "user" ? <div className="cw-human-text">{message.content}</div> : <>
-              {!!message.apps?.length && <p className="cw-message-app">GitLab · {message.apps[0].mode==='execute'?'프로젝트 분석·실행':message.apps[0].mode==='workspace'?'프로젝트 자동 분석':message.apps[0].paths.join(", ")}
+              {!!message.apps?.length && <p className="cw-message-app">GitLab · {message.apps[0].merge_request ? `기존 MR !${message.apps[0].merge_request.iid}` : message.apps[0].mode==='execute'?'프로젝트 분석·실행':message.apps[0].mode==='workspace'?'프로젝트 자동 분석':message.apps[0].paths.join(", ")}
                 {message.apps[0].workspace_id&&<button type="button" className="cw-text-button" onClick={()=>setWorkspaceOpen(true)}>작업공간 열기</button>}</p>}
+              {message.apps?.[0]?.merge_request && <GitlabWorkProgress message={message} onFollowup={canSend ? openGitlabScope : undefined} />}
               <GitlabPublication tools={message.tools} />
               {(message.routing?.automatic||message.routing?.status==='unverified')&&<p className="cw-message-app">{message.routing.status==='unverified'?'근거 확인 보류':message.routing.route==='knowledge'?'자동 문서 검색':message.routing.route==='gitlab'?'자동 소스 분석':message.routing.route==='both'?'소스·문서 함께 확인':'질문 자동 처리'}</p>}
               {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {tool.name} · {tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}
-              {message.content ? <MessageContent content={message.content} /> : message.status === "pending" ? toolStatus ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
+              {message.content ? <MessageContent content={message.content} /> : message.status === "pending" ? toolStatus && !message.apps?.[0]?.merge_request ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
               <MessageSources sources={message.sources ?? []} />
               {message.status === "error" && <p className="cw-message-error" role="alert">{message.error || "응답이 중단되었습니다. 다시 시도해 주세요."}</p>}
               {message.status === "cancelled" && <p className="cw-stopped">응답이 중지되었습니다.</p>}
@@ -617,7 +630,10 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     </main>
     {projectsOpen&&<ProjectsDialog projects={projects} selected={active?.project_id||projectId} active={active} onProjects={setProjects} onChoose={chooseProject} onMoved={item=>{setActive(item);updateConversation(item);setProjectId(item.project_id||'');}} onClose={()=>setProjectsOpen(false)}/>}
     <dialog ref={retryDialog} className="cw-dialog cw-action-dialog" aria-label="외부 작업 재시도 확인" onCancel={()=>setRetryConfirmation(null)} onClose={()=>setRetryConfirmation(null)}><h2>쓰기 작업을 다시 실행할까요?</h2><p>이 요청은 명령 실행 또는 외부 서비스 변경을 허용했습니다. 이미 처리된 작업도 다시 실행될 수 있으니 작업 기록을 확인하세요.</p><div className="cw-action-buttons"><button className="cw-small-button" onClick={()=>setRetryConfirmation(null)}>취소</button><button className="cw-primary-button" onClick={()=>{const content=retryConfirmation;setRetryConfirmation(null);if(content)void send(content,true,true);}}>확인하고 재시도</button></div></dialog>
-    {scopeOpen && <GitlabScopeDialog terminal={terminal} onClose={() => { setScopeOpen(false); editor.current?.focus(); }} onSelect={(selection, publish) => { setAppSelections([selection]); setPublishGitlab(publish); setScopeOpen(false); editor.current?.focus(); }} />}
+    {scopeOpen && <GitlabScopeDialog terminal={terminal} initialReference={scopeReference}
+      canWriteModel={!!connection && !connection.is_test && !!(connection.models.find(item => item.name === model)?.supports_tools ?? connection.supports_tools)}
+      onClose={() => { setScopeOpen(false); editor.current?.focus(); }}
+      onSelect={(selection, publish) => { setAppSelections([selection]); setPublishGitlab(publish); setScopeOpen(false); editor.current?.focus(); }} />}
     {workspaceOpen&&active&&<WorkspaceDialog conversationId={active.id} onClose={()=>setWorkspaceOpen(false)}/>}
     {assistantOpen&&active&&<AssistantDialog key={active.id} conversationId={active.id} admin={!!user?.is_global_admin} value={assistantSelection} onClose={()=>{setAssistantOpen(false);editor.current?.focus();}} onSelect={value=>{setAssistantSelection(value);setAssistantOpen(false);editor.current?.focus();}}/>}
     {contextOpen && active && <ContextDialog key={active.id} conversationId={active.id} connectionId={selected} model={model} content={draft}

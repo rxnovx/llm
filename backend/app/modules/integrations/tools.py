@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator,model_validator
 
 from .config import source_file, validate_path
+from .merge_requests import Reference
 from .service import GitlabClient
 from .transport import GitlabError
 
@@ -20,12 +21,17 @@ class GitlabSelection(BaseModel):
     project_id: int = Field(ge=1)
     ref: str = Field('HEAD',min_length=1,max_length=200)
     paths: list[str] = Field(default_factory=list,max_length=5)
-    mode: Literal['files','workspace','execute'] = 'files'
+    mode: Literal['files','workspace','execute','merge_request'] = 'files'
     workspace_id: UUID | None = None
+    merge_request: Reference | None = None
 
     @model_validator(mode='after')
     def has_files(self):
         if self.mode=='files' and not self.paths:raise ValueError('파일을 선택하세요.')
+        if self.mode == 'merge_request' and (not self.merge_request or self.workspace_id):
+            raise ValueError('조회할 MR을 선택하세요.')
+        if self.merge_request and (self.mode == 'files' or self.paths):
+            raise ValueError('MR과 개별 파일을 동시에 선택할 수 없습니다.')
         return self
 
     @field_validator('ref')

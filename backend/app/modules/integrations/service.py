@@ -185,7 +185,7 @@ def owned(db, user_id, connection_id):
 
 def require_publish(account, provider):
     if not provider.allow_publish:
-        raise HTTPException(403, '운영자가 이 GitLab 서버의 MR 생성을 허용해야 합니다.')
+        raise HTTPException(403, '운영자가 이 GitLab 서버의 MR 쓰기를 허용해야 합니다.')
     if account.status != 'connected' or not provider.can_publish(account.provider_fingerprint):
         raise HTTPException(403, '계정 설정에서 이 GitLab 서버의 MR 작성 권한을 연결하세요.')
 

@@ -101,7 +101,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         yield 'activity',record('knowledge_scope','complete',decision['retrieval_notice'])
     options['_query']=plan.query or question
     decision.setdefault('route',plan.route);decision['status']='running';save()
-    hold=enabled and bool(plan.needs_review or plan.uncertain or manual_knowledge or auto_knowledge or options.get('mcp_ids') or selection and selection.mode=='workspace')
+    hold=enabled and not (selection and selection.merge_request) and bool(plan.needs_review or plan.uncertain or manual_knowledge or auto_knowledge or options.get('mcp_ids') or selection and selection.mode=='workspace')
     # Never replay execution or external writes merely because an answer needs more evidence.
     replay_safe=not options.get('allow_writes') and not (selection and selection.mode=='execute')
     attempts=settings.assistant_max_retrieval_rounds if enabled and replay_safe else 1
