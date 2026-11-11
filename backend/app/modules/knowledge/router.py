@@ -155,11 +155,14 @@ async def upload(context: Authenticated, db: Database, file: UploadFile = File()
         raise HTTPException(409,'취소되었거나 만료된 첨부 요청입니다.')
     now = int(time.time())
     digest=hashlib.sha256(data).hexdigest()
-    # Raw image IDs keep their bytes across retry and branch operations. A new upload
-    # can use the same filename without replacing an earlier image or its OCR document.
-    existing=None if image_input else db.scalar(select(Document).where(Document.owner_id==user_id,Document.base_id==base_id,
+    candidates = select(Document).where(Document.owner_id==user_id,Document.base_id==base_id,
         Document.conversation_id==conversation_id,Document.filename==filename,Document.status!='image',
-        or_(Document.expires_at.is_(None),Document.expires_at>now)))
+        or_(Document.expires_at.is_(None),Document.expires_at>now))
+    if attempt and conversation_id:
+        # Clipboard filenames can repeat across turns. Reuse identical bytes only.
+        candidates = candidates.where(Document.sha256 == digest)
+    existing = None if image_input else db.scalar(candidates.order_by(
+        (Document.sha256 == digest).desc(), Document.created_at.desc(), Document.id.desc()).limit(1))
     if existing and existing.sha256==digest:
         if attempt:attempt.status='complete';attempt.document_id=existing.id;db.commit()
         return service.public(existing)

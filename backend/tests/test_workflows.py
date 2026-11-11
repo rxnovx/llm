@@ -147,6 +147,45 @@ def test_cancelled_upload_cannot_commit_or_delete_deduplicated_file(client,accou
     assert client.get('/knowledge/documents',headers=h,params={'conversation_id':c}).json()['items']==[]
 
 
+def test_chat_upload_attempts_keep_same_name_files_and_protect_accepted_documents(client, account):
+    headers = auth(account())
+    conversation = create(client, headers)
+
+    def attach(raw):
+        attempt = client.post('/workflows/uploads', headers=headers,
+            json={'filename': '자료.md', 'conversation_id': conversation})
+        assert attempt.status_code == 201, attempt.text
+        attempt_id = attempt.json()['id']
+        uploaded = client.post('/knowledge/documents', headers=headers,
+            data={'conversation_id': conversation, 'upload_id': attempt_id},
+            files={'file': ('자료.md', raw, 'text/markdown')})
+        assert uploaded.status_code == 201, uploaded.text
+        return attempt_id, uploaded.json()['id']
+
+    original = '연차 휴가 규정은 연간 15일입니다.'.encode()
+    creator, first_id = attach(original)
+    index(client)
+    unsent, second_id = attach('연차 휴가 규정은 연간 20일입니다.'.encode())
+    assert second_id != first_id
+    reused, duplicate_id = attach(original)
+    assert duplicate_id == first_id
+
+    accepted = send(client, headers, conversation, '연차 휴가 규정을 알려줘',
+        assistant={'document_ids': [duplicate_id]})
+    assert events(accepted)[-1][0] == 'done', accepted.text
+    for attempt_id in [creator, reused]:
+        assert client.post(f'/workflows/uploads/{attempt_id}/cancel', headers=headers).status_code == 409
+
+    rejected = send(client, headers, conversation, '두 번째 자료를 읽어줘',
+        assistant={'document_ids': [second_id]})
+    assert rejected.status_code == 409, rejected.text
+    assert client.post(f'/workflows/uploads/{unsent}/cancel', headers=headers).status_code == 200
+    with client.db_factory() as db:
+        first = db.get(Document, first_id)
+        assert first.raw == original and first.revision == 1
+        assert db.get(Document, second_id) is None
+
+
 def test_feedback_is_owner_scoped_operator_reviews_exact_version(client,account):
     h=auth(account());other=auth(account('bob'));c=create(client,h);send(client,h,c);m=last(client,h,c)
     r=client.post('/workflows/messages/'+m['id']+'/feedback',headers=h,json={'category':'source','detail':'출처가 다른 내용'});assert r.status_code==201

@@ -28,10 +28,11 @@ from app.modules.workspaces import client as workspace_client
 from app.modules.assistant import context as assistant_context
 from app.modules.assistant import gitlab as gitlab_prompt
 from app.modules.assistant.models import TurnContext
+from app.modules.knowledge import service as knowledge
 from app.modules.knowledge.models import Document
 from app.modules.workflows import conversations as workflows
 from app.modules.workflows import image_inputs, image_queue
-from app.modules.workflows.models import AutoSummary
+from app.modules.workflows.models import AutoSummary, UploadAttempt
 from app.modules.workflows.projects import project_access, project_role
 
 router = APIRouter(prefix='/chat', tags=['chat'])
@@ -383,6 +384,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     options=data.assistant.model_dump(mode='json') if data.assistant is not None else (
         json.loads(assistant.assistant_context.data_json) if data.retry and assistant.assistant_context else {})
     image_mode = options.get('image_mode', 'auto')
+    document_ids = options.get('document_ids', [])
     if image_mode != 'auto' and (apps or data.publish_gitlab):
         raise HTTPException(422, '이 요청에서 이미지 작업과 GitLab 작업 중 하나를 선택하세요.')
     settings = get_settings()
@@ -390,6 +392,11 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     try:
         connection.profile(model)
         assistant_context.validate(db,user_id,item.id,options,connection,model)
+        if image_mode in {'vision', 'edit'}:
+            for document_id in document_ids:
+                document = knowledge.document_access(db, user_id, document_id, conversation_id=item.id)
+                if document.base_id:
+                    raise HTTPException(404, '이 대화의 첨부 이미지를 찾을 수 없습니다.')
         if render_only:
             history, report = [{'role': 'user', 'content': content}], None
         else:
@@ -423,6 +430,13 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     try:
         db.flush()
         if not render_only:scheduler.enqueue(db, run, settings)
+        if document_ids and image_mode != 'generate':
+            # Upload cancellation uses the same lock. Mark the attempts attached
+            # together, including the one that created a reused document.
+            db.execute(update(UploadAttempt).where(
+                UploadAttempt.owner_id == user_id, UploadAttempt.conversation_id == item.id,
+                UploadAttempt.document_id.in_(document_ids), UploadAttempt.status == 'complete',
+            ).values(status='attached'))
         db.commit()
     except IntegrityError:
         db.rollback()

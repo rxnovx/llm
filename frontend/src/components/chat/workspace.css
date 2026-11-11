@@ -90,6 +90,56 @@
 .cw-welcome-description { margin:10px 0 0; font-size:13px; color:var(--cw-muted); line-height:1.7; }
 .cw-composer { border:1px solid var(--control-border); border-radius:var(--radius-dialog); padding:17px 17px 12px; background:var(--surface); box-shadow:var(--shadow-sm); transition:border-color .15s; }
 .cw-composer:focus-within { border-color:var(--focus); box-shadow:0 0 0 2px color-mix(in srgb,var(--focus) 16%,transparent); }
+.cw-draft-attachments {
+  display:flex;
+  gap:8px;
+  max-inline-size:100%;
+  margin:0 0 8px;
+  padding:2px 2px 4px;
+  overflow-x:auto;
+  overscroll-behavior-inline:contain;
+  list-style:none;
+}
+.cw-draft-attachment {
+  display:flex;
+  flex:none;
+  align-items:center;
+  gap:8px;
+  min-inline-size:0;
+  max-inline-size:min(100%, 232px);
+  padding:4px;
+  border:1px solid var(--cw-line);
+  border-radius:var(--radius-control);
+  background:var(--cw-soft);
+}
+.cw-draft-attachment-preview {
+  display:grid;
+  flex:none;
+  place-items:center;
+  inline-size:42px;
+  block-size:42px;
+  overflow:hidden;
+  border-radius:var(--radius-md);
+  background:var(--cw-panel);
+  color:var(--cw-muted);
+}
+.cw-draft-attachment-preview img { inline-size:100%; block-size:100%; object-fit:contain; }
+.cw-draft-attachment-details { min-inline-size:0; font-size:12px; }
+.cw-draft-attachment-details > span {
+  display:block;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.cw-draft-attachment-details small { color:var(--cw-muted); font-size:10px; }
+.cw-draft-attachment-details progress {
+  display:block;
+  inline-size:min(100%, 100px);
+  block-size:4px;
+  margin-top:4px;
+  accent-color:var(--cw-accent);
+}
+.cw-draft-attachment > button { flex-shrink:0; }
 .cw-composer textarea { display:block; min-height:70px; max-height:200px; overflow-y:auto; width:100%; border:0; outline:none; box-shadow:none; resize:none; background:transparent; color:var(--cw-ink); font:inherit; font-size:14px; line-height:1.8; padding:0 1px 10px; }
 .cw-composer textarea::placeholder { color:var(--fg-disabled); }
 .cw-composer-bottom { display:flex; align-items:center; gap:8px; }

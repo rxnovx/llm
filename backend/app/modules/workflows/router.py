@@ -300,6 +300,7 @@ def upload_attempt(data: UploadInput,context: Authenticated,db: Database):
 def cancel_upload(upload_id: UUID,context: Authenticated,db: Database):
     lock(db);row=db.get(UploadAttempt,str(upload_id))
     if not row or row.owner_id!=context.user.id:raise HTTPException(404,'첨부 요청을 찾을 수 없습니다.')
+    if row.status == 'attached':raise HTTPException(409,'이미 대화에 전송한 첨부 파일입니다.')
     row.status='cancelled'
     if row.created_document and row.document_id:
         doc=db.get(Document,row.document_id)

@@ -285,6 +285,41 @@ def assert_rejected(response):
         assert response.status_code in {404, 409, 422}, response.text
 
 
+def test_vision_upload_cancellation_respects_turn_acceptance(client, account, wire, png_bytes):
+    async def handle(_request):
+        return reply()
+
+    requests = wire(handle)
+    headers = auth(account())
+    conversation = create(client, headers)
+
+    def attach():
+        attempt = client.post('/workflows/uploads', headers=headers,
+            json={'filename': '사진.png', 'conversation_id': conversation})
+        assert attempt.status_code == 201, attempt.text
+        attempt_id = attempt.json()['id']
+        uploaded = client.post('/knowledge/documents', headers=headers,
+            data={'conversation_id': conversation, 'upload_id': attempt_id, 'image_input': 'true'},
+            files={'file': ('사진.png', png_bytes, 'image/png')})
+        assert uploaded.status_code == 201, uploaded.text
+        return attempt_id, uploaded.json()['id']
+
+    cancelled, lost_id = attach()
+    assert client.post(f'/workflows/uploads/{cancelled}/cancel', headers=headers).status_code == 200
+    lost = multimodal(client, headers, conversation, 'vision', '사진을 설명해 줘', document_ids=[lost_id])
+    assert lost.status_code == 404, lost.text
+    assert client.get(f'/chat/conversations/{conversation}', headers=headers).json()['messages'] == []
+    assert requests == []
+
+    attached, kept_id = attach()
+    accepted = multimodal(client, headers, conversation, 'vision', '사진을 설명해 줘', document_ids=[kept_id])
+    assert events(accepted)[-1][0] == 'done', accepted.text
+    assert len(requests) == 1
+    assert client.post(f'/workflows/uploads/{attached}/cancel', headers=headers).status_code == 409
+    assert kept_id in [doc['id'] for doc in client.get('/knowledge/documents', headers=headers,
+        params={'conversation_id': conversation}).json()['items']]
+
+
 def test_raw_image_upload_checks_pixels_and_is_not_rag_input(client, account, wire, png_bytes):
     headers = auth(account())
     conversation = create(client, headers)

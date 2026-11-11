@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { ApiRequestError, authenticatedFetch } from "@/lib/authenticated-fetch";
+import { newRequestId } from "@/lib/request-id";
 import type { ImageProbeMode, ImageProbeResult, ImageServers } from "@/types/admin";
 
 const modes = ["generate", "edit"] as const;
@@ -8,14 +9,6 @@ const labels = { generate: "이미지 생성", edit: "이미지 편집" };
 const envNames = { generate: "IMAGE_GENERATION_URL", edit: "IMAGE_EDIT_URL" };
 type Result = { error: boolean; text: string };
 type Probe = { id: string; controller: AbortController; cancelling: boolean };
-
-function probeId() {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 15) | 64;
-  bytes[8] = (bytes[8] & 63) | 128;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
-}
 
 function cancelProbe(id: string) {
   return authenticatedFetch(`/api/admin/images/probe/${id}/cancel`, {
@@ -76,7 +69,7 @@ export function ImageDiagnostics({ onForbidden }: { onForbidden: () => void }) {
   const probe = async (mode: ImageProbeMode) => {
     if (!servers?.[mode].configured || activeProbe.current) return;
     const abort = new AbortController();
-    const attempt: Probe = { id: probeId(), controller: abort, cancelling: false };
+    const attempt: Probe = { id: newRequestId(), controller: abort, cancelling: false };
     activeProbe.current = attempt;
     setProbing(mode);
     setResults((old) => ({ ...old, [mode]: undefined }));

@@ -26,9 +26,12 @@ import { AssistantDialog } from './AssistantDialog';
 import { MessageWorkflow } from './MessageWorkflow';
 import { resultImageTypes } from './AnswerImage';
 import { ProjectsDialog } from './ProjectsDialog';
-import { UploadQueue,type UploadHandle } from './UploadQueue';
+import { DraftAttachments, type DraftAttachment } from './DraftAttachments';
+import { ExistingImagePicker } from './ExistingImagePicker';
+import { cancelAttachmentUpload, defaultAttachmentConfig, uploadAttachment, type AttachmentConfig } from '@/lib/attachments';
+import { newRequestId } from '@/lib/request-id';
 import { workflowJson,type Project,type ForkResult,type ResultFile } from '@/lib/workflows';
-import { emptySelection,type AssistantSelection,type ImageMode,type KnowledgeDocument } from '@/lib/knowledge';
+import { emptySelection, knowledgeJson, type AssistantSelection, type ImageMode, type KnowledgeDocument } from '@/lib/knowledge';
 
 const starters: { icon: IconName; title: string; prompt: string }[] = [
   { icon: "idea", title: "아이디어 정리", prompt: "떠오른 아이디어를 실행 가능한 계획으로 정리하고 싶어요. 먼저 어떤 내용을 알려드리면 좋을까요?" },
@@ -55,6 +58,21 @@ const imagePlaceholders = {
 type ImageReference = { id: string; name: string };
 type ImageDraft = { mode: ImageMode; artifact: ImageReference | null; attachments: ImageReference[] };
 const emptyImageDraft = (): ImageDraft => ({ mode: 'auto', artifact: null, attachments: [] });
+const clipboardImageSuffix: Record<string, string> = {
+  'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/tiff': '.tiff',
+};
+function attachmentSuffix(file: File) {
+  const dot = file.name.lastIndexOf('.');
+  return dot > 0 ? file.name.slice(dot).toLowerCase() : '';
+}
+function transferFiles(data: DataTransfer) {
+  const files = Array.from(data.files);
+  if (files.length) return files;
+  return Array.from(data.items).flatMap(item => {
+    const file = item.kind === 'file' ? item.getAsFile() : null;
+    return file ? [file] : [];
+  });
+}
 function assistantDraft(selection?: Partial<AssistantSelection>): AssistantSelection {
   const text = { ...emptySelection(), ...selection };
   if (text.image_mode && text.image_mode !== 'auto') text.document_ids = [];
@@ -141,9 +159,15 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const [imageDraft, setImageDraft] = useState<ImageDraft>(emptyImageDraft);
   const [assistantOpen,setAssistantOpen]=useState(false),[assistantSelection,setAssistantSelection]=useState<AssistantSelection>(emptySelection);
   const [projects,setProjects]=useState<Project[]>([]),[projectId,setProjectId]=useState(''),[projectsOpen,setProjectsOpen]=useState(false);
-  const [uploading,setUploading]=useState(false),[uploadOpen,setUploadOpen]=useState(false),[searchLoading,setSearchLoading]=useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [existingImagesOpen, setExistingImagesOpen] = useState(false);
+  const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
+  const [attachmentConfig, setAttachmentConfig] = useState<AttachmentConfig>(defaultAttachmentConfig);
+  const [searchLoading,setSearchLoading]=useState(false);
   const [retryConfirmation,setRetryConfirmation]=useState<string|null>(null);
-  const retryDialog=useRef<HTMLDialogElement>(null),droppedFiles=useRef<File[]>([]),uploads=useRef<UploadHandle>(null),listVersion=useRef(0);
+  const retryDialog=useRef<HTMLDialogElement>(null),listVersion=useRef(0);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const attachmentSequence = useRef(0);
   const [menu, setMenu] = useState("");
   const [accountOpen, setAccountOpen] = useState(false);
   const [action, setAction] = useState<{ type: "rename" | "delete"; item: Conversation } | null>(null);
@@ -170,6 +194,13 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const busy = streaming || !!active?.busy;
   const subject = user?.subject;
   const anyRunning = conversations.some(item => item.busy);
+  useEffect(() => {
+    if (!subject) return;
+    const abort = new AbortController();
+    void knowledgeJson<AttachmentConfig>('/config', { signal: abort.signal })
+      .then(config => { if (!abort.signal.aborted) setAttachmentConfig(config); }).catch(() => {});
+    return () => abort.abort();
+  }, [subject]);
   useEffect(() => {
     if (!subject || !anyRunning) return;
     const abort = new AbortController();
@@ -202,12 +233,38 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   };
   const recentImage = imageMode === 'edit' && messages.findLast(message =>
     message.role === 'assistant' && message.status === 'complete' && message.artifacts?.some(file => resultImageTypes.has(file.format)));
-  const imageHasSource = Boolean(imageDraft.artifact || imageDraft.attachments.length);
+  const draftMrLink = gitlabMergeRequestLink(draft);
+  const rasterFormats = attachmentConfig.image_formats ?? defaultAttachmentConfig.image_formats;
+  const documentFormats = attachmentConfig.formats ?? defaultAttachmentConfig.formats;
+  const acceptsRawImages = draftAttachments.length > 0 && draftAttachments.every(item => rasterFormats.includes(attachmentSuffix(item.file)));
+  const explicitContext = Boolean(appSelections.length || assistantSelection.base_ids.length || assistantSelection.document_ids.length ||
+    assistantSelection.mcp_ids.length || assistantSelection.parallel_agents || draftMrLink || draft.toLowerCase().includes(GITLAB_MENTION));
+  const sendMode = imageMode === 'auto' && availableModes.vision && acceptsRawImages && !explicitContext ? 'vision' : imageMode;
+  const rawImageUpload = sendMode === 'vision' || sendMode === 'edit';
+  const imageHasSource = Boolean(imageDraft.artifact || imageDraft.attachments.length || (rawImageUpload && draftAttachments.length));
   const imageArtifactAvailable = !imageDraft.artifact || messages.some(message =>
     message.artifacts?.some(file => file.id === imageDraft.artifact?.id));
   const imageModeReady = availableModes[imageMode] && imageArtifactAvailable &&
-    (!imageAttachments || imageHasSource || Boolean(recentImage)) &&
-    (imageMode !== 'edit' || imageDraft.attachments.length <= 1);
+    (!rawImageUpload || imageHasSource || Boolean(recentImage)) &&
+    (sendMode !== 'edit' || imageDraft.attachments.length + draftAttachments.length <= 1);
+  const attachmentBytes = draftAttachments.reduce((sum, item) => sum + item.file.size, 0);
+  let attachmentIssue = '';
+  if (draftAttachments.length) {
+    if (sendMode === 'generate') attachmentIssue = '첨부를 사용하려면 자동·이미지 분석·이미지 편집 중 하나를 선택하세요.';
+    else if (rawImageUpload) {
+      const limit = sendMode === 'edit' ? 1 : 4;
+      if (!acceptsRawImages) attachmentIssue = '이미지 분석과 편집에는 PNG·JPEG·WebP를 첨부하세요.';
+      else if (draftAttachments.length + imageDraft.attachments.length > limit) attachmentIssue = `이미지를 ${limit}장 이하로 남겨 주세요.`;
+      else if (attachmentBytes > (attachmentConfig.image_max_upload_bytes ?? defaultAttachmentConfig.image_max_upload_bytes))
+        attachmentIssue = '첨부한 이미지의 전체 크기를 업로드 한도 이내로 줄여 주세요.';
+    } else if (!attachmentConfig.enabled) attachmentIssue = '파일 검색이 꺼져 있습니다. 이미지 입력을 지원하는 모델에서 이미지를 분석할 수 있습니다.';
+    else if (draftAttachments.some(item => !documentFormats.includes(attachmentSuffix(item.file))))
+      attachmentIssue = '이 첨부를 처리할 수 있는 이미지 분석 모드나 파일 형식을 선택하세요.';
+    else if (draftAttachments.length + assistantSelection.document_ids.length > 10)
+      attachmentIssue = '선택한 자료를 포함해 첨부를 10개 이하로 남겨 주세요.';
+  }
+  const attachmentOnlyText = draftAttachments.length && sendMode !== 'edit'
+    ? rawImageUpload ? '첨부한 이미지를 설명해 줘.' : '첨부한 자료의 내용을 알려줘.' : '';
   const openModels = () => { if (user) setSettingsOpen(true); else router.push(workspaceHref("/login", window.location.search), { scroll: false }); };
   const openGitlabScope = (reference: string) => { setScopeReference(reference); setScopeOpen(true); };
   const openAssistant=async()=>{
@@ -385,14 +442,15 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   }, [active?.id, readOnly, busy, selected, model, draft]);
 
   const updateConversation = (item: Conversation) => setConversations(old=>projectId&&item.project_id!==projectId?old:[{...old.find(v=>v.id===item.id),...item},...old.filter(v=>v.id!==item.id)]);
-  const resetImageDraft = () => {
-    droppedFiles.current = [];
+  const resetAttachmentDraft = () => {
+    setDraftAttachments([]);
+    setExistingImagesOpen(false);
     setImageDraft(emptyImageDraft());
   };
   const acceptWorkflow=(result:ForkResult)=>{
     setActive(result.conversation);setMessages(result.messages);setDraft(result.draft||'');setContextReport(null);setQueue(null);generation.current=null;
     const last=result.messages.at(-1);setAssistantSelection(assistantDraft(result.assistant??last?.assistant));
-    resetImageDraft();
+    resetAttachmentDraft();
     if (result.draft && result.assistant?.image_mode && result.assistant.image_mode !== 'auto') {
       const { image_mode: mode, image_artifact_id: artifactId, document_ids: documentIds = [] } = result.assistant;
       const file = artifactId && result.messages.flatMap(message => message.artifacts ?? []).find(file => file.id === artifactId);
@@ -406,34 +464,63 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     setPublishGitlab(false);
     setSelected(result.conversation.connection_id);setModel(result.conversation.model);setProjectId(result.conversation.project_id||'');updateConversation(result.conversation);replaceConversationLocation(result.conversation.id);pinned.current=true;
     setError(result.excluded_attachments?`만료되거나 접근할 수 없는 첨부 ${result.excluded_attachments}개는 제외했습니다. 다시 첨부하세요.`:'');
-    setUploadOpen(false);requestAnimationFrame(()=>editor.current?.focus());
+    requestAnimationFrame(()=>editor.current?.focus());
   };
   const continueConversation=async()=>{if(!active||busy)return;setLoading(true);try{acceptWorkflow(await workflowJson<ForkResult>(`/conversations/${active.id}/continue`,{method:'POST'}));}catch(e){setError(errorText(e));}finally{setLoading(false);}};
-  useEffect(()=>{if(uploadOpen&&active&&uploads.current&&droppedFiles.current.length){uploads.current.add(droppedFiles.current);droppedFiles.current=[];}},[active,uploadOpen]);
-  const attachFiles=async(files:File[])=>{
-    if(!user){router.push(workspaceHref('/login',window.location.search),{scroll:false});return;}
-    if(!canSend||awaitingStart.current||imageMode==='generate'||!availableModes[imageMode])return;
-    const creating = !active;
-    if (creating) { awaitingStart.current = true; setStarting(true); }
-    try{
-      if(!active){const next=await chatJson<Conversation>('/conversations',{method:'POST',body:JSON.stringify({connection_id:selected,model,project_id:projectId||null})});setActive(next);updateConversation(next);replaceConversationLocation(next.id);}
-      if(uploads.current)uploads.current.add(files);else droppedFiles.current=files;
-      setUploadOpen(true);
-    }catch(e){setError(errorText(e));}
-    finally { if (creating) { awaitingStart.current = false; setStarting(false); } }
+  const chooseFiles = () => {
+    if (!user) { router.push(workspaceHref('/login', window.location.search), { scroll: false }); return; }
+    if (canSend && !awaitingStart.current && imageMode !== 'generate') fileInput.current?.click();
   };
-  const selectUploadedFile = (doc: KnowledgeDocument) => {
-    if (imageAttachments) {
-      setImageDraft(current => {
-        const file = { id: doc.id, name: doc.filename };
-        const attachments = current.mode === 'edit' ? [file] :
-          [...current.attachments.filter(item => item.id !== file.id), file].slice(0, 4);
-        return { ...current, artifact: null, attachments };
-      });
-    } else {
-      setAssistantSelection(current => current.document_ids.includes(doc.id) || current.document_ids.length >= 10
-        ? current : { ...current, document_ids: [...current.document_ids, doc.id] });
+  const stageFiles = (files: File[]) => {
+    if (!files.length || readOnly) return;
+    if (!user) { router.push(workspaceHref('/login', window.location.search), { scroll: false }); return; }
+    if (!canSend || awaitingStart.current) return;
+    if (imageMode === 'generate') { setError('첨부를 사용하려면 자동·이미지 분석·이미지 편집 중 하나를 선택하세요.'); return; }
+
+    const allowed = new Set(imageAttachments ? rasterFormats : [...documentFormats, ...rasterFormats]);
+    const staged: DraftAttachment[] = [];
+    const rejected: string[] = [];
+    for (let file of files) {
+      const clipboardSuffix = clipboardImageSuffix[file.type];
+      if (!attachmentSuffix(file) && clipboardSuffix) {
+        file = new File([file], (file.name || '클립보드 이미지') + clipboardSuffix, {
+          type: file.type, lastModified: file.lastModified,
+        });
+      }
+      const suffix = attachmentSuffix(file);
+      const maxBytes = imageAttachments ? attachmentConfig.image_max_upload_bytes ?? defaultAttachmentConfig.image_max_upload_bytes
+        : attachmentConfig.max_upload_bytes;
+      if (!allowed.has(suffix) || file.size === 0 || file.size > maxBytes) {
+        rejected.push(file.name || '이름 없는 파일');
+        continue;
+      }
+      staged.push({ id: String(++attachmentSequence.current), file,
+        isImage: rasterFormats.includes(suffix) || suffix === '.tif' || suffix === '.tiff' });
     }
+    const limit = imageMode === 'edit' ? 1 : imageMode === 'vision' ? 4 - imageDraft.attachments.length : 10;
+    const next = imageMode === 'edit' ? staged : [...draftAttachments, ...staged];
+    if (next.length > limit) {
+      setError(imageMode === 'edit' ? '편집할 이미지는 한 장만 첨부하세요.' :
+        imageMode === 'vision' ? '이미지는 한 번에 네 장까지 첨부할 수 있습니다.' : '첨부는 한 번에 10개까지 추가할 수 있습니다.');
+      return;
+    }
+    setError(rejected.length ? `${rejected.slice(0, 3).join(', ')} 파일의 형식과 크기를 확인하세요.` : '');
+    if (!staged.length) return;
+    setDraftAttachments(items => imageMode === 'edit' ? staged : [...items, ...staged]);
+    setImageDraft(current => ({ ...current, artifact: null, attachments: current.mode === 'edit' ? [] : current.attachments }));
+    setMention(null);
+    restoreComposerFocus();
+  };
+  const selectExistingImage = (doc: KnowledgeDocument) => {
+    if (imageMode === 'edit') setDraftAttachments([]);
+    setImageDraft(current => {
+      const file = { id: doc.id, name: doc.filename };
+      const attachments = current.mode === 'edit' ? [file] :
+        [...current.attachments.filter(item => item.id !== file.id), file];
+      return { ...current, artifact: null, attachments };
+    });
+    setExistingImagesOpen(false);
+    restoreComposerFocus();
   };
   const detach = () => {
     const stream = controller.current;
@@ -449,11 +536,11 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     if (awaitingStart.current || uploading) return;
     detach();
     loadController.current?.abort(); setLoading(false);
-    setUploadOpen(false);setActive(null); setMessages([]); setDraft(""); setError(""); setSidebar(false); setMenu(""); pinned.current = true;
+    setActive(null); setMessages([]); setDraft(""); setError(""); setSidebar(false); setMenu(""); pinned.current = true;
     setContextReport(null); setQueue(null); setContextOpen(false); generation.current = null;
     setAppSelections([]); setPublishGitlab(false); setMention(null); setToolStatus("");
     setAssistantSelection(emptySelection());setAssistantOpen(false);
-    resetImageDraft();
+    resetAttachmentDraft();
     if (projects.find(project => project.id === projectId)?.role === 'viewer') setProjectId('');
     replaceConversationLocation(null);
     requestAnimationFrame(() => editor.current?.focus());
@@ -477,7 +564,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     try {
       const detail = await chatJson<ConversationDetail>(`/conversations/${item.id}`, { signal: abort.signal });
       if (abort.signal.aborted) return;
-      setUploadOpen(false);resetImageDraft();pinned.current = !item.match; setActive(detail.conversation); setMessages(detail.messages); setDraft("");
+      resetAttachmentDraft();pinned.current = !item.match; setActive(detail.conversation); setMessages(detail.messages); setDraft("");
       setContextReport(null); setQueue(detail.generation ?? null); setContextOpen(false);
       generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
       if (!detail.conversation.read_only) {
@@ -494,8 +581,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   };
 
   const send = async (content = draft, retry = false, confirmed = false) => {
-    const text = content.trim();
-    if (!text || !canSend || sending.current || (!retry && !imageModeReady)) return;
+    const text = content.trim() || (retry ? '' : attachmentOnlyText);
+    if (!text || !canSend || sending.current || (!retry && (!imageModeReady || attachmentIssue))) return;
     if (!user) { onGuestDraft(text); router.push(workspaceHref("/login", window.location.search), { scroll: false }); return; }
     const last=messages.at(-1);
     if(retry&&!confirmed&&(last?.assistant?.allow_writes||last?.apps?.some(a=>a.mode==='execute'))){setRetryConfirmation(text);return;}
@@ -504,17 +591,26 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     const abort = new AbortController(); controller.current = abort;
     awaitingStart.current = true;
     setStarting(true);
-    const originalDraft = draft;
-    const usedApps = retry ? last?.apps ?? [] : imageMode === 'auto' ? appSelections : [];
-    const usedAssistant: AssistantSelection | undefined = retry ? last?.assistant : imageMode === 'auto' ? assistantSelection : {
+    const files = retry ? [] : draftAttachments;
+    const uploadAttempts: string[] = [];
+    const usedApps = retry ? last?.apps ?? [] : sendMode === 'auto' ? appSelections : [];
+    let usedAssistant: AssistantSelection | undefined = retry ? last?.assistant : sendMode === 'auto' ? assistantSelection : {
       ...emptySelection(),
-      image_mode: imageMode,
+      image_mode: sendMode,
       image_artifact_id: imageDraft.artifact?.id ?? null,
       document_ids: imageDraft.attachments.map(file => file.id),
     };
-    if (!retry) setDraft("");
+    const acceptDraft = () => {
+      if (retry) return;
+      setDraft('');
+      if (sendMode === 'auto' && files.length && usedAssistant) setAssistantSelection(usedAssistant);
+      resetAttachmentDraft();
+    };
+    const showProgress = (id: string, progress: DraftAttachment['progress']) =>
+      setDraftAttachments(items => items.map(item => item.id === id ? { ...item, progress } : item));
     let current = active;
     let assistantId = "";
+    let requestId: string | undefined;
     let restoredQueue: QueueState | null = null;
     try {
       if (!current) {
@@ -523,9 +619,44 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         setActive(current); updateConversation(current);
         replaceConversationLocation(current.id);
       }
-      const id = crypto.randomUUID(); generation.current = { id, conversation: current.id };
+      if (files.length) {
+        setUploading(true);
+        const uploaded: string[] = [];
+        const conversationId = current.id;
+        const uploadFailure = new AbortController();
+        const uploadSignal = AbortSignal.any([abort.signal, uploadFailure.signal]);
+        for (let offset = 0; offset < files.length; offset += 2) {
+          const results = await Promise.allSettled(files.slice(offset, offset + 2).map(async ({ file, id }) => {
+            showProgress(id, { stage: 'uploading', percent: 0 });
+            try {
+              const document = await uploadAttachment(file, { conversationId, imageInput: rawImageUpload }, {
+                signal: uploadSignal,
+                onAttempt: attemptId => uploadAttempts.push(attemptId),
+                onProgress: percent => showProgress(id, { stage: 'uploading', percent }),
+                onIndexing: () => showProgress(id, { stage: 'indexing' }),
+              });
+              showProgress(id, { stage: 'ready' });
+              return document.id;
+            } catch (caught) {
+              uploadSignal.throwIfAborted();
+              const failure = new Error(`${file.name} 첨부 실패 · ${errorText(caught)}`);
+              uploadFailure.abort(failure);
+              throw failure;
+            }
+          }));
+          for (const result of results) {
+            if (result.status === 'rejected') throw result.reason;
+            uploaded.push(result.value);
+          }
+        }
+        usedAssistant = { ...(usedAssistant ?? emptySelection()),
+          document_ids: [...new Set([...(usedAssistant?.document_ids ?? []), ...uploaded])] };
+        setUploading(false);
+      }
+      abort.signal.throwIfAborted();
+      requestId = newRequestId(); generation.current = { id: requestId, conversation: current.id };
       const response = await chatFetch(`/conversations/${current.id}/messages`, { method: "POST", signal: abort.signal,
-        body: JSON.stringify({ content: text, connection_id: selected, model, request_id: id, retry, confirm_write_retry:confirmed, apps: usedApps,
+        body: JSON.stringify({ content: text, connection_id: selected, model, request_id: requestId, retry, confirm_write_retry:confirmed, apps: usedApps,
           ...(!retry && publishGitlab && usedApps[0]?.mode === "execute" ? { publish_gitlab: true } : {}),
           assistant:usedAssistant }) });
       if (!response.body) throw new Error("응답 연결을 열지 못했습니다.");
@@ -538,8 +669,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           awaitingStart.current = false;
           setStarting(false);
           setPublishGitlab(false);
-          if (!retry && imageMode === 'auto' && (!usedApps[0]?.mode || usedApps[0].mode==='files')) setAppSelections([]);
-          if (!retry && imageMode !== 'auto') { setUploadOpen(false); resetImageDraft(); }
+          if (!retry && sendMode === 'auto' && (!usedApps[0]?.mode || usedApps[0].mode==='files')) setAppSelections([]);
+          acceptDraft();
           setMessages((old) => [...old.filter((item) => item.id !== human.id && item.id !== assistant.id), human, assistant]);
           setActive(conversation); updateConversation(conversation);
           requestAnimationFrame(() => editor.current?.focus());
@@ -581,11 +712,9 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     } catch (caught) {
       if (controller.current !== abort) return;
       if (abort.signal.aborted) {
-        if (!assistantId && !retry) setDraft(originalDraft || text);
         setMessages((old) => old.map((item) => item.status === "pending" ? { ...item, status: "cancelled" } : item));
       } else {
         setError(errorText(caught));
-        if (!assistantId && !retry) setDraft(originalDraft || text);
         setMessages((old) => old.map((item) => item.status === "pending" ? { ...item, status: "error", error: errorText(caught) } : item));
       }
       if (current) {
@@ -595,16 +724,23 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
             setActive(detail.conversation); setMessages(detail.messages); updateConversation(detail.conversation);
             restoredQueue = detail.generation ?? null;
             generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
+            if (!assistantId && requestId && detail.generation?.request_id === requestId) {
+              assistantId = detail.messages.at(-1)?.id ?? '';
+              acceptDraft();
+            }
           }
         } catch { /* Preserve partial text and the original error while offline. */ }
       }
     } finally {
+      if (!assistantId && uploadAttempts.length) await Promise.allSettled(uploadAttempts.map(cancelAttachmentUpload));
       if (controller.current === abort) {
         controller.current = null;
         sending.current = false;
         awaitingStart.current = false;
         setStarting(false);
         setStreaming(false);
+        setUploading(false);
+        if (!assistantId && files.length) setDraftAttachments(items => items.map(item => ({ ...item, progress: undefined })));
         setQueue(restoredQueue);
         setToolStatus('');
       }
@@ -612,6 +748,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   };
   const stop = () => {
     const current = generation.current;
+    if (!current && awaitingStart.current) { controller.current?.abort(); return; }
     if (current) void chatJson(`/conversations/${current.conversation}/cancel`, { method: "POST", body: JSON.stringify({ request_id: current.id }) })
       .catch((caught) => setError(errorText(caught)));
   };
@@ -628,7 +765,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         await chatJson(`/conversations/${action.item.id}`, { method: "DELETE" });
         setConversations((old) => old.filter((entry) => entry.id !== action.item.id));
         if (active?.id === action.item.id) {
-          setActive(null); setMessages([]); setDraft(""); setUploadOpen(false); resetImageDraft();
+          setActive(null); setMessages([]); setDraft(""); resetAttachmentDraft();
           replaceConversationLocation(null);
         }
       }
@@ -653,21 +790,19 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     catch (caught) { setError(errorText(caught)); }
   };
   const visible = conversations;
-  const draftMrLink = gitlabMergeRequestLink(draft);
   const restoreComposerFocus = () => requestAnimationFrame(() => {
     if (!document.querySelector("dialog:modal")) editor.current?.focus({ preventScroll: true });
   });
   const chooseImageMode = (mode: ImageMode) => {
     setImageDraft(current => mode === 'auto' || mode === 'generate' ? { ...emptyImageDraft(), mode } : { ...current, mode });
-    setUploadOpen(false);
-    droppedFiles.current = [];
+    setExistingImagesOpen(false);
     setMention(null);
   };
   const editFromArtifact = (file: ResultFile) => {
     if (!canSend || !availableModes.edit) return;
     setImageDraft({ mode: 'edit', artifact: { id: file.id, name: file.name }, attachments: [] });
-    setUploadOpen(false);
-    droppedFiles.current = [];
+    setDraftAttachments([]);
+    setExistingImagesOpen(false);
     setMention(null);
     restoreComposerFocus();
   };
@@ -677,14 +812,24 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     !imageArtifactAvailable ? "이 대화에서 편집할 이미지를 다시 선택하세요." :
     imageMode === 'edit' && selectedImages.length > 1 ? "편집할 이미지를 한 장만 남겨 주세요." :
     imageMode === 'edit' && !imageHasSource && recentImage ? "가장 최근에 만든 이미지를 사용합니다." : "";
-  const composer = readOnly ? <p className="cw-composer-caption" role="status">프로젝트 대화 · 열람 전용</p> : <form className={`cw-composer ${streaming ? "is-streaming" : ""}`} onDragOver={e=>{if(e.dataTransfer.types.includes('Files'))e.preventDefault();}} onDrop={e=>{e.preventDefault();void attachFiles(Array.from(e.dataTransfer.files));}} onSubmit={(event) => { event.preventDefault(); void send(); }}>
-    {uploadOpen && active && imageMode !== 'generate' && <UploadQueue
-      key={`${active.id}:${imageAttachments ? imageMode : 'text'}`}
-      ref={uploads} conversationId={active.id} disabled={busy || (imageAttachments && uploading)} onBusy={setUploading}
-      imageInput={imageAttachments} imageLimit={imageMode === 'edit' ? 1 : Math.max(0, 4 - imageDraft.attachments.length)}
-      selectedImageIds={imageDraft.attachments.map(file => file.id)}
-      onReady={selectUploadedFile} />}
-    {imageMode === 'auto' && uploadOpen&&<p className="cw-upload-selection-note">직접 선택한 첨부 {assistantSelection.document_ids.length}/10 · 초과한 자료는 파일·지식에서 선택을 조정하세요.</p>}
+  const composer = readOnly ? <p className="cw-composer-caption" role="status">프로젝트 대화 · 열람 전용</p> : <form
+    className={`cw-composer ${streaming ? "is-streaming" : ""}`}
+    onPaste={event => {
+      const files = transferFiles(event.clipboardData);
+      if (!files.length) return;
+      event.preventDefault();
+      stageFiles(files);
+    }} onSubmit={event => { event.preventDefault(); void send(); }}>
+    <input ref={fileInput} type="file" hidden multiple={imageMode !== 'edit'}
+      accept={(imageAttachments ? rasterFormats : [...new Set([...documentFormats, ...rasterFormats])]).join(',')}
+      onChange={event => { stageFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
+    <DraftAttachments items={draftAttachments} disabled={!canSend} onRemove={id => {
+      setDraftAttachments(items => items.filter(item => item.id !== id));
+      restoreComposerFocus();
+    }} />
+    {existingImagesOpen && active && imageAttachments && <ExistingImagePicker key={active.id} conversationId={active.id}
+      disabled={!canSend || imageMode === 'vision' && draftAttachments.length + imageDraft.attachments.length >= 4}
+      selectedImageIds={imageDraft.attachments.map(file => file.id)} onSelect={selectExistingImage} />}
     {imageAttachments && selectedImages.length > 0 && <ul className="cw-image-inputs" aria-label="이미지 입력">
       {selectedImages.map(file => <li key={file.id}><span title={file.name}>{file.name}</span>
         <button type="button" className="cw-icon-button" aria-label={`${file.name} 제거`} disabled={busy || uploading}
@@ -694,7 +839,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           }))}><Icon name="close" size={13} /></button>
       </li>)}
     </ul>}
-    {imageInputNotice && <p className="cw-upload-selection-note" id="chat-image-input-note">{imageInputNotice}</p>}
+    {(attachmentIssue || imageInputNotice) && <p className={attachmentIssue ? "cw-inline-error" : "cw-upload-selection-note"}
+      id="chat-image-input-note">{attachmentIssue || imageInputNotice}</p>}
     {imageMode === 'auto' && user && draftMrLink && <div className="cw-app-selection"><button type="button" className="cw-small-button" disabled={!canSend}
       onClick={() => openGitlabScope(draftMrLink)}>GitLab MR 후속 작업</button></div>}
     {imageMode === 'auto' && !!appSelections.length && <div className="cw-app-selection">{appSelections.map((selection) => <div key={selection.connection_id}><Icon name="code" size={15} /><span>GitLab · {selection.merge_request ? `MR !${selection.merge_request.iid}` : selection.ref} · {selection.mode==='execute'?'수정·실행':selection.mode==='workspace'?'프로젝트 분석':selection.merge_request?'리뷰·CI 조회':`${selection.paths.length}개 파일`}</span>
@@ -711,10 +857,10 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     </div>}
     <label className="cw-sr-only" htmlFor="chat-message">메시지</label>
     <textarea ref={editor} id="chat-message" placeholder={imageMode !== 'auto' ? imagePlaceholders[imageMode] : !user || connection ? "무엇이든 편하게 물어보세요" : "모델을 연결하고 대화를 시작하세요"}
-      value={draft} rows={2} maxLength={16000} disabled={loading || initializing || !!active?.busy && !streaming}
+      value={draft} rows={2} maxLength={16000} readOnly={starting} disabled={loading || initializing || !!active?.busy && !streaming}
       role="combobox" aria-expanded={!!activeAppOption} aria-autocomplete="list" aria-controls={activeAppOption ? "chat-app-options" : undefined}
       aria-activedescendant={activeAppOption ? `chat-app-${activeAppOption.id}` : undefined}
-      aria-describedby={imageInputNotice ? "chat-image-input-note" : undefined}
+      aria-describedby={imageInputNotice || attachmentIssue ? "chat-image-input-note" : undefined}
       onBlur={() => setMention(null)}
       onChange={event => { setDraft(event.currentTarget.value); updateTypedMention(event.currentTarget); }}
       onClick={event => updateTypedMention(event.currentTarget)}
@@ -754,13 +900,15 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       {imageMode === 'auto' && <button type="button" className="cw-context-button" aria-label="앱 추가" disabled={busy || loading || initializing}
         onPointerDown={event => { if (event.button === 0 && !composing.current) event.preventDefault(); }} onClick={openAppPicker}>@ 앱</button>}
       {imageMode !== 'generate' && <button type="button" className="cw-context-button" disabled={!canSend || !availableModes[imageMode]}
-        onClick={()=>void attachFiles([])}>{imageAttachments ? "이미지 첨부" : "첨부"}</button>}
+        onClick={chooseFiles}>{imageAttachments ? "이미지 첨부" : "첨부"}</button>}
+      {imageAttachments && active && <button type="button" className="cw-context-button" disabled={!canSend}
+        aria-expanded={existingImagesOpen} onClick={() => setExistingImagesOpen(open => !open)}>기존 이미지</button>}
       {imageMode === 'auto' && <button type="button" className="cw-context-button" disabled={busy||loading||initializing||uploading} onClick={()=>void openAssistant()}>파일·지식</button>}
       {active && (imageMode === 'auto' || imageMode === 'vision') && <button className="cw-context-button" type="button" disabled={busy || !connection} onClick={() => setContextOpen(true)}>문맥</button>}
       {imageMode === 'auto' && active&&terminal.enabled&&<button className="cw-context-button" type="button" onClick={()=>setWorkspaceOpen(true)}>작업공간</button>}
       <span className="cw-enter-hint">Shift + Enter 줄바꿈</span>
-      {busy ? <button type="button" onClick={stop} className="cw-send" aria-label={queue?.status === "queued" ? (imageQueue ? "이미지 대기 취소" : "대기 취소") : imageQueue ? "이미지 작업 중지" : "응답 중지"}><span className="cw-stop-square" /></button>
-        : <button className="cw-send" disabled={!draft.trim() || !canSend || !imageModeReady} aria-label="메시지 전송"><Icon name="arrow" size={20} /></button>}</div>
+      {busy ? <button type="button" onClick={stop} className="cw-send" aria-label={uploading ? "첨부 전송 취소" : queue?.status === "queued" ? (imageQueue ? "이미지 대기 취소" : "대기 취소") : imageQueue ? "이미지 작업 중지" : "응답 중지"}><span className="cw-stop-square" /></button>
+        : <button className="cw-send" disabled={!(draft.trim() || attachmentOnlyText) || !canSend || !imageModeReady || !!attachmentIssue} aria-label="메시지 전송"><Icon name="arrow" size={20} /></button>}</div>
   </form>;
 
   return <div className={`cw-workspace ${sidebar ? "sidebar-open" : ""}`}>
@@ -791,7 +939,14 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
             <UserAvatar name={user.display_name || user.username} src={user.avatar_url} className="cw-user-avatar" /><span><strong>{user.display_name || user.username}</strong><small>개인 워크스페이스</small></span><Icon name="chevron" size={15} /></button></div>
           : <div className="cw-guest-account"><Link data-workspace-focus href="/login">로그인</Link><Link href="/user/signup">계정 만들기</Link></div>}</footer>
     </aside>
-    <main className="cw-main"><header className="cw-topbar"><div className="cw-topbar-left"><button className="cw-icon-button cw-mobile-only" aria-label="사이드바 열기" onClick={() => setSidebar(true)}><Icon name="panel" /></button>
+    <main className="cw-main" onDragOver={event => {
+      if (event.dataTransfer.types.includes('Files')) event.preventDefault();
+    }} onDrop={event => {
+      const files = transferFiles(event.dataTransfer);
+      if (!files.length) return;
+      event.preventDefault();
+      stageFiles(files);
+    }}><header className="cw-topbar"><div className="cw-topbar-left"><button className="cw-icon-button cw-mobile-only" aria-label="사이드바 열기" onClick={() => setSidebar(true)}><Icon name="panel" /></button>
       <span className="cw-topbar-workspace">워크스페이스</span><span className="cw-topbar-slash">/</span>
       {active && !readOnly ? <button className="cw-title-button" disabled={busy || loading} aria-label="대화 이름 변경" title="대화 이름 변경" onClick={() => rename(active)}>
         <span className="cw-topbar-title">{active.title}</span><Icon name="edit" size={13} /></button> : <span className="cw-topbar-title">{active?.title||'새 대화'}</span>}</div>
