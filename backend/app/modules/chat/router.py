@@ -566,7 +566,10 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
             error = str(caught) if isinstance(caught, (providers.ProviderError,GitlabError)) else '대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.' if str(caught) == 'queue' else '응답 시간이 초과되었습니다. 다시 시도해 주세요.'
         except HTTPException as caught:
             status,error='error',str(caught.detail)
-            error_code='token_quota' if caught.status_code == 429 else 'app_connection' if phase.startswith(('mcp','gitlab')) or caught.status_code in {401,403,502,503} else 'workspace_error' if workspace_selection else 'context_limit'
+            if phase == 'generate_image':
+                error_code = 'image_generation_error'
+            else:
+                error_code='token_quota' if caught.status_code == 429 else 'app_connection' if phase.startswith(('mcp','gitlab')) or caught.status_code in {401,403,502,503} else 'workspace_error' if workspace_selection else 'context_limit'
         except Exception:
             status, error = 'error', '응답을 처리하지 못했습니다. 다시 시도해 주세요.'
             error_code = 'internal_error'

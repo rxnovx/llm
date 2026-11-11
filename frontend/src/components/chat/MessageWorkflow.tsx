@@ -6,7 +6,7 @@ import { MessageContent } from './MessageContent';
 import { WorkspaceLink } from '@/components/shared/WorkspaceLink';
 import { useDialogDismiss } from '@/components/shared/useDialogDismiss';
 import { AnswerFiles } from './AnswerFiles';
-const phaseLabel=(phase:string)=>({queued:'모델 대기',model:'답변 작성',gitlab_resolve:'프로젝트 접근 확인',gitlab_checkout:'소스 내려받기',gitlab_read:'GitLab 파일 읽기',repository_index:'소스 색인',knowledge_search:'문서 검색',evidence_review:'근거 점검',mcp_discovery:'앱 연결 확인',create_document:'결과 파일 생성',terminal_exec:'명령 실행',auto_summary:'대화 요약'}[phase]??(phase.startsWith('mcp_')?'연결된 앱 조회':phase?'도구 작업':'응답 생성'));
+const phaseLabel=(phase:string)=>({queued:'모델 대기',model:'답변 작성',gitlab_resolve:'프로젝트 접근 확인',gitlab_checkout:'소스 내려받기',gitlab_read:'GitLab 파일 읽기',repository_index:'소스 색인',knowledge_search:'문서 검색',evidence_review:'근거 점검',mcp_discovery:'앱 연결 확인',create_document:'결과 파일 생성',generate_image:'이미지 생성',terminal_exec:'명령 실행',auto_summary:'대화 요약'}[phase]??(phase.startsWith('mcp_')?'연결된 앱 조회':phase?'도구 작업':'응답 생성'));
 export function MessageWorkflow({message,conversationId,disabled,onResult,onFiles,onRetry,onModels,onApps}:{message:ChatMessage;conversationId:string;disabled:boolean;onResult:(r:ForkResult)=>void;onFiles:(files:NonNullable<ChatMessage['artifacts']>)=>void;onRetry?:()=>void;onModels:()=>void;onApps:()=>void}){
   const dialog=useRef<HTMLDialogElement>(null);
   const [mode,setMode]=useState(''),[text,setText]=useState(message.content),[busy,setBusy]=useState(false),[error,setError]=useState('');

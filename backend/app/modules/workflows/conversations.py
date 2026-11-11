@@ -236,7 +236,10 @@ def preserve_shared_files(db,conversation_id):
         if scope:doc.conversation_id=scope.conversation_id
         else:knowledge.remove(db,doc)
     message_ids=select(Message.id).where(Message.conversation_id==conversation_id)
-    for artifact in db.scalars(select(Artifact).where(Artifact.message_id.in_(message_ids))):
+    linked_ids = select(ArtifactScope.artifact_id).where(ArtifactScope.message_id.in_(message_ids))
+    candidates = select(Artifact).where(or_(Artifact.message_id.in_(message_ids),
+        Artifact.message_id.is_(None) & Artifact.id.in_(linked_ids)))
+    for artifact in db.scalars(candidates):
         other=db.scalar(select(ArtifactScope).join(Message,Message.id==ArtifactScope.message_id).where(ArtifactScope.artifact_id==artifact.id,Message.conversation_id!=conversation_id))
         if not other:db.delete(artifact)
     db.flush()

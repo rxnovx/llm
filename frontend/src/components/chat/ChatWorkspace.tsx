@@ -36,6 +36,12 @@ const starters: { icon: IconName; title: string; prompt: string }[] = [
 ];
 const errorText = (error: unknown) => error instanceof Error ? error.message : "요청을 처리하지 못했습니다.";
 const shortDate = (timestamp: number) => new Date(timestamp * 1000).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" });
+const automaticRouteLabels: Record<string, string> = {
+  knowledge: "자동 문서 검색",
+  gitlab: "자동 소스 분석",
+  both: "소스·문서 함께 확인",
+  image: "이미지 생성",
+};
 const appOptions = [
   { id: "gitlab", title: "GitLab", description: "입력창에 @gitlab 추가", icon: "code", names: ["gitlab"] },
   { id: "knowledge", title: "지식·연결된 앱", description: "문서 검색과 MCP 도구 선택", icon: "plus", names: ["knowledge", "apps", "지식"] },
@@ -677,7 +683,11 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           {connection?.is_test && <p className="cw-demo-note"><span />현재 테스트 모드입니다. 실제 모델 대신 랜덤 예시 답변이 표시됩니다.</p>}
           {conversations.length > 0 && <section className="cw-recent"><h2>이어서 나눠볼 이야기</h2>{conversations.slice(0, 3).map((item) => <button key={item.id} disabled={starting||uploading} onClick={() => void openConversation(item)}>
             <Icon name="chat" size={15} /><span>{item.title}{item.busy && <small className="cw-search-excerpt">작업 중</small>}</span><time>{shortDate(item.updated_at)}</time><span className="cw-recent-arrow">↗</span></button>)}</section>}</div>
-          : <div className="cw-transcript" aria-label="대화 내용">{messages.map((message, index) => <article key={message.id} id={`message-${message.id}`} className={`cw-message cw-message-${message.role}`} aria-label={message.role === "user" ? "내 메시지" : "모델 답변"}>
+          : <div className="cw-transcript" aria-label="대화 내용" onLoadCapture={event => {
+            if (event.target instanceof HTMLImageElement && pinned.current && viewport.current) {
+              viewport.current.scrollTop = viewport.current.scrollHeight;
+            }
+          }}>{messages.map((message, index) => <article key={message.id} id={`message-${message.id}`} className={`cw-message cw-message-${message.role}`} aria-label={message.role === "user" ? "내 메시지" : "모델 답변"}>
             {message.role === "assistant" && <div className="cw-assistant-label"><Wordmark small /><span>{message.is_test ? "테스트 모델" : message.model}</span>{message.is_test && <small>예시 답변</small>}</div>}
             {message.role === "user" ? <div className="cw-human-text">{message.content}</div> : <>
               {!!message.apps?.length && <p className="cw-message-app">GitLab · {message.apps[0].merge_request ? `기존 MR !${message.apps[0].merge_request.iid}` : message.apps[0].mode==='execute'?'프로젝트 분석·실행':message.apps[0].mode==='workspace'?'프로젝트 자동 분석':message.apps[0].paths.join(", ")}
@@ -685,8 +695,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
               {(message.apps?.[0]?.merge_request || message.tools?.some(tool => tool.name === "gitlab_mr_overview")) &&
                 <GitlabWorkProgress message={message} onFollowup={canSend ? openGitlabScope : undefined} />}
               <GitlabPublication tools={message.tools} />
-              {(message.routing?.automatic||message.routing?.status==='unverified')&&<p className="cw-message-app">{message.routing.status==='unverified'?'근거 확인 보류':message.routing.route==='knowledge'?'자동 문서 검색':message.routing.route==='gitlab'?'자동 소스 분석':message.routing.route==='both'?'소스·문서 함께 확인':'질문 자동 처리'}</p>}
-              {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {tool.name} · {tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}
+              {(message.routing?.automatic||message.routing?.status==='unverified')&&<p className="cw-message-app">{message.routing.status==='unverified'?'근거 확인 보류':automaticRouteLabels[message.routing.route ?? ''] ?? '질문 자동 처리'}</p>}
+              {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {tool.name === 'generate_image' ? '이미지 생성' : tool.name} · {tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}
               {message.content ? <MessageContent content={message.content} /> : message.status === "pending" ? toolStatus && !message.apps?.[0]?.merge_request ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
               <MessageSources sources={message.sources ?? []} />
               {message.status === "error" && <p className="cw-message-error" role="alert">{message.error || "응답이 중단되었습니다. 다시 시도해 주세요."}</p>}

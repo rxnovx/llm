@@ -14,7 +14,7 @@ from app.modules.integrations import config as gitlab_config, service as gitlab_
 from app.modules.workspaces.models import ToolTrace
 from . import engine,gitlab,routing
 from .models import TurnDecision
-from app.modules.workflows import artifacts
+from app.modules.workflows import artifacts, images
 
 ABSTAIN='현재 확인 가능한 근거로는 질문의 사실 관계를 충분히 검증하지 못했습니다. 확실하지 않은 내용을 단정하지 않겠습니다. 관련 자료를 추가하거나 질문 범위를 좁혀 주세요.'
 
@@ -90,7 +90,8 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         if selection.mode == 'files':
             selection = None  # The existing file-only path handles explicit file scope.
     if enabled and not explicit:
-        yield 'activity',record('route_decision','running','질문에 필요한 앱과 문서 검색을 판단하고 있습니다.')
+        available['image_generation'] = bool(settings.image_generation_url.strip() and connection.provider != 'test')
+        yield 'activity',record('route_decision','running','요청에 필요한 처리 방식을 판단하고 있습니다.')
         await acquire()
         try:
             async with asyncio.timeout(settings.llm_timeout_seconds):plan=await routing.decide(connection,model,question,available,settings)
@@ -100,8 +101,25 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         if hint and plan.route=='direct':plan.needs_review=True
         if plan.uncertain and available['retrieval_allowed'] and available['knowledge_ready'] and plan.route=='direct':plan.route='knowledge'
         decision.update(route=plan.route,uncertain=plan.uncertain,status='running');save()
-        label={'direct':'일반 답변','knowledge':'문서 검색','gitlab':'GitLab 소스 분석','both':'GitLab 분석과 문서 검색','clarify':'대상 확인','mcp':'연결된 앱 조회'}[plan.route]
+        label={'direct':'일반 답변','knowledge':'문서 검색','gitlab':'GitLab 소스 분석','both':'GitLab 분석과 문서 검색','clarify':'대상 확인','mcp':'연결된 앱 조회','image':'이미지 생성'}[plan.route]
         yield 'activity',record('route_decision','complete',label+' 경로를 선택했습니다.')
+        if plan.route == 'image':
+            yield 'activity', record('generate_image', 'running', '이미지를 생성하고 있습니다.')
+            try:
+                if not available['image_generation']:
+                    raise HTTPException(503, '이미지 생성 서버가 설정되어 있지 않습니다.')
+                file = await images.generate(bind, user_id, turn.assistant_id, turn.request_id,
+                    plan.image_prompt.strip() or question, settings)
+            except HTTPException as error:
+                yield 'activity', record('generate_image', 'error', str(error.detail))
+                raise
+            artifacts.finalize(bind, user_id, turn.request_id, [file['id']], approve=True)
+            decision['status'] = 'complete'
+            save()
+            yield 'activity', record('generate_image', 'complete', '이미지를 생성했습니다.')
+            yield 'artifact', file
+            yield 'delta', {'content': '이미지를 생성했습니다.'}
+            return
         if plan.route=='clarify':
             decision['status']='clarification';save()
             yield 'delta',{'content':plan.clarification or '분석할 프로젝트나 필요한 자료 범위를 알려 주세요.'}

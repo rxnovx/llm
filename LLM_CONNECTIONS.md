@@ -24,6 +24,25 @@ LLM_CONNECTIONS_JSON='[{"id":"office-ollama","name":"내부 Ollama","provider":"
 
 Ollama의 base URL은 `/api` 없이 서버 루트로 지정합니다. 앱은 `GET /api/tags`와 `POST /api/chat`를 사용합니다. 모델 이름을 비워 두었다면 화면의 **모델 연결 → 선택 → 연결 확인**으로 실제 목록을 조회한 후 모델을 고릅니다. 모델 다운로드·서빙 시작·중단은 이 앱에서 수행하지 않습니다.
 
+## 이미지 생성 서버 연결
+
+Compose는 루트 `.env`, 개별 실행은 `backend/.env`에 FastAPI가 접속할 수 있는 전체 이미지 생성 API 주소를 추가합니다.
+
+```dotenv
+IMAGE_GENERATION_URL=http://192.168.0.20:8091/v1/images/generations
+IMAGE_GENERATION_MODEL=
+IMAGE_GENERATION_API_KEY=
+IMAGE_GENERATION_TIMEOUT_SECONDS=180
+```
+
+서버가 기본 모델을 지정한 경우 모델 ID를 비워 둘 수 있습니다. 서버 인증을 사용하는 경우에만 키를 입력합니다. URL을 비우면 이미지 생성 기능이 꺼집니다. 설정을 바꾼 뒤 개별 실행에서는 `python main.py`로 백엔드를 다시 시작하고, Compose에서는 `docker compose up -d --force-recreate api`로 API 컨테이너를 다시 만듭니다.
+
+채팅에서 구조화 출력을 지원하는 실제 vLLM 또는 Ollama 모델을 선택한 후 “안개 낀 숲의 수채화 이미지를 만들어줘”처럼 요청합니다. 자동 처리가 켜진 일반 대화에서는 채팅 모델이 생성 요청을 판단하고 백엔드가 이미지 서버에 프롬프트를 보냅니다. 앱·자료를 직접 선택한 요청은 해당 도구를 우선 사용합니다. 테스트 연결은 이미지 서버를 호출하지 않습니다.
+
+vLLM-Omni처럼 한 장의 `data[0].b64_json`을 반환하는 이미지 생성 API에 연결합니다. 지원 형식은 PNG·JPEG·WebP이며 한 장당 최대 10MiB, 1,600만 픽셀입니다. 생성 결과는 해당 계정의 대화에 저장되어 다시 열거나 다운로드할 수 있습니다. [vLLM-Omni 이미지 생성 API](https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/image_generation_api/)
+
+`IMAGE_GENERATION_TIMEOUT_SECONDS`는 이미지 서버 호출 시간에 적용됩니다. 자동 판단과 생성을 합친 작업은 기존 `TERMINAL_AGENT_TIMEOUT_SECONDS` 안에 마쳐야 합니다. 이미지 생성 중에는 채팅 모델의 추론 허가를 반납하므로 다른 대화에서 텍스트 답변을 받을 수 있습니다. 이미지 생성의 동시 처리 수는 이미지 서버에서 관리합니다.
+
 ## 운영 화면에서 연결 관리
 
 운영자는 `/admin` → **모델 관리**에서 서버를 등록·수정·비활성화할 수 있습니다. 저장한 연결의 **테스트 응답**을 누르면 모델 목록 조회와 짧은 실제 생성 결과를 확인합니다. 기본 모델을 비우면 조회한 목록의 첫 허용 모델을 사용합니다. 주소, 서버 종류, 기본 모델, 사용을 허용할 사용자명, 동시 생성 한도를 저장하면 다음 요청부터 즉시 적용됩니다. 이미 생성 중인 요청은 기존 설정을 사용하며, 대기 중인 요청은 변경된 권한과 설정을 다시 확인합니다.
@@ -87,6 +106,6 @@ LLM_QUEUE_WAIT_SECONDS=30
 
 `backend/app/modules/chat/providers.py`의 `Connection`, `list_models`, `stream_reply`가 추론 서버 인터페이스입니다. 공급자별 스트림을 공통 텍스트 조각으로 바꾼 뒤, 대화 API가 `start/delta/done/error/cancelled` SSE 이벤트로 전달합니다. 인증·대화 저장·브라우저 코드는 공급자 응답 형식을 직접 다루지 않습니다.
 
-현재 범위는 텍스트 대화입니다. Markdown의 외부 이미지는 자동 요청하지 않고 링크로 표시합니다. 파일·이미지 입력, 도구 실행, RAG, 모델 다운로드, 실제 토큰 과금/통계는 포함하지 않습니다.
+생성 이미지는 계정 인증을 거쳐 결과 파일에서 불러옵니다. Markdown의 외부 이미지는 링크로 표시합니다.
 
 공식 프로토콜: [vLLM 온라인 서빙](https://docs.vllm.ai/en/latest/serving/online_serving/), [Ollama 대화](https://docs.ollama.com/api/chat), [Ollama 모델 목록](https://docs.ollama.com/api/tags).

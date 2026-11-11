@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     assistant_max_retrieval_rounds: int = Field(2, ge=1, le=3)
 
     artifact_pdf_font_path: str = ''
+    image_generation_url: str = ''
+    image_generation_model: str = Field('', max_length=200)
+    image_generation_api_key: SecretStr = SecretStr('')
+    image_generation_timeout_seconds: int = Field(180, ge=5, le=600)
     knowledge_enabled: bool = True
     knowledge_worker_enabled: bool = True
     knowledge_ocr_enabled: bool = True

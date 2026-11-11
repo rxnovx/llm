@@ -1,4 +1,4 @@
-"""Bounded document generation from data, never from model-supplied executable code."""
+"""Document generation and bounded storage for generated files."""
 import csv
 import hashlib
 import io
@@ -17,7 +17,9 @@ from .models import Artifact
 from .conversations import artifact_public,message_owned
 
 MIME={'md':'text/markdown; charset=utf-8','txt':'text/plain; charset=utf-8','csv':'text/csv; charset=utf-8',
-    'xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','pdf':'application/pdf'}
+    'xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','pdf':'application/pdf',
+    'png':'image/png','jpg':'image/jpeg','webp':'image/webp'}
+MAX_RESULT_BYTES = 10 * 1024 * 1024
 
 
 class DocumentInput(BaseModel):
@@ -120,9 +122,16 @@ def create(bind,user_id,message_id,run_id,args,*,ready=False,expected_content_ha
     try:raw=build(data)
     except ImportError:raise HTTPException(503,'문서 생성 의존성을 확인하세요.') from None
     except (ValueError,KeyError):raise HTTPException(422,'문서를 생성하지 못했습니다. 내용·표·글꼴을 확인하세요.') from None
-    if len(raw)>10*1024*1024:raise HTTPException(413,'결과 파일이 10MiB를 초과합니다.')
     name=re.sub(r'[\\/\x00-\x1f:*?"<>|]','_',data.name).strip('. ')[:140] or '결과'
     name=str(Path(name).with_suffix('.'+data.format))
+    return store(bind, user_id, message_id, run_id, name=name, file_format=data.format, raw=raw,
+                 payload_json=data.model_dump_json(), ready=ready, expected_content_hash=expected_content_hash)
+
+
+def store(bind, user_id, message_id, run_id, *, name, file_format, raw, payload_json,
+          ready=False, expected_content_hash=None):
+    if len(raw) > MAX_RESULT_BYTES:
+        raise HTTPException(413, '결과 파일이 10MiB를 초과합니다.')
     with Session(bind,expire_on_commit=False) as db:
         lock(db);message,conversation=message_owned(db,user_id,message_id,idle=ready)
         if ready and (message.status!='complete' or expected_content_hash and hashlib.sha256(message.content.encode()).hexdigest()!=expected_content_hash):raise HTTPException(409,'답변이 변경되었습니다. 현재 답변에서 다시 내보내세요.')
@@ -130,8 +139,8 @@ def create(bind,user_id,message_id,run_id,args,*,ready=False,expected_content_ha
         count,size=db.execute(select(func.count(Artifact.id),func.coalesce(func.sum(Artifact.size),0)).where(Artifact.owner_id==user_id)).one()
         if count>=200 or size+len(raw)>100*1024*1024:raise HTTPException(422,'결과 파일 저장 한도입니다. 필요 없는 파일을 삭제하세요.')
         if db.scalar(select(func.count()).select_from(Artifact).where(Artifact.run_id==str(run_id)))>=3:raise HTTPException(422,'한 번에 결과 파일은 3개까지 만들 수 있습니다.')
-        row=Artifact(owner_id=user_id,message_id=message.id,run_id=str(run_id),name=name,format=data.format,status='ready' if ready else 'draft',
-            data=raw,size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),payload_json=data.model_dump_json())
+        row=Artifact(owner_id=user_id,message_id=message.id,run_id=str(run_id),name=name,format=file_format,status='ready' if ready else 'draft',
+            data=raw,size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),payload_json=payload_json)
         db.add(row);db.commit();return artifact_public(row)
 
 

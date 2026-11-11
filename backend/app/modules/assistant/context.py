@@ -50,7 +50,9 @@ def active(db,user_id,selection,*,question='',conversation_id='',connection=None
         return True
     from app.modules.workflows.artifacts import hint
     if hint(question):return True
-    if not get_settings().assistant_automatic_enabled or not selection.get('automatic',True):return False
+    settings = get_settings()
+    if not settings.assistant_automatic_enabled or not selection.get('automatic',True):return False
+    if settings.image_generation_url.strip() and connection and connection.provider != 'test':return True
     if mcp.catalog(db,user_id):return True
     from .routing import connection_catalog,project_hint
     if project_hint(question) or selection.get('rag_mode')=='always':return True
