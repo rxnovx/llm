@@ -8,17 +8,18 @@ type Item={id:string;file:File;stage:'waiting'|'uploading'|'indexing'|'ready'|'e
 type Props={conversationId?:string;baseId?:string;disabled?:boolean;onReady?:(doc:KnowledgeDocument)=>void;onBusy?:(busy:boolean)=>void;onChanged?:()=>void;accept?:string};
 const errorText=(e:unknown)=>e instanceof Error?e.message:'첨부하지 못했습니다.';
 export const UploadQueue=forwardRef<UploadHandle,Props>(function UploadQueue({conversationId,baseId,disabled,onReady,onBusy,onChanged,accept='.pdf,.docx,.xlsx,.csv,.tsv,.txt,.md,.html,.json'},ref){
-  const [config,setConfig]=useState({enabled:true,max_upload_bytes:10*1024*1024});
-  useEffect(()=>{const abort=new AbortController();void knowledgeJson<{enabled:boolean;max_upload_bytes:number}>('/config',{signal:abort.signal}).then(setConfig).catch(()=>{});return()=>abort.abort();},[]);
+  const [config,setConfig]=useState<{enabled:boolean;max_upload_bytes:number;formats?:string[]}>({enabled:true,max_upload_bytes:10*1024*1024});
+  useEffect(()=>{const abort=new AbortController();void knowledgeJson<{enabled:boolean;max_upload_bytes:number;formats?:string[]}>('/config',{signal:abort.signal}).then(setConfig).catch(()=>{});return()=>abort.abort();},[]);
   const [items,setItems]=useState<Item[]>([]),[error,setError]=useState('');
   const input=useRef<HTMLInputElement>(null),alive=useRef(true),running=useRef(new Map<string,{abort:AbortController;attempt?:string}>());
   const callbacks=useRef({onReady,onBusy,onChanged});
   useEffect(()=>{callbacks.current={onReady,onBusy,onChanged};},[onReady,onBusy,onChanged]);
   const patch=(id:string,data:Partial<Item>)=>{if(alive.current)setItems(old=>old.map(v=>v.id===id?{...v,...data}:v));};
+  const acceptedFormats = config.formats?.join(',') ?? accept;
   const add=(files:File[])=>{
     if(disabled||!config.enabled)return;
     setError('');
-    const supported=new Set(accept.split(',').map(v=>v.toLowerCase()));
+    const supported=new Set(acceptedFormats.split(',').map(v=>v.toLowerCase()));
     const accepted=files.filter(file=>supported.has('.'+file.name.split('.').at(-1)?.toLowerCase())&&file.size>0&&file.size<=Math.min(config.max_upload_bytes,20*1024*1024));
     if(accepted.length!==files.length)setError(`빈 파일, ${Math.min(config.max_upload_bytes,20*1024*1024)/1024/1024}MiB 초과 파일 또는 지원하지 않는 형식은 제외했습니다.`);
     setItems(old=>{const room=Math.max(0,20-old.length);return [...old,...accepted.slice(0,room).map(file=>({id:crypto.randomUUID(),file,stage:'waiting' as const,progress:0}))];});
@@ -64,7 +65,7 @@ export const UploadQueue=forwardRef<UploadHandle,Props>(function UploadQueue({co
   };
   return <div className="cw-upload-queue" onDragOver={e=>{if(e.dataTransfer.types.includes('Files'))e.preventDefault();}} onDrop={e=>{e.preventDefault();e.stopPropagation();add(Array.from(e.dataTransfer.files));}}>
     <button type="button" className="cw-text-button" disabled={disabled||!config.enabled} onClick={()=>input.current?.click()}>＋ 파일 첨부 <small>여러 파일 선택·끌어놓기</small></button>
-    <input ref={input} type="file" hidden multiple accept={accept} onChange={e=>{add(Array.from(e.target.files??[]));e.target.value='';}}/>
+    <input ref={input} type="file" hidden multiple accept={acceptedFormats} onChange={e=>{add(Array.from(e.target.files??[]));e.target.value='';}}/>
     {!config.enabled&&<p>운영자가 파일·지식 기능을 활성화해야 첨부할 수 있습니다.</p>}
     {error&&<p className="cw-inline-error" role="alert">{error}</p>}
     {items.length>0&&<ul aria-label="첨부 진행 상황">{items.map(item=><li key={item.id}><div><strong>{item.file.name}</strong><small>{item.stage==='waiting'?'전송 대기':item.stage==='uploading'?item.progress===100?'서버에서 파일 확인 중…':`전송 ${item.progress}%`:item.stage==='indexing'?'문서 색인 중…':item.stage==='ready'?'검색 준비됨':item.stage==='cancelled'?'취소됨':item.error}</small></div>

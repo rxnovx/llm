@@ -48,11 +48,11 @@ python -c 'from cryptography.fernet import Fernet; import json; print(json.dumps
 ```bash
 cd backend
 source .venv/bin/activate
-python -m pip install -r requirements-gitlab.txt
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-다른 터미널에서는 기존대로 `cd frontend && npm run dev`로 실행합니다. 일반 채팅·SQLite 기본 설치는 계속 `requirements.txt`만으로 가능하며, GitLab 암호화 모듈은 앱 연결을 사용할 때 불러옵니다. Docker API 이미지는 GitLab 선택 의존성도 포함하므로 기존 `docker compose up -d --build`로 배포합니다. 환경 변수를 바꾼 뒤에는 각 서비스를 재시작합니다.
+다른 터미널에서 `cd frontend && npm run dev`로 실행합니다. GitLab 연동은 기본 API 의존성에 포함됩니다. Compose는 `docker compose up -d --build`로 배포합니다. 환경 변수를 바꾼 뒤에는 각 서비스를 재시작합니다.
 
 폐쇄망에서는 **사용자 브라우저 → 앱과 GitLab**, **백엔드 → GitLab**, **백엔드 → 모델 서버** 경로가 필요합니다. GitLab 또는 모델 서버가 외부 인터넷에 공개될 필요는 없습니다. 사설 CA는 API 프로세스가 읽을 수 있는 PEM 묶음을 `GITLAB_CA_BUNDLE`에 지정합니다. Compose에서는 해당 파일을 별도로 읽기 전용 마운트하고 컨테이너 내부 경로를 지정합니다. TLS 검증을 끄는 옵션은 제공하지 않습니다. 운영 모드의 GitLab base URL은 HTTPS여야 합니다.
 

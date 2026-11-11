@@ -19,6 +19,7 @@ export function ConnectionManager({ onForbidden }: { onForbidden: () => void }) 
   const [creating, setCreating] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [probing, setProbing] = useState('');
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [refresh, setRefresh] = useState(0);
@@ -49,6 +50,23 @@ export function ConnectionManager({ onForbidden }: { onForbidden: () => void }) 
       else setError(caught instanceof Error ? caught.message : "연결을 저장하지 못했습니다.");
     } finally { setSaving(false); }
   };
+  const probe = async (item: Managed) => {
+    setProbing(item.id);
+    setError('');
+    setNotice('');
+    try {
+      const response = await authenticatedFetch(`/api/admin/connections/${item.id}/probe`, {
+        method: 'POST', body: '{}', signal: AbortSignal.timeout(60000),
+      });
+      const result: { model: string; sample: string; elapsed_ms: number } = await response.json();
+      setNotice(`${item.name} · ${result.model} · ${result.elapsed_ms}ms · ${result.sample}`);
+    } catch (caught) {
+      if (caught instanceof ApiRequestError && caught.status === 403) onForbidden();
+      else setError(caught instanceof Error ? caught.message : '테스트 응답을 확인하지 못했습니다.');
+    } finally {
+      setProbing('');
+    }
+  };
   const profile = (index: number, patch: Partial<ModelProfile>) => setDraft((value) => value && ({ ...value,
     models: value.models.map((item, at) => at === index ? { ...item, ...patch } : item) }));
   return <section className="ops-panel"><header><div><h2>모델 연결 관리</h2><p>저장한 설정은 재시작 없이 적용됩니다. 이미 생성 중인 답변에는 기존 설정을 사용합니다.</p></div>
@@ -60,7 +78,11 @@ export function ConnectionManager({ onForbidden }: { onForbidden: () => void }) 
       <small>{item.provider} · {item.id} · {item.source === "environment" ? "환경 설정" : "운영 화면 설정"}</small>
       <p>{item.model || "기본 모델 미지정"} · 동시 생성 {item.max_concurrent}개 · {item.allowed_users.length ? `${item.allowed_users.length}명 허용` : "전체 사용자 허용"}</p>
       {item.auth_mode === "reference" && !item.has_key && <p className="ops-check-error">서버 인증키 설정이 필요합니다.</p>}</div>
-      <button className="ops-button" disabled={saving} onClick={() => edit(item)}>설정 수정</button></div>)}</div>
+      <div className="ops-actions">
+        <button className="ops-button" disabled={!item.enabled || saving || !!probing} onClick={() => void probe(item)}>
+          {probing === item.id ? '응답 확인 중…' : '테스트 응답'}</button>
+        <button className="ops-button" disabled={saving} onClick={() => edit(item)}>설정 수정</button>
+      </div></div>)}</div>
     {!loading && !items.length && <p className="ops-empty">등록된 모델 연결이 없습니다. 첫 연결을 등록하세요.</p>}
     {draft && <form className="ops-connection-form" onSubmit={(event) => void save(event)}><h3>{creating ? "새 연결 등록" : `${draft.name} 설정`}</h3>
       <fieldset disabled={saving}><div className="ops-form-grid">

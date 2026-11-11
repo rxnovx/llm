@@ -14,6 +14,7 @@ from app.modules.knowledge import service as knowledge
 from app.modules.knowledge.models import Document
 from .models import (Project,ProjectConversation,ConversationState,MessageVersion,MessageState,
     AttachmentScope,Artifact,ArtifactScope,AutoSummary,ToolEvidence)
+from .projects import project_access, project_role
 
 
 def owned(db,user_id,conversation_id,*,idle=False):
@@ -44,7 +45,7 @@ def attach_project(db,user_id,conversation_id,project_id):
     owned(db,user_id,conversation_id,idle=True)
     link=db.get(ProjectConversation,str(conversation_id))
     if project_id:
-        project=project_owned(db,user_id,project_id)
+        project, _ = project_access(db, user_id, project_id, write=True)
         if link:link.project_id=project.id
         else:db.add(ProjectConversation(conversation_id=str(conversation_id),project_id=project.id))
     elif link:db.delete(link)
@@ -93,6 +94,15 @@ def payload(item,run_id=None):
         'routing':json.loads(item.decision_record.data_json) if item.decision_record else {},
         'tools':[{'name':t.name,'step':t.step,'status':t.status,'detail':t.detail} for t in item.tool_traces[-80:]],
         **message_extra(item,run_id)}
+
+
+def shared_payload(item, base_documents):
+    record = item.source_record
+    sources = json.loads(record.sources_json) if record else []
+    return {key: getattr(item, key) for key in ('id', 'role', 'content', 'status', 'model', 'is_test', 'created_at')} | {
+        'error': None,
+        'sources': [source for source in sources if source.get('app') == 'knowledge' and source.get('document_id') in base_documents],
+    }
 
 
 def state_for(db,message):
@@ -164,7 +174,8 @@ def fork(db,user_id,conversation_id,message_id,*,content=None,version=None,tail_
     child=Conversation(user_id=user_id,connection_id=parent.connection_id,model=parent.model,title=(parent.title[:105]+' · 이어가기' if tail_only else parent.title[:105]+' · 분기'))
     db.add(child);db.flush();db.add(ConversationState(conversation_id=child.id,parent_id=parent.id,parent_message_id=target.id))
     project=project_for(db,parent.id)
-    if project:db.add(ProjectConversation(conversation_id=child.id,project_id=project.id))
+    if project_role(db, project, user_id) in {'owner', 'editor'}:
+        db.add(ProjectConversation(conversation_id=child.id,project_id=project.id))
     all_documents=set();target_options={};target_apps=[]
     for position,original in enumerate(rows):
         data=json.loads(version.payload_json) if version and original.id==target.id else payload(original)
@@ -227,21 +238,28 @@ def preserve_shared_files(db,conversation_id):
 
 
 def search(db,user_id,query='',project_id=None,limit=50,offset=0):
-    statement=select(Conversation).where(Conversation.user_id==user_id)
+    statement = select(Conversation)
     if project_id:
-        project_owned(db,user_id,project_id)
+        project_access(db, user_id, project_id)
         statement=statement.join(ProjectConversation,ProjectConversation.conversation_id==Conversation.id).where(ProjectConversation.project_id==str(project_id))
+    else:
+        statement = statement.where(Conversation.user_id == user_id)
     pattern='%'+query.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
     if query:
-        matches=select(Message.id).where(Message.conversation_id==Conversation.id,Message.content.ilike(pattern,escape='\\')).exists()
+        visible = or_(Conversation.user_id == user_id, Message.status == 'complete')
+        matches=select(Message.id).where(Message.conversation_id==Conversation.id,visible,Message.content.ilike(pattern,escape='\\')).exists()
         statement=statement.where(or_(Conversation.title.ilike(pattern,escape='\\'),matches))
     rows=list(db.scalars(statement.order_by(Conversation.updated_at.desc(),Conversation.id.desc()).offset(offset).limit(limit+1)))
     result=[]
     from app.modules.chat.router import conversation_data
     for row in rows[:limit]:
-        data=conversation_data(row)
+        shared = row.user_id != user_id
+        data=conversation_data(row, shared=shared)
         if query:
-            hit=db.scalar(select(Message).where(Message.conversation_id==row.id,Message.content.ilike(pattern,escape='\\')).order_by(Message.position.desc()))
+            matching = select(Message).where(Message.conversation_id==row.id,Message.content.ilike(pattern,escape='\\'))
+            if shared:
+                matching = matching.where(Message.status == 'complete')
+            hit=db.scalar(matching.order_by(Message.position.desc()).limit(1))
             if hit:
                 at=hit.content.casefold().find(query.casefold());start=max(0,at-60)
                 data['match']={'message_id':hit.id,'role':hit.role,'excerpt':hit.content[start:start+220]}

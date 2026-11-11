@@ -1,3 +1,2 @@
+# 기존 설치 명령과의 호환용입니다.
 -r requirements.txt
-# Optional for GitLab OAuth token encryption; base SQLite/chat needs no extra native module.
-cryptography>=46.0.7,<51

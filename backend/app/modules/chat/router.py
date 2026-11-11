@@ -6,7 +6,7 @@ import time
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select, update
@@ -25,8 +25,10 @@ from app.modules.workspaces import agent as workspace_agent
 from app.modules.workspaces import client as workspace_client
 from app.modules.assistant import context as assistant_context
 from app.modules.assistant.models import TurnContext
+from app.modules.knowledge.models import Document
 from app.modules.workflows import conversations as workflows
 from app.modules.workflows.models import AutoSummary
+from app.modules.workflows.projects import project_access, project_role
 
 router = APIRouter(prefix='/chat', tags=['chat'])
 Database = Annotated[Session, Depends(get_db)]
@@ -71,9 +73,12 @@ class NoteInput(BaseModel):
     revision: int = Field(0, ge=0)
 
 
-def conversation_data(item: Conversation):
+def conversation_data(item: Conversation, *, shared=False):
     return {key: getattr(item, key) for key in ('id', 'title', 'connection_id', 'model', 'created_at', 'updated_at')} | {
-        'busy': bool(item.generation_id and item.generation_until > time.time()),**workflows.conversation_extra(item)}
+        'busy': bool(not shared and item.generation_id and item.generation_until > time.time()),
+        **workflows.conversation_extra(item),
+        **({'read_only': True, 'parent_id': None} if shared else {}),
+    }
 
 
 def message_data(item: Message):
@@ -123,6 +128,8 @@ def list_conversations(context: Authenticated, db: Database, limit: int = Query(
 
 @router.post('/conversations', status_code=201)
 def create_conversation(data: CreateConversationInput, context: Authenticated, db: Database):
+    if data.project_id:
+        scheduler.lock(db)
     connection = connection_for(data.connection_id, db, context.user)
     if data.model or connection.model:
         try:
@@ -130,16 +137,36 @@ def create_conversation(data: CreateConversationInput, context: Authenticated, d
         except providers.ProviderError as error:
             raise HTTPException(422, str(error)) from None
     item = Conversation(user_id=context.user.id, connection_id=connection.id, model=data.model or connection.model)
-    if data.project_id:workflows.project_owned(db,context.user.id,data.project_id)
     db.add(item);db.flush()
     if data.project_id:workflows.attach_project(db,context.user.id,item.id,data.project_id)
     db.commit()
     return conversation_data(item)
 
 
+@router.get('/active')
+def active_conversations(context: Authenticated, db: Database):
+    rows = db.scalars(select(Conversation.id).where(
+        Conversation.user_id == context.user.id,
+        Conversation.generation_id.is_not(None),
+        Conversation.generation_until > int(time.time()),
+    ))
+    return {'ids': list(rows)}
+
+
 @router.get('/conversations/{conversation_id}')
 def get_conversation(conversation_id: UUID, context: Authenticated, db: Database):
-    item = owned(db, conversation_id, context.user.id)
+    item = db.get(Conversation, str(conversation_id))
+    if item is None:
+        raise HTTPException(404, '대화를 찾을 수 없습니다.')
+    if item.user_id != context.user.id:
+        project = workflows.project_for(db, item.id)
+        if not project_role(db, project, context.user.id):
+            raise HTTPException(404, '대화를 찾을 수 없습니다.')
+        messages = db.scalars(select(Message).where(Message.conversation_id == item.id, Message.status == 'complete')
+            .order_by(Message.position))
+        documents = set(db.scalars(select(Document.id).where(Document.base_id == project.base_id))) if project.base_id else set()
+        return {'conversation': conversation_data(item, shared=True),
+            'messages': [workflows.shared_payload(message, documents) for message in messages], 'generation': None}
     messages = db.scalars(select(Message).where(Message.conversation_id == item.id).order_by(Message.position)).all()
     if item.generation_until<=time.time() and any(m.status=='pending' for m in messages):
         scheduler.lock(db);db.refresh(item)
@@ -244,12 +271,16 @@ class Turn:
     previous_message: dict | None = None
     previous_connection: str | None = None
     started_clock: float = 0
+    parallel_used: bool = False
 
 
 def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, connection: providers.Connection) -> Turn:
     started_clock = time.monotonic()
     scheduler.lock(db)
     item = owned(db, conversation_id, user_id)
+    project = workflows.project_for(db, item.id)
+    if project:
+        project_access(db, user_id, project.id, write=True)
     content = data.content.strip()
     if not content:
         raise HTTPException(422, '메시지를 입력해 주세요.')
@@ -389,7 +420,7 @@ async def guarded_parts(iterator, cancelled):
 
 
 @router.post('/conversations/{conversation_id}/messages')
-def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Database):
+async def send(conversation_id: UUID, data: TurnInput, request: Request, context: Authenticated, db: Database):
     user_id = context.user.id
     connection = connection_for(data.connection_id, db, context.user)
     turn = prepare(db, conversation_id, context.user.id, data, connection)
@@ -503,7 +534,7 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
             error = str(caught) if isinstance(caught, (providers.ProviderError,GitlabError)) else '대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.' if str(caught) == 'queue' else '응답 시간이 초과되었습니다. 다시 시도해 주세요.'
         except HTTPException as caught:
             status,error='error',str(caught.detail)
-            error_code='app_connection' if phase.startswith(('mcp','gitlab')) or caught.status_code in {401,403,502,503} else 'workspace_error' if workspace_selection else 'context_limit'
+            error_code='token_quota' if caught.status_code == 429 else 'app_connection' if phase.startswith(('mcp','gitlab')) or caught.status_code in {401,403,502,503} else 'workspace_error' if workspace_selection else 'context_limit'
         except Exception:
             status, error = 'error', '응답을 처리하지 못했습니다. 다시 시도해 주세요.'
             error_code = 'internal_error'
@@ -562,5 +593,17 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
         if saved:
             yield event('done' if status == 'complete' else status, saved | {'detail': error})
 
-    return StreamingResponse(generate(), media_type='text/event-stream',
+    async def metered_events():
+        from . import usage
+
+        token = usage.scope.set(usage.Scope(bind, user_id, turn.request_id))
+        try:
+            async with aclosing(generate()) as events:
+                async for item in events:
+                    yield item
+        finally:
+            usage.scope.reset(token)
+
+    subscription = request.app.state.generation_jobs.start(metered_events())
+    return StreamingResponse(subscription.stream(), media_type='text/event-stream',
         headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})

@@ -1,9 +1,23 @@
 # 계정·대화·운영 기능 검증
 
+## 백그라운드 대화·병렬 Agent 검증 — 2026-11-11
+
+PR #5가 병합된 main `4aab9cb5`를 기준으로 Python 3.12.14와 Node.js 24.22.1에서 확인했습니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 백엔드 | **214개 통과**. 병렬 작업 겹침·일부 실패 취합, 팀 역할과 권한 회수, 서비스 키·동시 요청의 토큰 예약, 모델 테스트, 실제 PNG·스캔 PDF OCR 포함 |
+| 프론트엔드 | Node 테스트 **72개 통과**. `npm run typecheck`, `npm run lint`, `npm run build` 통과 |
+| 개별 실행 | 격리 SQLite에서 `python main.py`와 `npm run dev`로 API 준비 상태 및 홈 응답 확인 |
+| 실제 HTTP | 빌드한 Next.js와 실제 FastAPI에서 첫 SSE 연결 종료 후 두 번째 대화 완료, 첫 작업 복귀·저장, 모델 목록과 실제 생성 프로토콜, 게이트웨이 SSE·키 폐기, 7MiB multipart 요청 검증 |
+| 배포 설정 | 두 Nginx 설정의 문서 경로에 21MiB를 지정한 것을 확인했습니다. 루트·백엔드·프론트엔드 환경 예시의 주석은 모두 한글을 포함합니다. |
+
+모델 응답 검증에는 로컬 vLLM HTTP 대역을 사용했습니다. OCR은 설치된 Tesseract 영어 데이터와 Poppler로 실행했습니다. 이 환경에서는 Chromium 시작이 소켓·ptrace 권한 오류로 차단됐습니다. 실제 브라우저 화면, Termux, Docker·Nginx 런타임, 폐쇄망 모델과 한국어 OCR 정확도는 해당 환경에서 확인해야 합니다.
+
 
 ## 사용자 대화 흐름 확장 검증 — 2026-11-11
 
-PR #4가 병합된 main `73e39e7`(tree `056eb203bee8f58cc589ca8a1ff2636cdda5c60f`)에서 새 브랜치로 진행했습니다. 아래 표가 현재 사용자 기능 변경의 최신 결과이며, 이후 절은 기존 PR의 검증 이력입니다. GitHub Actions를 사용하지 않았습니다.
+PR #4가 병합된 main `73e39e7`(tree `056eb203bee8f58cc589ca8a1ff2636cdda5c60f`)에서 진행한 검증 이력입니다. GitHub Actions를 사용하지 않았습니다.
 
 | 검증 | 결과 |
 | --- | --- |

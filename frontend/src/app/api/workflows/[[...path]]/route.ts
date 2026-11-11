@@ -5,6 +5,8 @@ export const dynamic='force-dynamic';
 const id='[a-f0-9-]{36}';
 const rules:[RegExp,string[]][]=[
   [/^projects$/,['GET','POST']],[new RegExp(`^projects/${id}$`),['PATCH','DELETE']],
+  [new RegExp(`^projects/${id}/members$`),['GET','POST']],
+  [new RegExp(`^projects/${id}/members/${id}$`),['DELETE']],
   [new RegExp(`^conversations/${id}/(project|auto-summary)$`),['PATCH']],
   [new RegExp(`^conversations/${id}/(fork|continue)$`),['POST']],
   [new RegExp(`^messages/${id}/versions$`),['GET']],

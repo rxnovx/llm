@@ -11,7 +11,7 @@ export type ContextReport = { context_window: number; input_budget: number; rese
 export type QueueState = { status: "queued" | "running" | "tool_waiting"; position: number; request_id: string };
 export type ToolActivity = { name: string; step: number; status: "running"|"complete"|"error"; detail: string };
 export type Workspace = { id: string; conversation_id: string; status: string; allow_execution: boolean; ref: string; project_id: number; source: {project?:string;commit?:string} };
-export type Conversation = { id: string; title: string; connection_id: string; model: string; created_at: number; updated_at: number; busy: boolean;project_id?:string|null;project_name?:string|null;parent_id?:string|null;auto_summary?:boolean;match?:{message_id:string;role:string;excerpt:string}|null };
+export type Conversation = { id: string; title: string; connection_id: string; model: string; created_at: number; updated_at: number; busy: boolean;read_only?:boolean;project_id?:string|null;project_name?:string|null;parent_id?:string|null;auto_summary?:boolean;match?:{message_id:string;role:string;excerpt:string}|null };
 export type ChatMessage = { id: string; role: "user" | "assistant"; content: string; status: "pending" | "complete" | "cancelled" | "error";
   artifacts?:ResultFile[];versions?:{id:string;sequence:number;model:string;created_at:number}[];active_version?:string|null;feedback_count?:number;
   recovery?:{code:string;phase:string;requires_confirmation:boolean;preserved_previous?:boolean;can_retry:boolean;can_resume_execution:boolean;actions:string[]}|null;

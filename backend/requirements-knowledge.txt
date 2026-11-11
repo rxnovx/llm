@@ -1,5 +1,2 @@
+# 기존 설치 명령과의 호환용입니다.
 -r requirements.txt
-pypdf==7.0.1
-python-docx==1.2.0
-openpyxl==3.1.5
-defusedxml==0.7.1

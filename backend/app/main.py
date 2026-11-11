@@ -26,6 +26,8 @@ from app.modules.assistant.router import router as assistant_router
 from app.modules.workflows.router import router as workflows_router
 from app.modules.knowledge.service import worker as knowledge_worker
 from app.modules.chat.models import SchedulerLock
+from app.modules.chat.jobs import GenerationJobs
+from app.modules.chat.gateway import router as gateway_router, error_data
 from sqlalchemy.exc import IntegrityError
 
 settings = get_settings()
@@ -44,10 +46,12 @@ async def lifespan(app: FastAPI):
             except IntegrityError:
                 db.rollback()  # Another API process initialized the same row.
     settings.avatar_upload_path.mkdir(parents=True, exist_ok=True)
+    app.state.generation_jobs = GenerationJobs()
     stop=asyncio.Event()
     task=asyncio.create_task(knowledge_worker(engine,stop)) if settings.knowledge_enabled and settings.knowledge_worker_enabled else None
     try:yield
     finally:
+        await app.state.generation_jobs.close()
         stop.set()
         if task:
             task.cancel();await asyncio.gather(task,return_exceptions=True)
@@ -65,6 +69,8 @@ app.add_middleware(CORSMiddleware, allow_origins=[h.strip() for h in settings.co
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request, error):
+    if request.url.path.startswith('/v1/'):
+        return JSONResponse(status_code=400, content=error_data(400, '모델과 메시지 형식을 확인하세요.'))
     if request.url.path.startswith(('/admin/connections', '/apps', '/workspaces','/assistant','/knowledge','/workflows')):
         return JSONResponse(status_code=422, content={'detail': [
             {key: item[key] for key in ('loc', 'msg', 'type')} for item in error.errors()]})
@@ -101,3 +107,5 @@ app.include_router(knowledge_router)
 app.include_router(assistant_router)
 
 app.include_router(workflows_router)
+
+app.include_router(gateway_router)

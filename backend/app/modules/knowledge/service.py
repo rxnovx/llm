@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import signal
 import sys
 import time
 import uuid
@@ -16,16 +17,23 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.modules.auth.models import User
 from app.modules.chat.models import Conversation
+from app.modules.workflows.models import AttachmentScope, Project, ProjectConversation
+from app.modules.workflows.projects import available_projects, project_role
 from .models import Chunk,Document,KnowledgeBase,KnowledgeMember,VectorGarbage
 from . import providers
 
-def base_access(db,user_id,base_id,*,write=False):
+def base_access(db,user_id,base_id,*,write=False,manage=False):
     row=db.get(KnowledgeBase,str(base_id))
     owner=db.get(User,row.owner_id) if row else None
     if not owner or not owner.is_active or owner.registration_status!='approved':raise HTTPException(404,'접근할 수 있는 지식베이스가 아닙니다.')
-    if not row or row.owner_id!=user_id and (write or not db.get(KnowledgeMember,(row.id,user_id))):
-        raise HTTPException(404,'접근할 수 있는 지식베이스가 아닙니다.')
-    return row
+    if row.owner_id == user_id:
+        return row
+    if not manage:
+        project = db.scalar(select(Project).where(Project.base_id == row.id))
+        role = project_role(db, project, user_id)
+        if role == 'editor' or not write and (role == 'viewer' or db.get(KnowledgeMember, (row.id, user_id))):
+            return row
+    raise HTTPException(404, '접근할 수 있는 지식베이스가 아닙니다.')
 
 def document_access(db,user_id,document_id,*,conversation_id=None,write=False):
     row=db.get(Document,str(document_id))
@@ -34,7 +42,6 @@ def document_access(db,user_id,document_id,*,conversation_id=None,write=False):
     elif row.owner_id!=user_id or row.expires_at and row.expires_at<=time.time():
         raise HTTPException(404,'대화 첨부 문서를 찾을 수 없습니다.')
     if not row.base_id and conversation_id and row.conversation_id!=conversation_id:
-        from app.modules.workflows.models import AttachmentScope
         grant=db.get(AttachmentScope,(row.id,str(conversation_id)))
         if not grant or grant.user_id!=user_id:raise HTTPException(404,'대화 첨부 문서를 찾을 수 없습니다.')
     return row
@@ -49,19 +56,30 @@ def remove(db,row):
     db.delete(row)
 
 async def parse(raw,filename):
-    env={name:os.environ[name] for name in ['PATH','PREFIX','TMPDIR','LD_LIBRARY_PATH','LD_PRELOAD','SYSTEMROOT'] if name in os.environ}
+    env={name:os.environ[name] for name in ['PATH','PREFIX','TMPDIR','LD_LIBRARY_PATH','LD_PRELOAD','SYSTEMROOT','TESSDATA_PREFIX'] if name in os.environ}
+    settings = get_settings()
+    languages = settings.knowledge_ocr_languages if settings.knowledge_ocr_enabled else None
     process=await asyncio.create_subprocess_exec(sys.executable,'-m','app.modules.knowledge.extract',
-        env=env,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
+        start_new_session=(os.name == 'posix'), env=env,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
     try:
-        async with asyncio.timeout(30):
-            out,_=await process.communicate(json.dumps({'filename':filename,'data':base64.b64encode(raw).decode()}).encode())
+        async with asyncio.timeout(80 if languages else 30):
+            payload = {'filename': filename, 'data': base64.b64encode(raw).decode(), 'ocr_languages': languages}
+            out,_=await process.communicate(json.dumps(payload).encode())
         if len(out)>12*1024*1024:raise ValueError('문서 추출 결과가 너무 큽니다.')
         result=json.loads(out)
         if 'error' in result:raise ValueError(result['error'])
         return result['chunks']
     except (json.JSONDecodeError,TimeoutError):raise ValueError('문서 추출 시간이 초과되었거나 형식을 읽을 수 없습니다.') from None
     finally:
-        if process.returncode is None:process.kill();await process.wait()
+        if process.returncode is None:
+            try:
+                if os.name == 'posix':
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
 
 async def index_one(bind):
     now=int(time.time())
@@ -200,14 +218,14 @@ def automatic_query(user_id,conversation_id):
     bases=select(KnowledgeBase.id).join(User,User.id==KnowledgeBase.owner_id).where(
         User.is_active.is_(True),User.registration_status=='approved',
         or_(KnowledgeBase.owner_id==user_id,KnowledgeBase.id.in_(shared)))
-    from app.modules.workflows.models import Project,ProjectConversation,AttachmentScope
-    project_base=select(Project.base_id).join(ProjectConversation,Project.id==ProjectConversation.project_id).where(ProjectConversation.conversation_id==conversation_id,Project.user_id==user_id)
+    project_base = available_projects(user_id).with_only_columns(Project.base_id).join(ProjectConversation,
+        Project.id == ProjectConversation.project_id).where(ProjectConversation.conversation_id == conversation_id)
     project_exists=select(ProjectConversation.conversation_id).where(ProjectConversation.conversation_id==conversation_id).exists()
-    project_bases=select(Project.base_id).where(Project.user_id==user_id,Project.base_id.is_not(None))
-    bases=bases.where(or_((~project_exists)&(~KnowledgeBase.id.in_(project_bases)),KnowledgeBase.id.in_(project_base)))
+    project_bases=select(Project.base_id).where(Project.base_id.is_not(None))
+    bases=bases.where(~project_exists, KnowledgeBase.id.not_in(project_bases))
     grants=select(AttachmentScope.document_id).where(AttachmentScope.user_id==user_id,AttachmentScope.conversation_id==conversation_id)
     return select(Document).where(Document.status=='ready',Document.index_profile==providers.profile(),or_(
-        Document.base_id.in_(bases),
+        Document.base_id.in_(bases), Document.base_id.in_(project_base),
         (Document.base_id.is_(None))&(Document.owner_id==user_id)&(or_(Document.conversation_id==conversation_id,Document.id.in_(grants)))&(Document.expires_at>int(time.time()))))
 
 def automatic_available(db,user_id,conversation_id):

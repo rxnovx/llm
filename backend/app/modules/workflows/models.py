@@ -1,5 +1,5 @@
 """Additive workflow tables; existing account/chat/document columns are unchanged."""
-from sqlalchemy import Boolean,ForeignKey,Integer,LargeBinary,String,Text,UniqueConstraint
+from sqlalchemy import Boolean,CheckConstraint,ForeignKey,Integer,LargeBinary,String,Text,UniqueConstraint
 from sqlalchemy.orm import Mapped,mapped_column,relationship
 from app.db.base import Base
 from app.modules.knowledge.models import uid,now
@@ -20,6 +20,15 @@ class ProjectConversation(Base):
     __tablename__='assistant_project_conversations'
     conversation_id: Mapped[str]=mapped_column(ForeignKey('chat_conversations.id',ondelete='CASCADE'),primary_key=True)
     project_id: Mapped[str]=mapped_column(ForeignKey('assistant_projects.id',ondelete='CASCADE'),index=True)
+
+
+class ProjectMember(Base):
+    __tablename__ = 'assistant_project_members'
+    __table_args__ = (CheckConstraint("role IN ('editor', 'viewer')"),)
+
+    project_id: Mapped[str] = mapped_column(ForeignKey('assistant_projects.id', ondelete='CASCADE'), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), primary_key=True, index=True)
+    role: Mapped[str] = mapped_column(String(12))
 
 
 class ConversationState(Base):

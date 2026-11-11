@@ -1,5 +1,6 @@
 """Bounded tool loop. Inference permits are held only while asking the model."""
 import asyncio
+from contextlib import aclosing
 import json
 import time
 from urllib.parse import quote
@@ -8,7 +9,9 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from . import parallel
 from app.modules.chat import providers,scheduler
+from app.modules.chat.independent import RequestCancelled
 from app.modules.workspaces import client,service
 from app.modules.workspaces.models import ToolTrace
 from app.modules.knowledge import service as knowledge
@@ -196,6 +199,12 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
                 'parameters':{'type':'object','properties':{'query':{'type':'string','maxLength':2000}},'required':['query'],'additionalProperties':False}}})
         if artifacts.hint(turn.history[-1]['content']) and (connection.provider=='test' or connection.profile(turn.start['conversation']['model']).supports_tools):
             tools.append(artifacts.tool())
+        if options.get('parallel_agents') and not turn.parallel_used:
+            tools.append(parallel.tool())
+            messages[0]['content'] += (
+                ' When parallel analysis is enabled, use parallel_analyze for independent findings '
+                'after retrieving relevant evidence. Produce one combined answer from its results.'
+            )
         if not tools:
             compact(messages,connection.profile(turn.start['conversation']['model']).context_window-connection.profile(turn.start['conversation']['model']).max_output_tokens-256)
             connection=await acquire()
@@ -233,7 +242,34 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
                 name,args=call['function']['name'],call['function']['arguments']
                 yield 'activity',record(name,'running',json.dumps(args,ensure_ascii=False)[:1500])
                 try:
-                    if name=='knowledge_search' and has_knowledge:
+                    if name == 'parallel_analyze':
+                        if not options.get('parallel_agents') or turn.parallel_used:
+                            raise HTTPException(422, '병렬 분석은 요청당 한 번 실행할 수 있습니다.')
+                        tasks = parallel.parse(args)
+                        turn.parallel_used = True
+                        evidence = [
+                            item['content'].encode()[:2000].decode(errors='ignore')
+                            for item in messages[-10:] if item['role'] == 'tool'
+                        ]
+                        question = turn.history[-1]['content']
+                        current_question = next(item['content'] for item in reversed(messages) if item['role'] == 'user')
+                        excerpts = current_question.removeprefix(question).strip()
+                        if excerpts:
+                            evidence.append(excerpts.encode()[:6000].decode(errors='ignore'))
+                        outcomes = []
+                        for task in tasks:
+                            yield 'activity', record('parallel_worker', 'running', task.name)
+                        worker_results = parallel.results(
+                            bind, user_id, connection, turn.start['conversation']['model'], settings,
+                            tasks, question, evidence, cancelled,
+                        )
+                        async with aclosing(worker_results):
+                            async for outcome in worker_results:
+                                outcomes.append(outcome)
+                                yield 'activity', record('parallel_worker', outcome['status'],
+                                    outcome['name'] + (' · ' + outcome['error'] if outcome.get('error') else ''))
+                        result = {'tasks': sorted(outcomes, key=lambda item: item['index'])}
+                    elif name=='knowledge_search' and has_knowledge:
                         result=await knowledge.search(bind,user_id,options,turn.conversation_id,args.get('query',''),limit=4)
                         accepted=[];original_count=len(result['matches'])
                         for match in result['matches']:
@@ -278,6 +314,8 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
                         for section in result.get('sections',[]):source_for(section)
                         yield 'sources',{'sources':sources}
                     yield 'activity',record(name,'complete',trim_result(result,6000))
+                except RequestCancelled:
+                    raise AnalysisCancelled() from None
                 except HTTPException as error:
                     if error.status_code in {401,403,409}:raise
                     result={'error':str(error.detail)}

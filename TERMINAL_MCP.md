@@ -76,7 +76,7 @@ npm run dev
 
 ### Termux와 원격 MCP
 
-Termux에서 앱만 실행하고 원격 Linux MCP/워커를 사용하는 구성이 가능합니다. Termux의 백엔드에는 `requirements-mcp-client.txt`만 설치하면 JS/TS parser를 설치할 필요가 없습니다. 일반 채팅만 사용할 때는 기존 `requirements.txt`로 충분합니다. SDK 암호화 의존성에서 Termux libpython 심볼 오류가 발생하면 [TERMUX.md](TERMUX.md)의 현재 Python 버전에 맞는 방법을 확인하세요.
+Termux에서 앱만 실행하고 원격 Linux MCP/워커를 사용하는 구성이 가능합니다. Termux 백엔드의 기본 `requirements.txt`에 원격 MCP 클라이언트가 포함됩니다. JS/TS 파서는 분석 서버에서 설치합니다. 일반 채팅만 사용할 때는 기존 `requirements.txt`로 충분합니다. SDK 암호화 의존성에서 Termux libpython 심볼 오류가 발생하면 [TERMUX.md](TERMUX.md)의 현재 Python 버전에 맞는 방법을 확인하세요.
 
 Termux의 `TERMINAL_MCP_URL`은 도달 가능한 Linux MCP 주소, Linux MCP의 `TERMINAL_BROKER_URL`은 도달 가능한 Termux/API 주소로 지정합니다. 양방향 네트워크 경로가 필요합니다. `127.0.0.1`은 각 기기 자신이므로 서로 다른 기기에서는 실제 주소나 터널을 사용합니다. 원격 HTTP 서비스 앞에는 TLS와 접근 통제를 구성하고 `TERMINAL_ALLOWED_HOSTS`에 접속 hostname을 등록합니다. MCP secret은 양쪽에 동일하게 설정합니다. 실제 Android 기기와 폐쇄망 서버 연결은 별도 확인이 필요합니다.
 

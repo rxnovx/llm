@@ -146,6 +146,7 @@ def test_context_ownership_range_and_rejected_input_roll_back(client, account, m
 
 
 def test_fifo_admission_and_user_limits(client, account, monkeypatch):
+    monkeypatch.setenv('LLM_USER_CONCURRENCY', '1')
     configure(monkeypatch)
     alice,bob = account(),account('bob')
     first,second = pending(client,alice),pending(client,bob)

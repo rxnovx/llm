@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, m
 
 from app.core.config import Settings
 from app.core.tls import assistant_tls
+from . import usage
 
 
 class ProviderError(Exception):
@@ -150,7 +151,8 @@ DEMO_REPLIES = [
 ]
 
 
-async def stream_reply(connection: Connection, model: str, history: list[dict], settings: Settings) -> AsyncIterator[str]:
+async def stream_reply(connection: Connection, model: str, history: list[dict], settings: Settings, *,
+                       max_tokens=None, temperature=None, top_p=None, stop=None, metadata=None) -> AsyncIterator[str]:
     if connection.provider == 'test':
         reply = secrets.choice(DEMO_REPLIES)
         for index in range(0, len(reply), 9):
@@ -159,50 +161,83 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
         return
     vllm = connection.provider == 'vllm'
     profile = connection.profile(model)
+    output_limit = max_tokens or profile.max_output_tokens
     payload = {'model': model, 'messages': history, 'stream': True}
-    payload.update({'max_tokens': profile.max_output_tokens} if vllm else {
-        'options': {'num_predict': profile.max_output_tokens, 'num_ctx': profile.context_window}})
+    options = {key: value for key, value in {'temperature': temperature, 'top_p': top_p, 'stop': stop}.items() if value is not None}
+    if vllm:
+        payload.update(options, max_tokens=output_limit)
+        if usage.scope.get():
+            payload['stream_options'] = {'include_usage': True}
+    else:
+        payload['options'] = options | {'num_predict': output_limit, 'num_ctx': profile.context_window}
     complete = False
-    try:
-        async with client(connection, settings.llm_timeout_seconds) as session:
-            async with session.stream('POST', endpoint(connection, 'chat/completions' if vllm else 'api/chat'), json=payload) as response:
-                if not response.is_success:
-                    raise ProviderError('모델 서버가 요청을 거부했습니다. 모델 이름과 서버 인증을 확인해 주세요.')
-                async for line in response.aiter_lines():
-                    if not line or (vllm and not line.startswith('data:')):
-                        continue
-                    data = line[5:].strip() if vllm else line
-                    if data == '[DONE]':
-                        complete = True
-                        break
-                    item = json.loads(data)
-                    if item.get('error'):
-                        raise ProviderError('모델 서버에서 응답 생성 중 오류가 발생했습니다.')
-                    if vllm:
-                        choices = item.get('choices') or []
-                        if not choices:
+    with usage.measure(connection, model, payload, output_limit, settings.llm_timeout_seconds) as meter:
+        try:
+            async with client(connection, settings.llm_timeout_seconds) as session:
+                async with session.stream('POST', endpoint(connection, 'chat/completions' if vllm else 'api/chat'), json=payload) as response:
+                    if not response.is_success:
+                        raise ProviderError('모델 서버가 요청을 거부했습니다. 모델 이름과 서버 인증을 확인해 주세요.')
+                    meter.accepted = True
+                    async for line in response.aiter_lines():
+                        if not line or (vllm and not line.startswith('data:')):
                             continue
-                        text = choices[0].get('delta', {}).get('content', '')
-                        complete = complete or choices[0].get('finish_reason') is not None
-                    else:
-                        text = item.get('message', {}).get('content', '')
-                        complete = bool(item.get('done'))
-                    if text and isinstance(text, str):
-                        yield text
-                    if not vllm and complete:
-                        break
-        if not complete:
-            raise ProviderError('모델 서버의 응답이 중간에 끊겼습니다. 다시 시도해 주세요.')
-    except httpx.TimeoutException:
-        raise ProviderError('모델 서버 응답 시간이 초과되었습니다. 다시 시도해 주세요.') from None
-    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
-        raise ProviderError('모델 서버에 연결할 수 없거나 응답 형식이 올바르지 않습니다.') from None
+                        data = line[5:].strip() if vllm else line
+                        if data == '[DONE]':
+                            complete = True
+                            break
+                        item = json.loads(data)
+                        meter.observe(item, vllm)
+                        if item.get('error'):
+                            raise ProviderError('모델 서버에서 응답 생성 중 오류가 발생했습니다.')
+                        if vllm:
+                            choices = item.get('choices') or []
+                            if not choices:
+                                continue
+                            delta = choices[0].get('delta', {})
+                            text = delta.get('content', '')
+                            meter.output(delta.get('reasoning_content'))
+                            reason = choices[0].get('finish_reason')
+                            if metadata is not None and reason in {'stop', 'length', 'content_filter'}:
+                                metadata['finish_reason'] = reason
+                            complete = complete or reason is not None
+                        else:
+                            text = item.get('message', {}).get('content', '')
+                            complete = bool(item.get('done'))
+                            if complete and metadata is not None and item.get('done_reason') in {'stop', 'length'}:
+                                metadata['finish_reason'] = item['done_reason']
+                        if text and isinstance(text, str):
+                            meter.output(text)
+                            yield text
+                        if not vllm and complete:
+                            break
+            if not complete:
+                raise ProviderError('모델 서버의 응답이 중간에 끊겼습니다. 다시 시도해 주세요.')
+        except httpx.TimeoutException:
+            raise ProviderError('모델 서버 응답 시간이 초과되었습니다. 다시 시도해 주세요.') from None
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+            raise ProviderError('모델 서버에 연결할 수 없거나 응답 형식이 올바르지 않습니다.') from None
 
 
 async def tool_reply(connection,model,history,tools,settings):
     """One structured agent step; tools are executed exclusively by the application host."""
     if connection.provider=='test':
         names={t['function']['name'] for t in tools}
+        if 'parallel_analyze' in names:
+            result = next((item for item in history if item.get('tool_name') == 'parallel_analyze'), None)
+            if not result:
+                return {'role': 'assistant', 'content': '', 'tool_calls': [{
+                    'id': 'demo-parallel', 'type': 'function', 'function': {
+                        'name': 'parallel_analyze', 'arguments': {'tasks': [
+                            {'name': '핵심 내용', 'question': '질문의 핵심 내용을 정리하세요.'},
+                            {'name': '확인할 사항', 'question': '추가로 확인할 사항을 정리하세요.'},
+                        ]},
+                    },
+                }]}
+            results = json.loads(result['content']).get('tasks', [])
+            labels = ', '.join(item['name'] for item in results if item['status'] == 'complete')
+            detail = f'완료 항목은 {labels}입니다.' if labels else '완료한 항목을 확인하지 못했습니다.'
+            return {'role': 'assistant', 'content': '테스트 모드에서 병렬 분석 작업 흐름을 실행했습니다. ' + detail,
+                    'tool_calls': []}
         if 'create_document' in names:
             if not any(m.get('tool_name')=='create_document' for m in history):
                 import re
@@ -238,31 +273,36 @@ async def tool_reply(connection,model,history,tools,settings):
         outgoing.append(entry)
     payload={'model':model,'messages':outgoing,'tools':tools,'stream':False}
     payload.update({'max_tokens':profile.max_output_tokens,'tool_choice':'auto'} if vllm else {'options':{'num_predict':profile.max_output_tokens,'num_ctx':profile.context_window}})
-    try:
-        async with client(connection,settings.llm_timeout_seconds) as session:
-            async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=payload) as response:
-                if not response.is_success:raise ProviderError('모델의 도구 호출 요청이 거절되었습니다. 도구 지원과 서버 parser 설정을 확인하세요.')
-                raw=bytearray()
-                async for part in response.aiter_bytes():
-                    raw.extend(part)
-                    if len(raw)>256000:raise ProviderError('모델의 도구 응답이 크기 제한을 초과했습니다.')
-        data=json.loads(raw)
-        message=data['choices'][0]['message'] if vllm else data['message']
-        content=message.get('content') or ''
-        calls=message.get('tool_calls') or []
-        if not isinstance(content,str) or not isinstance(calls,list) or len(calls)>4:raise ValueError()
-        normalized=[]
-        for index,call in enumerate(calls):
-            function=call['function']
-            arguments=function['arguments']
-            if isinstance(arguments,str):arguments=json.loads(arguments)
-            if not isinstance(arguments,dict) or not isinstance(function['name'],str):raise ValueError()
-            normalized.append({'id':str(call.get('id') or f'call-{index}-{secrets.token_hex(4)}'),'type':'function',
-                'function':{'name':function['name'],'arguments':arguments}})
-        return {'role':'assistant','content':content,'tool_calls':normalized}
-    except ProviderError:raise
-    except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError):
-        raise ProviderError('모델 도구 응답을 처리하지 못했습니다. 도구 호출을 지원하는 모델과 parser 설정을 확인하세요.') from None
+    with usage.measure(connection, model, payload, profile.max_output_tokens, settings.llm_timeout_seconds) as meter:
+        try:
+            async with client(connection,settings.llm_timeout_seconds) as session:
+                async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=payload) as response:
+                    if not response.is_success:raise ProviderError('모델의 도구 호출 요청이 거절되었습니다. 도구 지원과 서버 parser 설정을 확인하세요.')
+                    meter.accepted = True
+                    raw=bytearray()
+                    async for part in response.aiter_bytes():
+                        raw.extend(part)
+                        if len(raw)>256000:raise ProviderError('모델의 도구 응답이 크기 제한을 초과했습니다.')
+            data=json.loads(raw)
+            meter.observe(data, vllm)
+            message=data['choices'][0]['message'] if vllm else data['message']
+            content=message.get('content') or ''
+            calls=message.get('tool_calls') or []
+            if not isinstance(content,str) or not isinstance(calls,list) or len(calls)>4:raise ValueError()
+            normalized=[]
+            for index,call in enumerate(calls):
+                function=call['function']
+                arguments=function['arguments']
+                if isinstance(arguments,str):arguments=json.loads(arguments)
+                if not isinstance(arguments,dict) or not isinstance(function['name'],str):raise ValueError()
+                normalized.append({'id':str(call.get('id') or f'call-{index}-{secrets.token_hex(4)}'),'type':'function',
+                    'function':{'name':function['name'],'arguments':arguments}})
+            meter.output(content)
+            meter.output(json.dumps(normalized, ensure_ascii=False))
+            return {'role':'assistant','content':content,'tool_calls':normalized}
+        except ProviderError:raise
+        except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError):
+            raise ProviderError('모델 도구 응답을 처리하지 못했습니다. 도구 호출을 지원하는 모델과 parser 설정을 확인하세요.') from None
 
 async def structured_reply(connection,model,messages,schema,settings):
     """Bounded JSON decision; never executes tools or accepts a server URL from the model."""
@@ -274,21 +314,25 @@ async def structured_reply(connection,model,messages,schema,settings):
             response_format={'type':'json_schema','json_schema':{'name':'assistant_decision','schema':schema,'strict':True}})
     else:
         payload.update(format=schema,options={'temperature':0,'num_predict':min(1024,profile.max_output_tokens),'num_ctx':profile.context_window})
-    try:
-        async with client(connection,settings.llm_timeout_seconds) as session:
-            async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=payload) as response:
-                if not response.is_success:raise ProviderError('자동 판단 요청이 거절되었습니다. 모델 서버의 구조화 출력 지원을 확인하세요.')
-                raw=bytearray()
-                async for part in response.aiter_bytes():
-                    raw.extend(part)
-                    if len(raw)>65536:raise ProviderError('자동 판단 응답이 너무 큽니다.')
-        value=json.loads(raw)
-        message=value['choices'][0]['message'] if vllm else value['message']
-        content=message.get('content','')
-        if not isinstance(content,str):raise ValueError()
-        result=json.loads(content)
-        if not isinstance(result,dict):raise ValueError()
-        return result
-    except ProviderError:raise
-    except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError,AttributeError):
-        raise ProviderError('자동 판단 응답을 처리하지 못했습니다. 구조화 출력 설정을 확인하세요.') from None
+    with usage.measure(connection, model, payload, min(1024, profile.max_output_tokens), settings.llm_timeout_seconds) as meter:
+        try:
+            async with client(connection,settings.llm_timeout_seconds) as session:
+                async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=payload) as response:
+                    if not response.is_success:raise ProviderError('자동 판단 요청이 거절되었습니다. 모델 서버의 구조화 출력 지원을 확인하세요.')
+                    meter.accepted = True
+                    raw=bytearray()
+                    async for part in response.aiter_bytes():
+                        raw.extend(part)
+                        if len(raw)>65536:raise ProviderError('자동 판단 응답이 너무 큽니다.')
+            value=json.loads(raw)
+            meter.observe(value, vllm)
+            message=value['choices'][0]['message'] if vllm else value['message']
+            content=message.get('content','')
+            if not isinstance(content,str):raise ValueError()
+            meter.output(content)
+            result=json.loads(content)
+            if not isinstance(result,dict):raise ValueError()
+            return result
+        except ProviderError:raise
+        except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError,AttributeError):
+            raise ProviderError('자동 판단 응답을 처리하지 못했습니다. 구조화 출력 설정을 확인하세요.') from None

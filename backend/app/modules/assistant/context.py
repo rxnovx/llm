@@ -15,6 +15,7 @@ class Selection(BaseModel):
     document_ids: list[UUID]=Field(default_factory=list,max_length=10)
     mcp_ids: list[str]=Field(default_factory=list,max_length=5)
     allow_writes: bool=False
+    parallel_agents: bool=False
     automatic: bool=True
     rag_mode: Literal['auto','always','off']='auto'
 
@@ -30,8 +31,8 @@ def validate(db,user_id,conversation_id,selection,connection,model):
     if selection.get('base_ids') or selection.get('document_ids'):
         knowledge.selected_documents(db,user_id,selection,conversation_id)
     for server_id in selection.get('mcp_ids',[]):mcp.allowed(db,user_id,server_id)
-    if selection.get('mcp_ids') and connection.provider!='test' and not connection.profile(model).supports_tools:
-        raise HTTPException(422,'MCP를 사용하려면 도구 호출을 지원하도록 설정된 모델을 선택하세요.')
+    if (selection.get('mcp_ids') or selection.get('parallel_agents')) and connection.provider!='test' and not connection.profile(model).supports_tools:
+        raise HTTPException(422,'MCP와 병렬 분석은 도구 호출을 지원하는 모델이 필요합니다.')
 
 def personal(db,user_id):
     row=db.get(Preference,user_id)
@@ -45,7 +46,7 @@ def personal(db,user_id):
 
 def active(db,user_id,selection,*,question='',conversation_id='',connection=None):
     row=db.get(Preference,user_id)
-    if selection.get('base_ids') or selection.get('document_ids') or selection.get('mcp_ids') or row and (row.instructions or row.memory_enabled):
+    if selection.get('base_ids') or selection.get('document_ids') or selection.get('mcp_ids') or selection.get('parallel_agents') or row and (row.instructions or row.memory_enabled):
         return True
     from app.modules.workflows.artifacts import hint
     if hint(question):return True

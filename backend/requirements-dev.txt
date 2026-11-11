@@ -1,4 +1,2 @@
 -r requirements-terminal.txt
--r requirements-knowledge.txt
--r requirements-artifacts.txt
 pytest==9.0.3

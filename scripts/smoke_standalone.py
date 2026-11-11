@@ -125,18 +125,28 @@ def gitlab_apps_smoke(client,access):
 def model_controls_smoke(client, access):
     """Actual BFF/API traffic with a local protocol double, never a real model."""
     entered, release = threading.Event(), threading.Event()
+    release_background = threading.Event()
     requests = []
     class ModelServer(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
+        def do_GET(self):
+            assert self.path == '/v1/models'
+            self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
+            self.wfile.write(b'{"data":[{"id":"wire"}]}')
         def do_POST(self):
-            requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+            payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            requests.append(payload)
             index = len(requests)
             self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.end_headers()
             if index == 1:
                 entered.set(); release.wait(8)
-            self.wfile.write(('data: '+json.dumps({'choices':[{'delta':{'content':'모델 응답'},'finish_reason':None}]})+'\n\n'
-                +'data: '+json.dumps({'choices':[{'delta':{},'finish_reason':'stop'}]})+'\n\ndata: [DONE]\n\n').encode())
+            self.wfile.write(('data: '+json.dumps({'choices':[{'delta':{'content':'모델 응답'},'finish_reason':None}]})+'\n\n').encode())
+            self.wfile.flush()
+            if payload['messages'][-1]['content'] == '백그라운드 첫 요청':
+                release_background.wait(10)
+            self.wfile.write(('data: '+json.dumps({'choices':[{'delta':{},'finish_reason':'stop'}]})+'\n\n'
+                +'data: '+json.dumps({'choices':[],'usage':{'prompt_tokens':12,'completion_tokens':4}})+'\n\ndata: [DONE]\n\n').encode())
             self.wfile.flush()
     server=ThreadingHTTPServer(('127.0.0.1',0),ModelServer)
     thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
@@ -181,8 +191,55 @@ def model_controls_smoke(client, access):
         stats=client.get('/api/admin/overview?mode=live',headers=access).json()
         assert stats['requests_24h']['total']==3 and stats['requests_24h']['complete']==2 and stats['requests_24h']['cancelled']==1
         assert stats['generating']==0 and stats['queued']==0
+
+        # Closing the first HTTP stream should only detach the viewer. With a
+        # second permit available, another chat completes while the first waits.
+        updated = client.patch('/api/admin/connections/wire-model', headers=access,
+            json=connection | {'max_concurrent': 2, 'revision': 1})
+        assert updated.status_code == 200, updated.text
+        with client.stream('POST', paths[0]+'/messages', headers=access, json=body('백그라운드 첫 요청')) as response:
+            assert response.status_code == 200, response.status_code
+            for line in response.iter_lines():
+                if line == 'event: delta':
+                    break
+            else:
+                raise AssertionError('The first background job did not start')
+        active = client.get('/api/chat/active', headers=access).json()['ids']
+        assert paths[0].rsplit('/', 1)[1] in active
+        second = client.post(paths[1]+'/messages', headers=access, json=body('새 대화 요청'))
+        assert 'event: done' in second.text, second.text[-1500:]
+        reopened = client.get(paths[0], headers=access).json()
+        assert reopened['generation']['status'] == 'running' and reopened['messages'][-1]['content'] == '모델 응답'
+        release_background.set()
+        for _ in range(40):
+            reopened = client.get(paths[0], headers=access).json()
+            if not reopened['generation']:
+                break
+            time.sleep(0.1)
+        assert reopened['messages'][-1]['status'] == 'complete'
+        assert client.get('/api/chat/active', headers=access).json()['ids'] == []
+        print('PASS: SSE disconnect, concurrent chat and recovery through the BFF')
+
+        checked = client.post('/api/admin/connections/wire-model/probe', headers=access, json={})
+        assert checked.status_code == 200 and checked.json()['sample'] == '모델 응답', checked.text
+        user_id = client.get('/api/account/users/me', headers=access).json()['subject']
+        issued = client.post('/api/admin/service-keys', headers=access,
+            json={'label':'HTTP smoke','user_id':user_id,'daily_tokens':0})
+        assert issued.status_code == 201, issued.text
+        key = issued.json()
+        service = {'authorization': 'Bearer ' + key['secret']}
+        assert client.get('/v1/models', headers=service).json()['data'][0]['id'] == 'wire-model:wire'
+        body_gateway = {'model':'wire-model:wire','messages':[{'role':'user','content':'HTTP gateway'}],
+            'stream':True,'stream_options':{'include_usage':True}}
+        streamed = client.post('/v1/chat/completions', headers=service, json=body_gateway)
+        assert streamed.status_code == 200 and 'data: [DONE]' in streamed.text and '"total_tokens": 16' in streamed.text
+        keys = client.get('/api/admin/service-keys', headers=access, params={'user_id':user_id}).json()['items']
+        assert keys[0]['reported_input'] == 12 and 'secret' not in keys[0]
+        assert client.patch('/api/admin/service-keys/'+key['id'], headers=access, json={'revoke':True}).status_code == 200
+        assert client.get('/v1/models', headers=service).status_code == 401
+        print('PASS: saved-model probe, gateway SSE, per-key token reporting and revocation')
     finally:
-        release.set(); server.shutdown(); server.server_close(); thread.join(timeout=2)
+        release.set(); release_background.set(); server.shutdown(); server.server_close(); thread.join(timeout=2)
 def workflows_smoke(client,access):
     """Real BFF, upload session, branch, version, output bytes and feedback routes."""
     project=client.post('/api/workflows/projects',headers=access,json={'name':'HTTP 프로젝트','instructions':'한국어로 설명'});assert project.status_code==201,project.text
@@ -202,6 +259,10 @@ def workflows_smoke(client,access):
     doc=client.post('/api/knowledge/documents',headers=access,data={'conversation_id':conversation,'upload_id':attempt},files={'file':('첨부.md','한글 검증 자료'.encode())});assert doc.status_code==201,doc.text
     assert client.post('/api/workflows/uploads/'+attempt+'/cancel',headers=access).status_code==200
     assert client.get('/api/knowledge/documents',headers=access,params={'conversation_id':conversation}).json()['items']==[]
+    large = client.post('/api/knowledge/documents', headers=access, data={'conversation_id':conversation},
+        files={'file':('size-test.md', b' ' * (7 * 1024 * 1024))})
+    assert large.status_code == 201, large.text
+    assert client.delete('/api/knowledge/documents/'+large.json()['id'], headers=access).status_code == 200
     for format in ['md','txt','csv','xlsx','pdf']:
         r=client.post('/api/workflows/messages/'+answer['id']+'/export',headers=access,json={'format':format,'name':'한글 결과'});assert r.status_code==201,r.text
         file=r.json();assert client.get('/api/workflows/artifacts/'+file['id'],headers=access).status_code==200

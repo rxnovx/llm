@@ -272,3 +272,57 @@ def test_late_file_renderer_cannot_commit_after_cancellation_or_version_change(c
     with pytest.raises(HTTPException) as caught:artifacts.create(bind,uid,m['id'],str(uuid4()),args,ready=True,expected_content_hash='outdated')
     assert caught.value.status_code==409
     with client.db_factory() as db:assert db.scalar(select(Artifact)) is None
+
+
+def test_team_project_roles_scope_and_removal(client, account):
+    owner, editor, viewer, stranger = [account(name) for name in ['alice', 'bob', 'carol', 'dave']]
+    owner_headers, editor_headers, viewer_headers, stranger_headers = map(auth, (owner, editor, viewer, stranger))
+    shared = project(client, owner_headers)
+    project_path = '/workflows/projects/' + shared['id']
+    members = project_path + '/members'
+    assert client.post(members, headers=owner_headers, json={'username': 'bob', 'role': 'editor'}).status_code == 200
+    assert client.post(members, headers=owner_headers, json={'username': 'carol', 'role': 'viewer'}).status_code == 200
+    assert client.post(members, headers=editor_headers, json={'username': 'dave', 'role': 'editor'}).status_code == 404
+    assert client.get('/workflows/projects', headers=viewer_headers).json()['items'][0]['role'] == 'viewer'
+    assert client.get('/workflows/projects', headers=stranger_headers).json()['items'] == []
+    assert client.get(members, headers=stranger_headers).status_code == 404
+    form = {'name': '함께 쓰는 프로젝트', 'instructions': '프로젝트 자료를 참고', 'revision': shared['revision']}
+    assert client.patch(project_path, headers=viewer_headers, json=form).status_code == 403
+    assert client.patch(project_path, headers=editor_headers, json=form).status_code == 200
+    assert client.delete(project_path, headers=editor_headers).status_code == 404
+    doc = upload(client, editor_headers, base_id=shared['base_id'])
+    index(client)
+    assert client.get('/knowledge/documents/' + doc['id'] + '/chunks', headers=viewer_headers).status_code == 200
+    assert client.delete('/knowledge/documents/' + doc['id'], headers=viewer_headers).status_code == 404
+    assert client.delete('/knowledge/bases/' + shared['base_id'], headers=editor_headers).status_code == 404
+
+    selected = {'project_id': shared['id']}
+    assert client.post('/chat/conversations', headers=viewer_headers, json=selected).status_code == 403
+    created = client.post('/chat/conversations', headers=editor_headers, json=selected)
+    assert created.status_code == 201, created.text
+    conversation = created.json()['id']
+    private = create(client, editor_headers)
+    with client.db_factory() as db:
+        uid = editor['user']['subject']
+        assert [item.id for item in knowledge.automatic_documents(db, uid, conversation)] == [doc['id']]
+        assert knowledge.automatic_documents(db, uid, private) == []
+    result = send(client, editor_headers, conversation, '공유 연차 규정 알려 줘', assistant={'base_ids': [shared['base_id']]})
+    assert events(result)[-1][0] == 'done', result.text[-1200:]
+    path = '/chat/conversations/' + conversation
+    readable = client.get(path, headers=viewer_headers).json()
+    assert readable['conversation']['read_only'] and readable['generation'] is None
+    answer = readable['messages'][-1]
+    assert answer['sources'][0]['document_id'] == doc['id']
+    assert 'tools' not in answer and 'versions' not in answer and 'assistant' not in answer
+    assert client.get('/chat/conversations', headers=viewer_headers).json()['items'] == []
+    assert client.get('/chat/conversations', headers=viewer_headers, params=selected | {'q': '공유 연차'}).json()['items'][0]['id'] == conversation
+    assert client.patch(path, headers=viewer_headers, json={'title': '변경'}).status_code == 404
+    assert client.get('/chat/conversations/' + private, headers=owner_headers).status_code == 404
+    assert client.get(path, headers=stranger_headers).status_code == 404
+
+    assert client.post(members, headers=owner_headers, json={'username': 'bob', 'role': 'viewer'}).status_code == 200
+    assert send(client, editor_headers, conversation).status_code == 403
+    assert client.delete(members + '/' + editor['user']['subject'], headers=owner_headers).status_code == 200
+    assert client.get(path, headers=editor_headers).json()['conversation']['project_id'] is None
+    assert client.get(path, headers=viewer_headers).status_code == 404
+    assert client.get('/knowledge/documents/' + doc['id'] + '/chunks', headers=editor_headers).status_code == 404

@@ -8,11 +8,12 @@ import { Icon, Wordmark } from "@/components/chat/Icons";
 import type { OpsAudit, OpsMode, OpsOverview, OpsPage, OpsRequest, OpsUser, RunStatus } from "@/types/admin";
 import "@/components/chat/workspace.css";
 import "./admin.css";
+import { UsageManager } from "./UsageManager";
 import { FeedbackReview } from "./FeedbackReview";
 import { ConnectionManager } from "./ConnectionManager";
 
-type Tab = "overview" | "connections" | "requests" | "users" | "audit" | "feedback";
-const tabs: [Tab, string][] = [["feedback", "답변 신고"],["overview", "개요"], ["connections", "모델 관리"], ["requests", "생성 요청"], ["users", "사용자"], ["audit", "감사 기록"]];
+type Tab = "overview" | "connections" | "requests" | "users" | "audit" | "feedback" | "usage";
+const tabs: [Tab, string][] = [["usage", "토큰·서비스 키"], ["feedback", "답변 신고"],["overview", "개요"], ["connections", "모델 관리"], ["requests", "생성 요청"], ["users", "사용자"], ["audit", "감사 기록"]];
 const labels: Record<RunStatus, string> = { complete: "완료", error: "실패", cancelled: "취소", queued: "대기 중", running: "진행 중", interrupted: "중단",tool_waiting:"도구 작업 중" };
 const milliseconds = (value: number | null) => value === null ? "—" : value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(1)}초`;
 const timestamp = (value: number | null, zone: string) => value === null ? "—" : new Date(value * 1000).toLocaleString("ko-KR", {
@@ -58,7 +59,7 @@ function Dashboard({ name, embedded }: { name: string; embedded: boolean }) {
   const [forbidden, setForbidden] = useState(false);
   const [error, setError] = useState("");
   const [checking, setChecking] = useState("");
-  const [checks, setChecks] = useState<Record<string, { status?: string; models?: string[]; error?: string }>>({});
+  const [checks, setChecks] = useState<Record<string, { status?: string; models?: string[]; sample?: string; elapsed_ms?: number; error?: string }>>({});
   const checkController = useRef<AbortController | null>(null);
   const deny = useCallback(() => { setOverview(null); setRequests([]); setUsers([]); setAudit([]); setForbidden(true); }, []);
 
@@ -77,7 +78,7 @@ function Dashboard({ name, embedded }: { name: string; embedded: boolean }) {
       try {
         const [snapshot, rows] = await Promise.all([
           adminJson<OpsOverview>(`/overview?mode=${mode}`, { signal }),
-          tab === "overview" || tab === "connections" || tab === "feedback" ? Promise.resolve(null) : adminJson<OpsPage<OpsRequest | OpsUser | OpsAudit>>(path, { signal }),
+          tab === "overview" || tab === "connections" || (tab === "feedback" || tab === "usage") ? Promise.resolve(null) : adminJson<OpsPage<OpsRequest | OpsUser | OpsAudit>>(path, { signal }),
         ]);
         if (abort.signal.aborted) return;
         setOverview(snapshot); setError(""); setHasMore(rows?.has_more ?? false);
@@ -102,8 +103,8 @@ function Dashboard({ name, embedded }: { name: string; embedded: boolean }) {
     const abort = new AbortController(); checkController.current = abort;
     setChecking(id);
     try {
-      const result = await adminJson<{ status: string; models: string[] }>(`/connections/${id}/check`, {
-        method: "POST", signal: AbortSignal.any([abort.signal, AbortSignal.timeout(15000)]),
+      const result = await adminJson<{ status: string; models: string[]; sample?: string; elapsed_ms?: number }>(`/connections/${id}/probe`, {
+        method: "POST", body: "{}", signal: AbortSignal.any([abort.signal, AbortSignal.timeout(60000)]),
       });
       if (!abort.signal.aborted) setChecks((old) => ({ ...old, [id]: result }));
     } catch (caught) {
@@ -149,18 +150,19 @@ function Dashboard({ name, embedded }: { name: string; embedded: boolean }) {
           <div><dt>테스트 연결</dt><dd>{overview.service.test_mode ? "사용" : "사용 안 함"}</dd></div><div><dt>등록된 연결</dt><dd>{overview.connections.length}개</dd></div>
           <div><dt>요청 통계 수집 시작</dt><dd>{timestamp(overview.first_record_at, zone)}</dd></div></dl>
         </section></div>
-        <section className="ops-panel"><header><div><h2>모델 연결</h2><p>연결 확인은 모델 목록 조회로 수행합니다.</p></div></header>
+        <section className="ops-panel"><header><div><h2>모델 연결</h2><p>모델 목록과 짧은 테스트 답변을 확인합니다.</p></div></header>
           {overview.configuration_error && <p className="ops-error" role="alert">모델 연결 설정을 확인해 주세요.</p>}
           {!overview.connections.length && !overview.configuration_error && <p className="ops-empty">등록된 모델 연결이 없습니다.</p>}
           <div className="ops-connections">{overview.connections.map((item) => <div key={item.id}><span className="ops-model-icon"><Icon name="server" /></span><div><strong>{item.name}</strong><small>{item.is_test ? "로컬 테스트" : item.provider} · {item.default_model || "기본 모델 미지정"}</small>
             {checks[item.id]?.error && <p className="ops-check-error" role="alert">{checks[item.id].error}</p>}
             {checks[item.id]?.models && <p>{checks[item.id].status === "test" ? "로컬 테스트 연결" : `모델 ${checks[item.id].models!.length}개 확인됨`}</p>}</div>
+            {checks[item.id]?.sample && <p>테스트 답변 · {checks[item.id].sample} ({checks[item.id].elapsed_ms}ms)</p>}
             <button className="ops-button" disabled={!!checking} onClick={() => void check(item.id)}>{checking === item.id ? "확인 중…" : "연결 확인"}</button></div>)}</div>
         </section>
         <section className="ops-panel"><header><div><h2>모델별 사용량</h2><p>최근 24시간 · 출력 문자는 토큰 수와 다릅니다.</p></div></header><div className="ops-table-scroll"><table><thead><tr><th>모델</th><th>연결</th><th>요청</th><th>출력 문자</th></tr></thead><tbody>
           {overview.model_usage.map((item, index) => <tr key={`${item.connection_id}-${item.model}-${index}`}><td><strong>{item.model}</strong>{item.is_test && <small className="ops-inline-tag">테스트</small>}</td><td>{item.connection_id}</td><td>{number(item.requests)}</td><td>{number(item.output_chars)}</td></tr>)}
           {!overview.model_usage.length && <tr><td colSpan={4} className="ops-empty">수집된 요청이 없습니다.</td></tr>}</tbody></table></div></section>
-      </> : tab === "feedback" ? <FeedbackReview/> : tab === "connections" ? <ConnectionManager onForbidden={deny} /> : <section className="ops-panel"><header><div><h2>{tabs.find(([id]) => id === tab)?.[1]}</h2><p>{tab === "requests" ? "요청 메타데이터만 표시하며 대화 본문은 조회하지 않습니다." : tab === "users" ? "계정과 유효 로그인 세션 현황" : "인증·계정·권한 변경 기록"}</p></div>
+      </> : tab === "usage" ? <UsageManager onForbidden={deny} /> : tab === "feedback" ? <FeedbackReview/> : tab === "connections" ? <ConnectionManager onForbidden={deny} /> : <section className="ops-panel"><header><div><h2>{tabs.find(([id]) => id === tab)?.[1]}</h2><p>{tab === "requests" ? "요청 메타데이터만 표시하며 대화 본문은 조회하지 않습니다." : tab === "users" ? "계정과 유효 로그인 세션 현황" : "인증·계정·권한 변경 기록"}</p></div>
         {tab === "requests" && <select aria-label="요청 상태" value={status} onChange={(event) => { setLoading(true); setStatus(event.target.value as RunStatus | "all"); setPage(0); }}><option value="all">전체 상태</option>{Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>}
         {tab === "users" && <form className="ops-user-search" onSubmit={(event) => { event.preventDefault(); setLoading(true); setQuery(search.trim()); setPage(0); setRefresh((old) => old + 1); }}>
           <input aria-label="사용자 검색" placeholder="이름 또는 사용자명" maxLength={100} value={search} onChange={(event) => setSearch(event.target.value)} /><button className="ops-button">검색</button></form>}</header>

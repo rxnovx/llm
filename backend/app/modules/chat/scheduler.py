@@ -30,7 +30,7 @@ def enqueue(db, run, settings):
     db.add(Admission(request_id=run.id, state='queued', enqueued_at=now, expires_at=now + settings.llm_queue_wait_seconds))
 
 
-def poll(db, request_id, settings, resolve):
+def poll(db, request_id, settings, resolve, *, independent=False):
     """Return (state, position, connection). Caller commits before yielding SSE."""
     lock(db)
     now = int(time.time())
@@ -40,7 +40,8 @@ def poll(db, request_id, settings, resolve):
         return 'cancelled', 0, None
     conversation = db.get(Conversation, run.conversation_id) if run.conversation_id else None
     user = db.get(User, run.user_id) if run.user_id else None
-    if (not conversation or conversation.generation_id != request_id or conversation.cancel_requested
+    owns_turn = conversation and conversation.generation_id == request_id and not conversation.cancel_requested
+    if (not (owns_turn or independent and run.conversation_id is None)
             or not user or not user.is_active or user.registration_status != 'approved'):
         admission.state = 'cancelled'
         return 'cancelled', 0, None
@@ -67,7 +68,8 @@ def poll(db, request_id, settings, resolve):
     run.status = 'running'
     run.provider, run.is_test = connection.provider, connection.provider == 'test'
     run.deadline_at = admission.expires_at
-    conversation.generation_until = admission.expires_at
+    if conversation:
+        conversation.generation_until = admission.expires_at
     return 'running', 0, connection
 
 

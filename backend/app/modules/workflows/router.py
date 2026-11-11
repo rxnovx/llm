@@ -7,16 +7,18 @@ from urllib.parse import quote
 from uuid import UUID,uuid4
 from fastapi import APIRouter,Depends,HTTPException,Query,Response
 from pydantic import BaseModel,ConfigDict,Field
-from sqlalchemy import func,select,update
+from sqlalchemy import and_,delete,func,select,update
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
-from app.modules.chat.models import Message
+from app.modules.auth.models import User
+from app.modules.chat.models import Conversation,Message
 from app.modules.chat.scheduler import lock
 from app.modules.knowledge.models import KnowledgeBase,Document
 from app.modules.knowledge import service as knowledge
 from . import conversations as service,artifacts
-from .models import Project,ProjectConversation,MessageVersion,ConversationState,UploadAttempt,Feedback,Artifact
+from .models import Project,ProjectConversation,ProjectMember,MessageVersion,ConversationState,UploadAttempt,Feedback,Artifact
+from .projects import available_projects, project_access
 
 router=APIRouter(prefix='/workflows',tags=['workflows'])
 Database=Annotated[Session,Depends(get_db)]
@@ -32,6 +34,12 @@ class ProjectInput(BaseModel):
 class ProjectLink(BaseModel):
     model_config=ConfigDict(extra='forbid')
     project_id: UUID|None=None
+
+
+class ProjectMemberInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    username: str = Field(min_length=1, max_length=80)
+    role: Literal['viewer', 'editor']
 
 
 class ForkInput(BaseModel):
@@ -69,8 +77,8 @@ class FeedbackStatus(BaseModel):
     status: Literal['open','resolved']
 
 
-def project_data(row):
-    return {k:getattr(row,k) for k in ['id','name','instructions','base_id','revision','created_at']}
+def project_data(row, role):
+    return {k:getattr(row,k) for k in ['id','name','instructions','base_id','revision','created_at']} | {'role': role}
 
 
 def detail(db,user_id,item):
@@ -81,8 +89,11 @@ def detail(db,user_id,item):
 
 @router.get('/projects')
 def projects(context: Authenticated,db: Database):
-    rows=db.scalars(select(Project).where(Project.user_id==context.user.id).order_by(Project.created_at.desc()))
-    return {'items':[project_data(r) for r in rows]}
+    user_id = context.user.id
+    rows = db.execute(available_projects(user_id).outerjoin(ProjectMember,
+        and_(ProjectMember.project_id == Project.id, ProjectMember.user_id == user_id))
+        .add_columns(ProjectMember.role).order_by(Project.created_at.desc()))
+    return {'items': [project_data(row, 'owner' if row.user_id == user_id else role) for row, role in rows]}
 
 
 @router.post('/projects',status_code=201)
@@ -92,20 +103,79 @@ def create_project(data: ProjectInput,context: Authenticated,db: Database):
     if db.scalar(select(func.count()).select_from(KnowledgeBase).where(KnowledgeBase.owner_id==context.user.id))>=20:raise HTTPException(422,'지식베이스 한도입니다. 기존 자료를 정리하세요.')
     base=KnowledgeBase(owner_id=context.user.id,name=data.name[:100]+' · 프로젝트 자료');db.add(base);db.flush()
     row=Project(user_id=context.user.id,base_id=base.id,name=data.name,instructions=data.instructions);db.add(row);db.commit()
-    return project_data(row)
+    return project_data(row, 'owner')
 
 
 @router.patch('/projects/{project_id}')
 def edit_project(project_id: UUID,data: ProjectInput,context: Authenticated,db: Database):
-    lock(db);row=service.project_owned(db,context.user.id,project_id)
+    lock(db)
+    row, role = project_access(db, context.user.id, project_id, write=True)
     if data.revision!=row.revision:raise HTTPException(409,'다른 창에서 프로젝트를 변경했습니다. 다시 여세요.')
-    row.name,row.instructions,row.revision=data.name,data.instructions,row.revision+1;db.commit();return project_data(row)
+    row.name,row.instructions,row.revision=data.name,data.instructions,row.revision+1;db.commit();return project_data(row, role)
 
 
 @router.delete('/projects/{project_id}')
 def delete_project(project_id: UUID,context: Authenticated,db: Database):
     lock(db);row=service.project_owned(db,context.user.id,project_id)
     db.delete(row);db.commit();return {'deleted':True,'conversations_and_documents_preserved':True}
+
+
+@router.get('/projects/{project_id}/members')
+def project_members(project_id: UUID, context: Authenticated, db: Database):
+    project, _ = project_access(db, context.user.id, project_id)
+    owner = db.get(User, project.user_id)
+    members = db.execute(select(User.id, User.username, ProjectMember.role).join(ProjectMember)
+        .where(ProjectMember.project_id == project.id).order_by(User.username))
+    return {'items': [{'id': owner.id, 'username': owner.username, 'role': 'owner'}] + [
+        {'id': user_id, 'username': username, 'role': role} for user_id, username, role in members
+    ]}
+
+
+def member_conversations(project_id, user_id):
+    return select(ProjectConversation.conversation_id).join(Conversation).where(
+        ProjectConversation.project_id == project_id, Conversation.user_id == user_id,
+    )
+
+
+@router.post('/projects/{project_id}/members')
+def save_project_member(project_id: UUID, data: ProjectMemberInput, context: Authenticated, db: Database):
+    lock(db)
+    project = service.project_owned(db, context.user.id, project_id)
+    user = db.scalar(select(User).where(User.username == data.username.lower(), User.is_active.is_(True),
+        User.registration_status == 'approved'))
+    if not user:
+        raise HTTPException(404, '사용자를 찾을 수 없습니다.')
+    if user.id == project.user_id:
+        raise HTTPException(422, '소유자의 권한은 변경할 수 없습니다.')
+    member = db.get(ProjectMember, (project.id, user.id))
+    if member:
+        if member.role == 'editor' and data.role == 'viewer':
+            db.execute(update(Conversation).where(Conversation.id.in_(member_conversations(project.id, user.id)),
+                Conversation.generation_id.is_not(None)).values(cancel_requested=True))
+        member.role = data.role
+    else:
+        count = db.scalar(select(func.count()).select_from(ProjectMember).where(ProjectMember.project_id == project.id))
+        if count >= 50:
+            raise HTTPException(422, '프로젝트에 팀원을 50명까지 추가할 수 있습니다.')
+        db.add(ProjectMember(project_id=project.id, user_id=user.id, role=data.role))
+    db.commit()
+    return {'id': user.id, 'username': user.username, 'role': data.role}
+
+
+@router.delete('/projects/{project_id}/members/{user_id}')
+def remove_project_member(project_id: UUID, user_id: UUID, context: Authenticated, db: Database):
+    lock(db)
+    project = service.project_owned(db, context.user.id, project_id)
+    member = db.get(ProjectMember, (project.id, str(user_id)))
+    if not member:
+        raise HTTPException(404, '프로젝트 팀원을 찾을 수 없습니다.')
+    chats = member_conversations(project.id, member.user_id)
+    db.execute(update(Conversation).where(Conversation.id.in_(chats), Conversation.generation_id.is_not(None))
+        .values(cancel_requested=True))
+    db.execute(delete(ProjectConversation).where(ProjectConversation.conversation_id.in_(chats)))
+    db.delete(member)
+    db.commit()
+    return {'revoked': True}
 
 
 @router.patch('/conversations/{conversation_id}/project')
@@ -216,7 +286,6 @@ def delete_artifact(artifact_id: UUID,context: Authenticated,db: Database):
 @router.post('/uploads',status_code=201)
 def upload_attempt(data: UploadInput,context: Authenticated,db: Database):
     lock(db)
-    from sqlalchemy import delete
     db.execute(delete(UploadAttempt).where(UploadAttempt.expires_at<int(time.time())))
     if db.scalar(select(func.count()).select_from(UploadAttempt).where(UploadAttempt.owner_id==context.user.id,UploadAttempt.status=='pending'))>=20:raise HTTPException(422,'진행 중인 첨부 요청이 많습니다. 기존 요청을 취소하세요.')
     if bool(data.base_id)==bool(data.conversation_id):raise HTTPException(422,'자료 위치를 지정하세요.')

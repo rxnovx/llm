@@ -15,8 +15,10 @@ from app.modules.chat.models import Conversation
 from app.modules.chat.scheduler import lock
 from . import service,providers
 from .extract import SUPPORTED
+from . import ocr
 from .models import Chunk,Document,KnowledgeBase,KnowledgeMember
-from app.modules.workflows.models import UploadAttempt,AttachmentScope
+from app.modules.workflows.models import UploadAttempt,AttachmentScope,Project
+from app.modules.workflows.projects import available_projects
 
 router=APIRouter(prefix='/knowledge',tags=['knowledge'])
 Database=Annotated[Session,Depends(get_db)]
@@ -35,17 +37,28 @@ class SearchInput(Selection):
     conversation_id: UUID
     query: str=Field(min_length=1,max_length=2000)
 
+def supported_formats():
+    if get_settings().knowledge_ocr_enabled and ocr.installed():
+        return SUPPORTED | ocr.IMAGE_FORMATS
+    return SUPPORTED
+
+
 @router.get('/config')
 def config(context: Authenticated):
     s=get_settings()
-    return {'enabled':s.knowledge_enabled,'formats':sorted(SUPPORTED),'max_upload_bytes':s.knowledge_max_upload_bytes,
+    return {'enabled':s.knowledge_enabled,'formats':sorted(supported_formats()),'max_upload_bytes':s.knowledge_max_upload_bytes,
         'search_mode':'lexical' if s.knowledge_embedding_provider=='disabled' else 'hybrid','vector_store':s.knowledge_vector_store,
         'reranking':bool(s.knowledge_rerank_url)}
 
 @router.get('/bases')
 def bases(context: Authenticated,db: Database):
-    rows=db.scalars(select(KnowledgeBase).where(or_(KnowledgeBase.owner_id==context.user.id,
-        KnowledgeBase.id.in_(select(KnowledgeMember.base_id).where(KnowledgeMember.user_id==context.user.id)))).order_by(KnowledgeBase.created_at))
+    user_id = context.user.id
+    project_bases = available_projects(user_id).with_only_columns(Project.base_id)
+    rows=db.scalars(select(KnowledgeBase).join(User, User.id == KnowledgeBase.owner_id)
+        .where(User.is_active.is_(True), User.registration_status == 'approved',
+            or_(KnowledgeBase.owner_id == user_id, KnowledgeBase.id.in_(project_bases),
+                KnowledgeBase.id.in_(select(KnowledgeMember.base_id).where(KnowledgeMember.user_id == user_id))))
+        .order_by(KnowledgeBase.created_at))
     return {'items':[{'id':r.id,'name':r.name,'owned':r.owner_id==context.user.id} for r in rows]}
 
 @router.post('/bases',status_code=201)
@@ -58,19 +71,19 @@ def create(data: NameInput,context: Authenticated,db: Database):
 
 @router.delete('/bases/{base_id}')
 def remove_base(base_id: UUID,context: Authenticated,db: Database):
-    row=service.base_access(db,context.user.id,base_id,write=True)
+    lock(db);row=service.base_access(db,context.user.id,base_id,manage=True)
     for doc in db.scalars(select(Document).where(Document.base_id==row.id)):service.remove(db,doc)
     db.delete(row);db.commit();return {'deleted':True}
 
 @router.get('/bases/{base_id}/members')
 def members(base_id: UUID,context: Authenticated,db: Database):
-    row=service.base_access(db,context.user.id,base_id,write=True)
+    row=service.base_access(db,context.user.id,base_id,manage=True)
     users=db.scalars(select(User).join(KnowledgeMember,KnowledgeMember.user_id==User.id).where(KnowledgeMember.base_id==row.id))
     return {'items':[{'id':u.id,'username':u.username} for u in users]}
 
 @router.post('/bases/{base_id}/members')
 def share(base_id: UUID,data: ShareInput,context: Authenticated,db: Database):
-    row=service.base_access(db,context.user.id,base_id,write=True)
+    row=service.base_access(db,context.user.id,base_id,manage=True)
     user=db.scalar(select(User).where(User.username==data.username.strip().lower(),User.is_active.is_(True)))
     if not user:raise HTTPException(404,'사용자를 찾을 수 없습니다.')
     if user.id!=row.owner_id and not db.get(KnowledgeMember,(row.id,user.id)):
@@ -79,7 +92,7 @@ def share(base_id: UUID,data: ShareInput,context: Authenticated,db: Database):
 
 @router.delete('/bases/{base_id}/members/{user_id}')
 def unshare(base_id: UUID,user_id: UUID,context: Authenticated,db: Database):
-    row=service.base_access(db,context.user.id,base_id,write=True)
+    row=service.base_access(db,context.user.id,base_id,manage=True)
     db.execute(delete(KnowledgeMember).where(KnowledgeMember.base_id==row.id,KnowledgeMember.user_id==str(user_id)));db.commit()
     return {'revoked':True}
 
@@ -107,7 +120,7 @@ async def upload(context: Authenticated,db: Database,file: UploadFile=File(),bas
         row=db.get(Conversation,conversation_id)
         if not row or row.user_id!=context.user.id:raise HTTPException(404,'대화를 찾을 수 없습니다.')
     filename=Path((file.filename or 'file').replace('\\','/')).name[:240]
-    if Path(filename).suffix.lower() not in SUPPORTED:raise HTTPException(422,'지원하지 않는 파일 형식입니다.')
+    if Path(filename).suffix.lower() not in supported_formats():raise HTTPException(422,'지원하지 않는 파일 형식입니다.')
     raw=bytearray()
     while block:=await file.read(65536):
         raw.extend(block)
@@ -115,6 +128,7 @@ async def upload(context: Authenticated,db: Database,file: UploadFile=File(),bas
     await file.close()
     if not raw:raise HTTPException(422,'빈 파일입니다.')
     lock(db)
+    if base_id:service.base_access(db,context.user.id,base_id,write=True)
     attempt=db.get(UploadAttempt,upload_id) if upload_id else None
     if upload_id and (not attempt or attempt.owner_id!=context.user.id or attempt.status!='pending' or attempt.expires_at<time.time() or attempt.base_id!=base_id or attempt.conversation_id!=conversation_id or Path(attempt.filename.replace('\\','/')).name[:240]!=filename):
         raise HTTPException(409,'취소되었거나 만료된 첨부 요청입니다.')
@@ -129,7 +143,6 @@ async def upload(context: Authenticated,db: Database,file: UploadFile=File(),bas
     count,size=db.execute(select(func.count(Document.id),func.coalesce(func.sum(func.length(Document.raw)),0)).where(Document.owner_id==context.user.id)).one()
     if (not existing and count>=s.knowledge_max_documents) or size+len(raw)-(len(existing.raw) if existing else 0)>s.knowledge_max_user_bytes:raise HTTPException(422,'개인 자료 저장 한도에 도달했습니다.')
     # Recheck scope after reading an upload; sharing/deletion can change meanwhile.
-    if base_id:service.base_access(db,context.user.id,base_id,write=True)
     if conversation_id:
         scope=db.get(Conversation,conversation_id)
         if not scope or scope.user_id!=context.user.id:raise HTTPException(404,'대화를 찾을 수 없습니다.')
@@ -154,7 +167,7 @@ def reindex(document_id: UUID,context: Authenticated,db: Database):
 
 @router.delete('/documents/{document_id}')
 def remove_document(document_id: UUID,context: Authenticated,db: Database):
-    row=service.document_access(db,context.user.id,document_id,write=True);service.remove(db,row);db.commit()
+    lock(db);row=service.document_access(db,context.user.id,document_id,write=True);service.remove(db,row);db.commit()
     return {'deleted':True}
 
 @router.get('/documents/{document_id}/chunks')

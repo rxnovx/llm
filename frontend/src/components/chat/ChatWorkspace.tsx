@@ -59,6 +59,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const [initializing, setInitializing] = useState(Boolean(user));
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [searching, setSearching] = useState(false);
@@ -94,10 +95,31 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const generation = useRef<{ id: string; conversation: string } | null>(null);
   const pinned = useRef(true);
   const sending = useRef(false);
+  const awaitingStart = useRef(false);
   const connection = connections.find((item) => item.id === selected);
   const busy = streaming || !!active?.busy;
   const subject = user?.subject;
-  const canSend = ready && (!user || !!connection && (connection.is_test || !!model.trim())) && !busy && !loading && !initializing && !uploading;
+  const anyRunning = conversations.some(item => item.busy);
+  useEffect(() => {
+    if (!subject || !anyRunning) return;
+    const abort = new AbortController();
+    let pending = false;
+    const timer = setInterval(() => {
+      if (pending) return;
+      pending = true;
+      void chatJson<{ ids: string[] }>('/active', {
+        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(5000)]),
+      }).then(({ ids }) => {
+        if (abort.signal.aborted) return;
+        const running = new Set(ids);
+        setConversations(old => old.map(item => ({ ...item, busy: running.has(item.id) })));
+      }).catch(() => {}).finally(() => { pending = false; });
+    }, 2500);
+    return () => { abort.abort(); clearInterval(timer); };
+  }, [subject, anyRunning]);
+  const viewer = projects.find(project => project.id === (active ? active.project_id : projectId))?.role === 'viewer';
+  const readOnly = !!active?.read_only || viewer;
+  const canSend = ready && !readOnly && (!user || !!connection && (connection.is_test || !!model.trim())) && !busy && !loading && !initializing && !uploading;
   const openModels = () => { if (user) setSettingsOpen(true); else router.push(workspaceHref("/login", window.location.search), { scroll: false }); };
   const selectGitlab = () => {
     if (mention) setDraft(removeAppMention(draft, mention));
@@ -151,7 +173,9 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         setAppSelections(!detail.messages.at(-1)?.routing?.automatic_project&&(previousApp?.mode==='workspace'||previousApp?.mode==='execute')?[previousApp]:[]);
         setQueue(detail.generation ?? null);
         generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
-        setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
+        if (!detail.conversation.read_only) {
+          setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
+        }
       }
     }).catch((caught) => { if (!abort.signal.aborted) setError(errorText(caught)); })
       .finally(() => { if (!abort.signal.aborted) setInitializing(false); });
@@ -221,7 +245,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   }, [active?.id, active?.busy, streaming]);
 
   useEffect(() => {
-    if (!active?.id || busy || !selected || !model) return;
+    if (!active?.id || readOnly || busy || !selected || !model) return;
     const abort = new AbortController();
     const timer = setTimeout(() => {
       void chatJson<ContextReport>(`/conversations/${active.id}/context/preview`, { method: "POST",
@@ -229,7 +253,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         .then((value) => { if (!abort.signal.aborted) setContextReport(value); }).catch(() => {});
     }, 600);
     return () => { clearTimeout(timer); abort.abort(); };
-  }, [active?.id, busy, selected, model, draft]);
+  }, [active?.id, readOnly, busy, selected, model, draft]);
 
   const updateConversation = (item: Conversation) => setConversations(old=>projectId&&item.project_id!==projectId?old:[{...old.find(v=>v.id===item.id),...item},...old.filter(v=>v.id!==item.id)]);
   const acceptWorkflow=(result:ForkResult)=>{
@@ -251,18 +275,41 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       setUploadOpen(true);
     }catch(e){setError(errorText(e));}
   };
+  const detach = () => {
+    const stream = controller.current;
+    controller.current = null;
+    stream?.abort();
+    generation.current = null;
+    sending.current = false;
+    setStreaming(false);
+    setQueue(null);
+    setToolStatus('');
+  };
   const newConversation = () => {
-    if (sending.current || busy || uploading) return;
+    if (awaitingStart.current || uploading) return;
+    detach();
     loadController.current?.abort(); setLoading(false);
     setUploadOpen(false);setActive(null); setMessages([]); setDraft(""); setError(""); setSidebar(false); setMenu(""); pinned.current = true;
     setContextReport(null); setQueue(null); setContextOpen(false); generation.current = null;
     setAppSelections([]); setMention(null); setToolStatus("");
     setAssistantSelection(emptySelection());setAssistantOpen(false);
+    if (projects.find(project => project.id === projectId)?.role === 'viewer') setProjectId('');
     replaceConversationLocation(null);
     requestAnimationFrame(() => editor.current?.focus());
   };
+  const chooseProject = (id: string) => {
+    if (awaitingStart.current || uploading) return;
+    newConversation();
+    setProjectId(id);
+  };
   const openConversation = async (item: Conversation) => {
-    if (sending.current || uploading) return;
+    if (awaitingStart.current || uploading) return;
+    if (active?.id === item.id && !item.read_only) {
+      setSidebar(false);
+      if (item.match) document.getElementById(`message-${item.match.message_id}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      return;
+    }
+    detach();
     loadController.current?.abort();
     const abort = new AbortController(); loadController.current = abort;
     setLoading(true); setSidebar(false); setMenu(""); setError("");
@@ -272,7 +319,9 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       setUploadOpen(false);pinned.current = !item.match; setActive(detail.conversation); setMessages(detail.messages); setDraft("");
       setContextReport(null); setQueue(detail.generation ?? null); setContextOpen(false);
       generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
-      setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
+      if (!detail.conversation.read_only) {
+        setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
+      }
       const previousApp=detail.messages.at(-1)?.apps?.[0];
       setAssistantSelection({...emptySelection(),...detail.messages.at(-1)?.assistant});
       setAppSelections(!detail.messages.at(-1)?.routing?.automatic_project&&(previousApp?.mode==='workspace'||previousApp?.mode==='execute')?[previousApp]:[]);setMention(null);setToolStatus("");
@@ -291,6 +340,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     onGuestDraft("");
     sending.current = true; setStreaming(true); setError(""); setToolStatus(""); setMention(null); pinned.current = true;
     const abort = new AbortController(); controller.current = abort;
+    awaitingStart.current = true;
+    setStarting(true);
     const originalDraft = draft;
     const usedApps = retry ? messages.at(-1)?.apps ?? [] : appSelections;
     setDraft("");
@@ -314,6 +365,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           const { user_message: human, assistant_message: assistant, conversation, context } = event.data;
           if (context) setContextReport(context);
           assistantId = assistant.id;
+          awaitingStart.current = false;
+          setStarting(false);
           if (!retry && (!usedApps[0]?.mode || usedApps[0].mode==='files')) setAppSelections([]);
           setMessages((old) => [...old.filter((item) => item.id !== human.id && item.id !== assistant.id), human, assistant]);
           setActive(conversation); updateConversation(conversation);
@@ -340,6 +393,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           setMessages(old=>old.map(item=>item.id===assistantId?{...item,apps:event.data.selection?[event.data.selection]:item.apps?.map(selection=>({...selection,workspace_id:event.data.id}))}:item));
           if(!retry&&!event.data.automatic)setAppSelections(old=>old.map(selection=>selection.connection_id===usedApps[0]?.connection_id&&selection.project_id===event.data.project_id?{...selection,workspace_id:event.data.id}:selection));
         } else {
+          generation.current = null;
           setQueue(null);
           setMessages((old) => old.map((item) => item.id === event.data.message.id ? event.data.message : item));
           setActive(event.data.conversation); updateConversation(event.data.conversation);
@@ -347,6 +401,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         }
       });
     } catch (caught) {
+      if (controller.current !== abort) return;
       if (abort.signal.aborted) {
         if (!assistantId) setDraft(originalDraft || text);
         setMessages((old) => old.map((item) => item.status === "pending" ? { ...item, status: "cancelled" } : item));
@@ -358,16 +413,26 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       if (current) {
         try {
           const detail = await chatJson<ConversationDetail>(`/conversations/${current.id}`, { signal: AbortSignal.timeout(5000) });
-          setActive(detail.conversation); setMessages(detail.messages); updateConversation(detail.conversation);
+          if (controller.current === abort) {
+            setActive(detail.conversation); setMessages(detail.messages); updateConversation(detail.conversation);
+            generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
+          }
         } catch { /* Preserve partial text and the original error while offline. */ }
       }
     } finally {
-      generation.current = null; controller.current = null; sending.current = false; setStreaming(false); setQueue(null); setToolStatus("");
+      if (controller.current === abort) {
+        controller.current = null;
+        sending.current = false;
+        awaitingStart.current = false;
+        setStarting(false);
+        setStreaming(false);
+        setQueue(null);
+        setToolStatus('');
+      }
     }
   };
   const stop = () => {
     const current = generation.current;
-    controller.current?.abort();
     if (current) void chatJson(`/conversations/${current.conversation}/cancel`, { method: "POST", body: JSON.stringify({ request_id: current.id }) })
       .catch((caught) => setError(errorText(caught)));
   };
@@ -406,7 +471,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     catch (caught) { setError(errorText(caught)); }
   };
   const visible = conversations;
-  const composer = <form className={`cw-composer ${streaming ? "is-streaming" : ""}`} onDragOver={e=>{if(e.dataTransfer.types.includes('Files'))e.preventDefault();}} onDrop={e=>{e.preventDefault();void attachFiles(Array.from(e.dataTransfer.files));}} onSubmit={(event) => { event.preventDefault(); void send(); }}>
+  const composer = readOnly ? <p className="cw-composer-caption" role="status">프로젝트 대화 · 열람 전용</p> : <form className={`cw-composer ${streaming ? "is-streaming" : ""}`} onDragOver={e=>{if(e.dataTransfer.types.includes('Files'))e.preventDefault();}} onDrop={e=>{e.preventDefault();void attachFiles(Array.from(e.dataTransfer.files));}} onSubmit={(event) => { event.preventDefault(); void send(); }}>
     {uploadOpen&&active&&<UploadQueue key={active.id} ref={uploads} conversationId={active.id} disabled={busy} onBusy={setUploading} onReady={doc=>setAssistantSelection(old=>{
       if(old.document_ids.includes(doc.id))return old;
       if(old.document_ids.length>=10)return old;
@@ -415,7 +480,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     {uploadOpen&&<p className="cw-upload-selection-note">직접 선택한 첨부 {assistantSelection.document_ids.length}/10 · 초과한 자료는 파일·지식에서 선택을 조정하세요.</p>}
     {!!appSelections.length && <div className="cw-app-selection">{appSelections.map((selection) => <div key={selection.connection_id}><Icon name="code" size={15} /><span>GitLab · {selection.ref} · {selection.mode==='execute'?'분석·실행':selection.mode==='workspace'?'프로젝트 분석':`${selection.paths.length}개 파일`}</span>
       <button type="button" className="cw-icon-button" aria-label="GitLab 파일 선택 제거" onClick={() => setAppSelections([])}><Icon name="close" size={13} /></button></div>)}</div>}
-    {(assistantSelection.base_ids.length>0||assistantSelection.document_ids.length>0||assistantSelection.mcp_ids.length>0)&&<div className="cw-assistant-selection"><button type="button" onClick={()=>void openAssistant()}>지식 {assistantSelection.base_ids.length} · 첨부 {assistantSelection.document_ids.length} · 앱 {assistantSelection.mcp_ids.length}{assistantSelection.allow_writes?' · 쓰기 허용':''}</button><button type="button" aria-label="자료와 앱 선택 제거" onClick={()=>setAssistantSelection(emptySelection())}>×</button></div>}
+    {(assistantSelection.base_ids.length>0||assistantSelection.document_ids.length>0||assistantSelection.mcp_ids.length>0||assistantSelection.parallel_agents)&&<div className="cw-assistant-selection"><button type="button" onClick={()=>void openAssistant()}>지식 {assistantSelection.base_ids.length} · 첨부 {assistantSelection.document_ids.length} · 앱 {assistantSelection.mcp_ids.length}{assistantSelection.parallel_agents?' · 병렬 Agent':''}{assistantSelection.allow_writes?' · 쓰기 허용':''}</button><button type="button" aria-label="자료와 앱 선택 제거" onClick={()=>setAssistantSelection(emptySelection())}>×</button></div>}
     {mention && <div className="cw-app-mention" id="chat-app-options" role="listbox" aria-label="사용할 앱"><button id="chat-app-gitlab" type="button" role="option" aria-selected={mentionChoice===0}
       onMouseMove={()=>setMentionChoice(0)} onMouseDown={(e) => e.preventDefault()} onClick={selectGitlab}><Icon name="code" size={20} /><span><strong>GitLab</strong><small>내 프로젝트에서 파일 가져오기</small></span><kbd>↵</kbd></button><button id="chat-app-knowledge" type="button" role="option" aria-selected={mentionChoice===1} onMouseMove={()=>setMentionChoice(1)} onMouseDown={e=>e.preventDefault()} onClick={()=>void openAssistant()}><Icon name="plus" size={20}/><span><strong>지식·연결된 앱</strong><small>문서 검색과 MCP 도구 선택</small></span></button></div>}
     <label className="cw-sr-only" htmlFor="chat-message">메시지</label>
@@ -451,9 +516,9 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     {sidebar && <button className="cw-sidebar-scrim" aria-label="사이드바 닫기" onClick={() => setSidebar(false)} />}
     <aside className="cw-sidebar" aria-label="대화 탐색"><header className="cw-brand"><Link href="/" onClick={(event) => { event.preventDefault(); newConversation(); }} aria-label="LLM 새 대화"><Wordmark small /><span>llm<span className="cw-brand-dot">.</span></span></Link>
       <button className="cw-icon-button cw-mobile-only" aria-label="사이드바 접기" onClick={() => setSidebar(false)}><Icon name="panel" size={17} /></button></header>
-      <div className="cw-sidebar-actions"><button className="cw-new-chat" disabled={busy} onClick={newConversation}><Icon name="plus" size={18} />새 대화<span>↗</span></button>
+      <div className="cw-sidebar-actions"><button className="cw-new-chat" disabled={starting||uploading} onClick={newConversation}><Icon name="plus" size={18} />새 대화<span>↗</span></button>
         <button className="cw-search-button" onClick={() => { setSearching((old) => !old); requestAnimationFrame(() => searchInput.current?.focus()); }}><Icon name="search" size={17} />대화 찾기<kbd>⌘ K</kbd></button></div>
-      {user&&<div className="cw-project-picker"><label className="cw-sr-only" htmlFor="project-filter">대화 프로젝트</label><select id="project-filter" value={projectId} disabled={busy||uploading} onChange={e=>{setProjectId(e.target.value);newConversation();}}><option value="">모든 대화</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><button className="cw-icon-button" aria-label="프로젝트 관리" disabled={busy||uploading} onClick={()=>setProjectsOpen(true)}><Icon name="plus" size={16}/></button></div>}
+      {user&&<div className="cw-project-picker"><label className="cw-sr-only" htmlFor="project-filter">대화 프로젝트</label><select id="project-filter" value={projectId} disabled={starting||uploading} onChange={e=>chooseProject(e.target.value)}><option value="">내 대화</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><button className="cw-icon-button" aria-label="프로젝트 관리" disabled={starting||uploading} onClick={()=>setProjectsOpen(true)}><Icon name="plus" size={16}/></button></div>}
       {searching && <div className="cw-search-field"><input ref={searchInput} aria-label="대화 제목·본문 검색" placeholder="제목과 본문 전체 검색" value={search} onChange={(event) => setSearch(event.target.value)} />
         <button className="cw-icon-button" aria-label="검색 닫기" onClick={() => { setSearch(""); setSearching(false); }}><Icon name="close" size={14} /></button></div>}
       <div className="cw-history"><div className="cw-section-label">대화 기록</div>
@@ -461,10 +526,10 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         {searchLoading&&<p className="cw-history-empty" role="status">전체 기록에서 검색 중…</p>}
         {!initializing && !searchLoading && !visible.length && <p className="cw-history-empty">{search ? "검색 결과가 없습니다." : <>아직 나눈 대화가 없어요.<br />첫 이야기를 시작해 보세요.</>}</p>}
         <nav aria-label="저장된 대화">{visible.map((item) => <div key={item.id} className={`cw-history-row ${active?.id === item.id ? "is-active" : ""}`}>
-          <button className="cw-history-title" disabled={streaming||uploading} onClick={() => void openConversation(item)} aria-current={active?.id === item.id ? "page" : undefined}>
-            <Icon name="chat" size={15} /><span>{item.title}{item.match&&<small className="cw-search-excerpt">{item.match.excerpt}</small>}</span></button>
-          <button className="cw-history-more" aria-label={`${item.title} 메뉴`} aria-expanded={menu === item.id} disabled={busy} onClick={() => setMenu(menu === item.id ? "" : item.id)}><Icon name="more" size={16} /></button>
-          {menu === item.id && <div className="cw-row-menu"><button onClick={() => rename(item)}><Icon name="edit" size={14} />이름 변경</button>
+          <button className="cw-history-title" disabled={starting||uploading} onClick={() => void openConversation(item)} aria-current={active?.id === item.id ? "page" : undefined}>
+            <Icon name="chat" size={15} /><span>{item.title}{item.busy&&<small className="cw-search-excerpt">작업 중</small>}{item.match&&<small className="cw-search-excerpt">{item.match.excerpt}</small>}</span></button>
+          {!item.read_only&&<button className="cw-history-more" aria-label={`${item.title} 메뉴`} aria-expanded={menu === item.id} disabled={item.busy} onClick={() => setMenu(menu === item.id ? "" : item.id)}><Icon name="more" size={16} /></button>}
+          {!item.read_only && menu === item.id && <div className="cw-row-menu"><button onClick={() => rename(item)}><Icon name="edit" size={14} />이름 변경</button>
             <button className="cw-danger" onClick={() => { setAction({ type: "delete", item }); setMenu(""); setError(""); }}><Icon name="trash" size={14} />삭제</button></div>}</div>)}</nav>
         {hasMore && <button className="cw-load-more" disabled={loading} onClick={() => void loadMore()}>이전 대화 더 보기</button>}</div>
       <footer className="cw-sidebar-footer"><button className="cw-connection-link" onClick={openModels}><Icon name="settings" size={17} />모델 연결<span>{user ? connections.length : ""}</span></button>
@@ -477,9 +542,9 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     </aside>
     <main className="cw-main"><header className="cw-topbar"><div className="cw-topbar-left"><button className="cw-icon-button cw-mobile-only" aria-label="사이드바 열기" onClick={() => setSidebar(true)}><Icon name="panel" /></button>
       <span className="cw-topbar-workspace">워크스페이스</span><span className="cw-topbar-slash">/</span>
-      {active ? <button className="cw-title-button" disabled={busy || loading} aria-label="대화 이름 변경" title="대화 이름 변경" onClick={() => rename(active)}>
-        <span className="cw-topbar-title">{active.title}</span><Icon name="edit" size={13} /></button> : <span className="cw-topbar-title">새 대화</span>}</div>
-      {user&&<div className="cw-topbar-project"><button className="cw-text-button" disabled={busy||uploading} onClick={()=>setProjectsOpen(true)}>{active?.project_name||projects.find(p=>p.id===projectId)?.name||'프로젝트'}</button>{active&&messages.length>0&&<button className="cw-text-button" disabled={busy||loading||uploading} onClick={()=>void continueConversation()}>새 대화로 이어가기</button>}</div>}
+      {active && !readOnly ? <button className="cw-title-button" disabled={busy || loading} aria-label="대화 이름 변경" title="대화 이름 변경" onClick={() => rename(active)}>
+        <span className="cw-topbar-title">{active.title}</span><Icon name="edit" size={13} /></button> : <span className="cw-topbar-title">{active?.title||'새 대화'}</span>}</div>
+      {user&&<div className="cw-topbar-project"><button className="cw-text-button" disabled={starting||uploading} onClick={()=>setProjectsOpen(true)}>{active?.project_name||projects.find(p=>p.id===projectId)?.name||'프로젝트'}</button>{active&&!readOnly&&messages.length>0&&<button className="cw-text-button" disabled={busy||loading||uploading} onClick={()=>void continueConversation()}>새 대화로 이어가기</button>}</div>}
       {user ? <button className={`cw-mode ${connection?.is_test ? "is-test" : ""}`} onClick={openModels}><span />{connection?.is_test ? "테스트 모드" : connection?.name || "연결 선택"}<Icon name="chevron" size={12} /></button>
         : <div className="cw-guest-topbar"><ThemeToggle /><Link href="/login">로그인</Link></div>}</header>
       <div className={`cw-content ${messages.length ? "has-messages" : ""}`} ref={viewport} onScroll={() => {
@@ -489,11 +554,11 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         {loading && <p className="cw-loading" role="status">대화를 불러오는 중…</p>}
         {!messages.length ? <div className="cw-welcome"><div className="cw-welcome-heading"><div className="cw-welcome-mark"><Wordmark /></div>
           <p className="cw-greeting">{user ? `${user.display_name || user.username}님의 워크스페이스` : "내 모델과, 나의 대화."}</p><h1>무엇을 함께 해볼까요?</h1><p className="cw-welcome-description">생각을 정리하고, 질문하고, 다음 단계로.</p></div>
-          {composer}<div className="cw-starters">{starters.map((item) => <button key={item.title} disabled={busy || loading} onClick={() => { setDraft(item.prompt); editor.current?.focus(); }}>
-            <Icon name={item.icon} size={16} />{item.title}<span>↗</span></button>)}</div>
+          {composer}{!readOnly&&<div className="cw-starters">{starters.map((item) => <button key={item.title} disabled={busy || loading} onClick={() => { setDraft(item.prompt); editor.current?.focus(); }}>
+            <Icon name={item.icon} size={16} />{item.title}<span>↗</span></button>)}</div>}
           {connection?.is_test && <p className="cw-demo-note"><span />현재 테스트 모드입니다. 실제 모델 대신 랜덤 예시 답변이 표시됩니다.</p>}
-          {conversations.length > 0 && <section className="cw-recent"><h2>이어서 나눠볼 이야기</h2>{conversations.slice(0, 3).map((item) => <button key={item.id} disabled={streaming||uploading} onClick={() => void openConversation(item)}>
-            <Icon name="chat" size={15} /><span>{item.title}</span><time>{shortDate(item.updated_at)}</time><span className="cw-recent-arrow">↗</span></button>)}</section>}</div>
+          {conversations.length > 0 && <section className="cw-recent"><h2>이어서 나눠볼 이야기</h2>{conversations.slice(0, 3).map((item) => <button key={item.id} disabled={starting||uploading} onClick={() => void openConversation(item)}>
+            <Icon name="chat" size={15} /><span>{item.title}{item.busy && <small className="cw-search-excerpt">작업 중</small>}</span><time>{shortDate(item.updated_at)}</time><span className="cw-recent-arrow">↗</span></button>)}</section>}</div>
           : <div className="cw-transcript" aria-label="대화 내용">{messages.map((message, index) => <article key={message.id} id={`message-${message.id}`} className={`cw-message cw-message-${message.role}`} aria-label={message.role === "user" ? "내 메시지" : "모델 답변"}>
             {message.role === "assistant" && <div className="cw-assistant-label"><Wordmark small /><span>{message.is_test ? "테스트 모델" : message.model}</span>{message.is_test && <small>예시 답변</small>}</div>}
             {message.role === "user" ? <div className="cw-human-text">{message.content}</div> : <>
@@ -506,8 +571,8 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
               {message.status === "error" && <p className="cw-message-error" role="alert">{message.error || "응답이 중단되었습니다. 다시 시도해 주세요."}</p>}
               {message.status === "cancelled" && <p className="cw-stopped">응답이 중지되었습니다.</p>}
               {message.status !== "pending" && <div className="cw-message-actions">{message.content && <CopyButton text={message.content} label="답변 복사" />}
-                {index === messages.length - 1 && <button className="cw-text-button" disabled={!canSend} onClick={() => void send(messages[index - 1]?.content, true)}><Icon name="refresh" size={14} />다시 생성</button>}</div>}</>}
-            {active&&<MessageWorkflow message={message} conversationId={active.id} disabled={busy||loading||uploading} onResult={acceptWorkflow} onFiles={files=>setMessages(old=>old.map(m=>m.id===message.id?{...m,artifacts:files}:m))} onRetry={message.role==='assistant'&&index===messages.length-1?()=>void send(messages[index-1]?.content,true):undefined} onModels={openModels} onApps={()=>void openAssistant()}/>}
+                {!readOnly && index === messages.length - 1 && <button className="cw-text-button" disabled={!canSend} onClick={() => void send(messages[index - 1]?.content, true)}><Icon name="refresh" size={14} />다시 생성</button>}</div>}</>}
+            {active&&!readOnly&&<MessageWorkflow message={message} conversationId={active.id} disabled={busy||loading||uploading} onResult={acceptWorkflow} onFiles={files=>setMessages(old=>old.map(m=>m.id===message.id?{...m,artifacts:files}:m))} onRetry={message.role==='assistant'&&index===messages.length-1?()=>void send(messages[index-1]?.content,true):undefined} onModels={openModels} onApps={()=>void openAssistant()}/>}
           </article>)}</div>}
       </div>
       {messages.length > 0 && <div className="cw-composer-dock">{scrollDown && <button className="cw-scroll-down" aria-label="최신 메시지로 이동" onClick={() => { pinned.current = true; viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: "smooth" }); setScrollDown(false); }}><Icon name="down" size={17} /></button>}
@@ -519,7 +584,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         {composer}<p className="cw-composer-caption">{active?.busy && !streaming ? "진행 중인 요청을 불러오고 있습니다…" : connection?.is_test ? "테스트 모드 · 예시 답변이며 실제 모델을 호출하지 않습니다." : "모델의 답변은 부정확할 수 있습니다. 중요한 내용은 확인해 주세요."}</p></div>}
       {error && <div className="cw-error-toast" role="alert"><span>{error}</span><button className="cw-icon-button" aria-label="오류 알림 닫기" onClick={() => setError("")}><Icon name="close" size={16} /></button></div>}
     </main>
-    {projectsOpen&&<ProjectsDialog projects={projects} selected={active?.project_id||projectId} active={active} onProjects={setProjects} onChoose={setProjectId} onMoved={item=>{setActive(item);updateConversation(item);setProjectId(item.project_id||'');}} onClose={()=>setProjectsOpen(false)}/>}
+    {projectsOpen&&<ProjectsDialog projects={projects} selected={active?.project_id||projectId} active={active} onProjects={setProjects} onChoose={chooseProject} onMoved={item=>{setActive(item);updateConversation(item);setProjectId(item.project_id||'');}} onClose={()=>setProjectsOpen(false)}/>}
     <dialog ref={retryDialog} className="cw-dialog cw-action-dialog" aria-label="외부 작업 재시도 확인" onCancel={()=>setRetryConfirmation(null)} onClose={()=>setRetryConfirmation(null)}><h2>쓰기 작업을 다시 실행할까요?</h2><p>이 요청은 명령 실행 또는 외부 서비스 변경을 허용했습니다. 이미 처리된 작업도 다시 실행될 수 있으니 작업 기록을 확인하세요.</p><div className="cw-action-buttons"><button className="cw-small-button" onClick={()=>setRetryConfirmation(null)}>취소</button><button className="cw-primary-button" onClick={()=>{const content=retryConfirmation;setRetryConfirmation(null);if(content)void send(content,true,true);}}>확인하고 재시도</button></div></dialog>
     {scopeOpen && <GitlabScopeDialog terminal={terminal} onClose={() => { setScopeOpen(false); editor.current?.focus(); }} onSelect={(selection) => { setAppSelections([selection]); setScopeOpen(false); editor.current?.focus(); }} />}
     {workspaceOpen&&active&&<WorkspaceDialog conversationId={active.id} onClose={()=>setWorkspaceOpen(false)}/>}

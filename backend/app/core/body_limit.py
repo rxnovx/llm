@@ -5,13 +5,14 @@ from .config import get_settings
 class KnowledgeBodyLimit:
     def __init__(self,app):self.app=app
     async def __call__(self,scope,receive,send):
-        if scope['type']!='http' or scope.get('method')!='POST' or scope.get('path')!='/knowledge/documents':
+        path = scope.get('path')
+        if scope['type']!='http' or scope.get('method')!='POST' or path not in {'/knowledge/documents', '/v1/chat/completions'}:
             return await self.app(scope,receive,send)
-        limit=get_settings().knowledge_max_upload_bytes+256*1024
+        limit = get_settings().knowledge_max_upload_bytes + 256 * 1024 if path == '/knowledge/documents' else 256 * 1024
         headers=dict(scope.get('headers',[]))
         try:declared=int(headers.get(b'content-length',b'0'))
         except ValueError:declared=limit+1
-        async def reject():await JSONResponse({'detail':'업로드 요청 크기 제한을 초과했습니다.'},status_code=413)(scope,receive,send)
+        async def reject():await JSONResponse({'detail':'요청 크기 제한을 초과했습니다.'},status_code=413)(scope,receive,send)
         if declared>limit:return await reject()
         chunks=[];size=0
         while True:
