@@ -35,7 +35,7 @@
 
 필수 환경: Node.js 22.13 이상, Python 3.12 이상. 다음 명령은 저장소 루트에서 시작합니다.
 
-Termux(Android arm64)의 설치 순서와 현재 `psycopg-binary` 오류 복구 방법은 [TERMUX.md](TERMUX.md)에 정리했습니다. 기본 SQLite 설치에는 PostgreSQL 드라이버가 필요하지 않습니다.
+Android의 네이티브 Termux에서는 아래 [Termux 설치 순서](#termux에서-실행)를 따릅니다.
 
 ```bash
 python scripts/init_env.py --standalone
@@ -76,6 +76,84 @@ npm run dev
 “요청 출처를 확인할 수 없습니다”가 표시되면 `frontend/.env.local`의 `APP_URL`과 브라우저 주소의 프로토콜·호스트·포트를 확인합니다. 추가 주소는 `APP_ALLOWED_ORIGINS`에 쉼표로 구분해 지정합니다. 백엔드 연결 주소인 `AUTH_SERVER_URL`이나 백엔드 `CORS_ORIGINS`를 바꾸는 것만으로는 프론트엔드의 출처 검사가 변경되지 않습니다. 상세 예시는 [TERMUX.md](TERMUX.md#요청-출처를-확인할-수-없습니다-오류)에 있습니다.
 
 SQLite DB와 프로필 이미지는 `backend/data/`에 생성됩니다. 다른 디렉터리에서 Python을 실행해도 상대 DB 경로는 백엔드 디렉터리를 기준으로 해석합니다. 개발 자동 재시작은 `backend/.env`의 `SERVER_RELOAD=true`로 켤 수 있습니다.
+
+### Termux에서 실행
+
+Android arm64 기준입니다. 저장소는 Termux 홈 아래에 둡니다. 예시 경로는 `~/workspace/llm`입니다.
+
+#### 1. Termux 시스템 패키지 설치
+
+Python 3.12 이상과 Node.js 22.13 이상을 사용합니다. 이미 이 조건을 충족하는 Node.js와 npm이 있다면 `pkg install nodejs-lts npm`을 건너뜁니다.
+
+```bash
+pkg update && pkg upgrade
+pkg install git python python-pip
+pkg install nodejs-lts npm
+pkg install clang make pkg-config ndk-sysroot rust \
+  libxml2 libxslt openssl libffi libjpeg-turbo libpng zlib libwebp
+```
+
+Android에 맞는 Python wheel이 없으면 pip가 패키지를 소스에서 빌드합니다. `libxml2`와 `libxslt`는 `python-docx`의 의존성인 `lxml`에, OpenSSL·libffi와 Rust는 `cryptography`를 빌드하는 데 쓰입니다. JPEG·PNG·WebP 라이브러리는 Pillow의 이미지 처리를 지원합니다. Termux의 pip는 `pkg`로 관리합니다. [Termux 패키지 관리](https://github.com/termux/termux-packages/wiki/Package-Management) · [lxml 설치 안내](https://lxml.de/installation.html)
+
+#### 2. 환경파일 생성과 백엔드 설치
+
+저장소 루트에서 시작합니다. 환경파일 생성 명령은 기존 `backend/.env`와 `frontend/.env.local`을 보존합니다. 이미 가상환경이 있다면 `python -m venv .venv` 줄을 건너뜁니다. 폴더 이름이 `venv`라면 `source venv/bin/activate`로 활성화합니다.
+
+```bash
+python scripts/init_env.py --standalone
+cd backend
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip check
+```
+
+기본 SQLite 실행에 필요한 Python 패키지는 `requirements.txt`에 있습니다. 설치가 끝나면 같은 세션에서 백엔드를 띄웁니다.
+
+```bash
+python main.py
+```
+
+Python 3.13에서 `cannot locate symbol "PyType_Type"` 오류가 나오면 `$PREFIX/lib/libpython3.13.so`가 있는지 확인한 뒤, 같은 세션에서 아래처럼 실행합니다. 다른 Python 버전은 [현재 버전에 맞는 실행 방법](TERMUX.md#cryptography의-pytype_type-심볼-오류)을 참고하세요.
+
+```bash
+LD_PRELOAD="$PREFIX/lib/libpython3.13.so${LD_PRELOAD:+:$LD_PRELOAD}" \
+  python main.py
+```
+
+#### 3. 프론트엔드 실행
+
+새 Termux 세션에서 저장소 루트로 이동한 뒤 실행합니다. `npm ci --include=optional`은 Android용 CSS 의존성도 설치합니다.
+
+```bash
+cd frontend
+npm ci --include=optional
+npm run dev
+```
+
+두 세션을 유지하고 휴대전화 브라우저에서 <http://127.0.0.1:3000>을 엽니다. 백엔드 상태는 <http://127.0.0.1:8000/ready>에서 확인할 수 있습니다.
+
+#### `lxml` 빌드가 실패할 때
+
+`Getting requirements to build wheel` 단계에서 `libxml2`와 `libxslt` 개발 패키지를 요구하면 아래 명령으로 헤더와 라이브러리를 준비합니다. `lxml`의 PyPI 소스 배포본에는 빌드에 필요한 C 코드가 들어 있습니다. [lxml 소스 빌드 안내](https://lxml.de/installation.html#building-lxml-from-dev-sources)
+
+백엔드 디렉터리에서 가상환경을 활성화한 뒤 실행합니다. `pkg-config`가 라이브러리 두 개의 버전을 출력하면 Termux의 헤더·라이브러리 경로를 지정해 설치를 재시도합니다.
+
+```bash
+pkg install clang pkg-config libxml2 libxslt
+termux_pkg_config="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+PKG_CONFIG_PATH="$termux_pkg_config" pkg-config --modversion libxml-2.0 libxslt
+
+PKG_CONFIG_PATH="$termux_pkg_config" \
+CFLAGS="-I$PREFIX/include -I$PREFIX/include/libxml2 ${CFLAGS:-}" \
+LDFLAGS="-L$PREFIX/lib ${LDFLAGS:-}" \
+  python -m pip install -r requirements.txt
+
+python -m pip check
+python -c 'import docx; from lxml import etree; print(etree.LXML_VERSION)'
+```
+
+PostgreSQL 선택 설치, 출처 오류, `cryptography`의 `PyType_Type` 오류는 [Termux 문제 해결](TERMUX.md)에 있습니다.
 
 ## Docker Compose 배포
 
@@ -190,12 +268,5 @@ GitLab 계정 연결과 `@GitLab` 코드 조회는 [GITLAB_APPS.md](GITLAB_APPS.
 기존 MR의 링크를 채팅에 보내면 리뷰와 실패한 CI를 조회할 수 있습니다. 후속 작업을 허용하면 같은 MR의 소스 브랜치에 수정 사항을 추가 커밋하고, 진행 기록과 결과 링크를 채팅에 표시합니다. [기존 MR 검토와 후속 커밋](GITLAB_APPS.md#기존-mr-검토와-후속-커밋)
 
 프로젝트 전체 다운로드·자동 코드 탐색·명령 실행·작업공간 관리는 [TERMINAL_MCP.md](TERMINAL_MCP.md)에 정리했습니다. MCP는 별도 서비스이며 개인별 저장소 권한과 실행 모드를 적용합니다. 기존 연결은 `read_repository` 권한 추가 후 다시 인증해야 합니다.
-
-## Termux 실행 명령어
-
-``` bash
-LD_PRELOAD="$PREFIX/lib/libpython3.13.so${LD_PRELOAD:+:$LD_PRELOAD}" \
-python main.py
-```
 
 범용 RAG·OCR·MCP 앱·병렬 Agent는 [ASSISTANT.md](ASSISTANT.md), 외부 프로그램의 서비스 키 설정은 [OPERATIONS.md](OPERATIONS.md#서비스-api)를 참고하세요.

@@ -4,76 +4,30 @@ Android arm64의 네이티브 Termux에서 SQLite 백엔드와 Next.js 프론트
 
 대화 화면은 로그인 후 `/`입니다. 기본 `LLM_TEST_MODE=true`에서는 폐쇄망 서버 없이 랜덤 예시 답변을 주고받습니다. 실제 vLLM/Ollama를 연결할 때는 `backend/.env`의 `LLM_CONNECTIONS_JSON`을 지정하고 백엔드를 재시작합니다. 설정 형식과 네트워크 경로는 [모델 연결](LLM_CONNECTIONS.md)에 있습니다. 새로 추가한 HTTP 클라이언트와 Markdown 렌더러는 GPU·추론 라이브러리를 요구하지 않습니다.
 
-## 첨부된 설치 오류 해결
+## 처음 설치하는 경우
 
-`psycopg-binary==3.3.4` 설치 실패는 PostgreSQL용 바이너리를 SQLite 기본 설치에도 포함했던 문제입니다. PostgreSQL 의존성은 `requirements-postgres.txt`로 분리했습니다.
+[README의 Termux 설치 순서](README.md#termux에서-실행)에 시스템 패키지 설치, 환경파일 생성, 가상환경, 백엔드·프론트엔드 실행을 정리했습니다. `python-docx`를 설치하다 XML 라이브러리 오류가 나면 [lxml 빌드 오류 해결](README.md#lxml-빌드가-실패할-때) 순서를 따릅니다.
 
-현재처럼 `backend` 디렉터리에서 `venv`가 활성화되어 있다면, 수정된 PR 브랜치를 받은 뒤 다음 명령으로 이어갈 수 있습니다.
-
-```bash
-git pull --ff-only
-python ../scripts/init_env.py --standalone
-python -m pip install -r requirements.txt
-python main.py
-```
-
-개발 테스트가 필요하면 `python -m pip install -r requirements-dev.txt`를 사용합니다. 기존 가상환경을 계속 사용할 수 있습니다.
+개발 테스트를 실행할 때는 백엔드 가상환경에서 `python -m pip install -r requirements-dev.txt`를 사용합니다. `pkg upgrade`로 Python의 주·부 버전이 바뀌었다면 기존 가상환경을 별도 이름으로 보관하고 새 Python으로 가상환경을 만든 뒤 의존성을 설치합니다.
 
 기본 `requirements.txt` 설치에 GitLab, MCP 클라이언트와 문서 추출·생성이 포함됩니다. OAuth 등록과 키 설정은 [GITLAB_APPS.md](GITLAB_APPS.md)를 참고하세요. `FRONTEND_URL`은 이메일 링크뿐 아니라 GitLab OAuth callback 주소에도 사용하므로 프론트엔드 `APP_URL`과 일치시킵니다.
 
-## 처음 설치하는 경우
+## cryptography의 `PyType_Type` 심볼 오류
 
-프로젝트는 Termux 홈 아래에 둡니다. 예시 경로는 `~/workspace/llm`입니다. Python 3.12 이상과 Node.js 22.13 이상을 사용합니다.
-
-필요한 도구가 없는 새 Termux 환경에서는 다음 패키지를 준비합니다. Rust와 C 빌드 도구는 Pydantic, cryptography, Pillow 등의 Android wheel이 없어서 소스 빌드가 필요할 때 사용합니다.
+`_rust.abi3.so`를 불러올 때 `cannot locate symbol "PyType_Type"`가 나오면 Python의 공유 라이브러리를 먼저 불러오는 방법을 시도할 수 있습니다. README에 Python 3.13 예시가 있습니다. 아래 명령은 백엔드 디렉터리의 활성화된 가상환경에서 현재 Python에 맞는 라이브러리를 찾습니다.
 
 ```bash
-pkg update
-pkg install python python-pip nodejs-lts npm git rust clang make pkg-config openssl libffi libjpeg-turbo libpng zlib libxml2 libxslt
+libpython="$PREFIX/lib/$(python -c 'import sysconfig; print(sysconfig.get_config_var("LDLIBRARY") or "")')"
+if [ -f "$libpython" ]; then
+  LD_PRELOAD="$libpython${LD_PRELOAD:+:$LD_PRELOAD}" python main.py
+else
+  printf '현재 Python의 공유 라이브러리를 확인하세요 (%s)\n' "$libpython" >&2
+fi
 ```
 
-저장소 루트에서 각 서비스의 환경 설정을 만듭니다. 기존 설정파일은 보존합니다.
+이 명령의 `LD_PRELOAD`는 백엔드 실행에만 적용됩니다. 선행 로딩으로 import가 성공한 사례가 있습니다. [Termux의 같은 유형 오류 보고](https://github.com/termux/termux-packages/issues/30705)
 
-```bash
-cd ~/workspace/llm
-python scripts/init_env.py --standalone
-```
-
-`backend/.env.example` → `backend/.env`, `frontend/.env.example` → `frontend/.env.local`이 생성됩니다. 루트 `.env`가 Compose용 주소로 설정되어 있어도 서비스별 파일이 우선합니다. 터미널에 직접 지정한 환경변수는 파일보다 우선합니다. 이미 서비스별 파일이 있다면 새 예제를 참고해 필요한 값을 직접 수정합니다.
-
-### 백엔드 세션
-
-```bash
-cd ~/workspace/llm/backend
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python main.py
-```
-
-이미 `venv`라는 이름으로 만들었다면 `source venv/bin/activate`로 활성화하면 됩니다. SQLite DB와 프로필 이미지는 `backend/data/`에 저장합니다. 별도의 PostgreSQL 서버는 기본 실행에 필요하지 않습니다.
-
-#### cryptography의 `PyType_Type` 심볼 오류
-
-`_rust.abi3.so`를 불러올 때 `cannot locate symbol "PyType_Type"`가 나오면 `.env`의 주소 설정과는 별개인 네이티브 라이브러리 연결 문제입니다. Python 3.13을 사용하는 Termux에서 아래 파일이 존재한다면 해당 프로세스에만 libpython을 먼저 불러오는 방법을 시험할 수 있습니다.
-
-```bash
-python --version
-ls "$PREFIX/lib/libpython3.13.so"
-LD_PRELOAD="$PREFIX/lib/libpython3.13.so${LD_PRELOAD:+:$LD_PRELOAD}" python main.py
-```
-
-버전 번호는 실행 중인 Python과 일치해야 합니다. 이 방법은 해당 심볼 오류의 우회이며 실제 단말에서 성공 여부를 확인해야 합니다. [Termux의 같은 유형 오류 보고](https://github.com/termux/termux-packages/issues/30705)에도 선행 로딩으로 import가 성공한 사례가 있습니다.
-
-### 프론트엔드 세션
-
-```bash
-cd ~/workspace/llm/frontend
-npm ci --include=optional
-npm run dev
-```
-
-휴대전화 브라우저에서 `http://localhost:3000` 또는 `http://127.0.0.1:3000`을 엽니다. 백엔드는 `127.0.0.1:8000`으로 실행됩니다. 두 Termux 세션을 유지합니다.
+## 프론트엔드
 
 `npm run dev`와 `npm run build`는 원본 프로젝트와 같은 Webpack을 사용합니다. Next.js와 동일한 버전의 SWC WASM 패키지를 설치하며, Android에서는 실행 전에 해당 패키지를 Next.js의 WASM 캐시에 연결합니다. 따라서 Turbopack 전용 네이티브 바인딩에 의존하지 않습니다. Tailwind/Lightning CSS의 Android arm64 패키지도 설치되도록 optional 의존성을 포함합니다.
 
@@ -104,7 +58,7 @@ AUTH_COOKIE_SECURE=false
 
 ## PostgreSQL을 사용하는 경우
 
-일반 Linux/Docker용 `requirements-postgres.txt`는 바이너리 배포용입니다. Termux에서 PostgreSQL을 직접 사용하려면 Termux의 libpq와 순수 Python 드라이버를 설치합니다.
+`psycopg-binary==3.3.4`에 호환되는 wheel을 찾지 못했다면 SQLite는 기본 `requirements.txt`로 설치합니다. Termux에서 PostgreSQL을 사용하는 경우 Termux의 libpq와 순수 Python 드라이버를 설치합니다.
 
 ```bash
 pkg install postgresql
