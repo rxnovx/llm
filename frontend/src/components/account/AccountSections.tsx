@@ -5,6 +5,7 @@ import { GoogleSignInButton } from "@/components/auth/GoogleSignInButton";
 import { UserAvatar } from "@/components/shared/UserAvatar";
 import { normalizeAvatarUrl, avatarProfileValue } from "@/lib/avatar-url";
 import { api } from "@/lib/api";
+import { getAuthSessionVersion } from "@/lib/auth";
 import type { AuthUser, AuthMessage, AccountSession } from "@/types/auth";
 const fieldClass = "account-input";
 function formatDate(timestamp: number | null) {
@@ -520,7 +521,7 @@ export function PasswordSection({
   onError,
 }: {
   hasPassword: boolean;
-  onSuccess: () => Promise<void>;
+  onSuccess: (sessionVersion: number) => Promise<void>;
   onError: (error: unknown, fallback: string) => void;
 }) {
   const [currentPassword, setCurrentPassword] = useState("");
@@ -535,6 +536,7 @@ export function PasswordSection({
       return;
     }
     setSaving(true);
+    const sessionVersion = getAuthSessionVersion();
     try {
       await api.post(
         hasPassword ? "/users/me/password" : "/users/me/password/set",
@@ -542,7 +544,7 @@ export function PasswordSection({
           ? { current_password: currentPassword, new_password: newPassword }
           : { new_password: newPassword },
       );
-      await onSuccess();
+      await onSuccess(sessionVersion);
     } catch (caught) {
       onError(caught, "비밀번호를 변경하지 못했습니다.");
     } finally {

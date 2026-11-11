@@ -10,7 +10,7 @@ type State = {
   initialize: () => Promise<void>; refreshUser: () => Promise<void>;
   login: (data: { loginId: string; password: string }) => Promise<void>;
   loginWithGoogle: (credential: string, acceptTerms?: boolean) => Promise<void>;
-  logout: (allSessions?: boolean) => Promise<void>;
+  logout: (allSessions?: boolean, expectedSessionVersion?: number) => Promise<boolean>;
   clear: () => void;
 };
 let initialization: Promise<void> | null = null;
@@ -46,11 +46,13 @@ export const useAuthStore = create<State>((set, get) => ({
     setAccessToken(response.data.access_token);
     set({ user: response.data.user, initialized: true, error: null });
   }),
-  logout: async (allSessions = false) => withAuthSessionLock(async () => {
+  logout: async (allSessions = false, expectedSessionVersion) => withAuthSessionLock(async () => {
+    if (expectedSessionVersion !== undefined && expectedSessionVersion !== getAuthSessionVersion()) return false;
     // Keep the session available for retry if the API could not revoke it.
     await authApi.post("/logout", { all_sessions: allSessions });
     clearAccessToken(true);
     set({ user: null, initialized: true, error: null });
+    return true;
   }),
   clear: () => set({ user: null, initialized: true, error: null }),
 }));

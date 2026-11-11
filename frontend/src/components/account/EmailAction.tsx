@@ -3,7 +3,9 @@ import { useState, type FormEvent } from "react";
 import { useSearchParams } from "next/navigation";
 import { WorkspaceLink as Link } from "@/components/shared/WorkspaceLink";
 import { AuthCard, AuthError, AuthField, AuthPageShell, AuthStatus, authInputClassName } from "@/components/auth/AuthCard";
+import { useModalNavigation } from "@/components/auth/modal-navigation";
 import { api, authApi } from "@/lib/api";
+import { getAuthSessionVersion } from "@/lib/auth";
 import { getApiErrorMessage } from "@/lib/api-error";
 import { useAuthStore } from "@/stores/authStore";
 import type { AuthMessage } from "@/types/auth";
@@ -11,6 +13,7 @@ import { workspaceHref, WORKSPACE_LOCATION_EVENT } from "@/lib/workspace-navigat
 
 export function EmailAction({ mode }: { mode: "verify" | "reset" | "recover" }) {
   const query = useSearchParams();
+  const canNavigate = useModalNavigation();
   const token = query.get("token");
   const emailChange = mode === "verify" && query.get("action") === "email-change";
   const [email, setEmail] = useState(query.get("email") ?? "");
@@ -23,15 +26,16 @@ export function EmailAction({ mode }: { mode: "verify" | "reset" | "recover" }) 
   const title = emailChange ? "로그인 이메일 변경" : mode === "verify" ? "이메일 인증" : mode === "reset" ? "비밀번호 재설정" : "계정 복구";
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (busy || done) return;
+    if (busy || done || !canNavigate()) return;
     if (token && mode !== "verify" && password !== confirm) { setError("비밀번호가 일치하지 않습니다."); return; }
     setBusy(true); setError(""); setMessage("");
+    const sessionVersion = getAuthSessionVersion();
     try {
       let text: string;
       if (emailChange && token) {
         const response = await api.post<AuthMessage>("/users/me/email-change/confirm", { token });
         text = response.data.message;
-        await useAuthStore.getState().logout();
+        await useAuthStore.getState().logout(false, sessionVersion);
       } else if (mode === "verify") {
         if (token) { await authApi.post("/email-verification/confirm", { token }); text = "이메일을 인증했습니다. 로그인해주세요."; }
         else { const response = await authApi.post<AuthMessage>("/email-verification/resend", { email }); text = response.data.message; }
@@ -40,11 +44,16 @@ export function EmailAction({ mode }: { mode: "verify" | "reset" | "recover" }) 
         const response = await authApi.post<AuthMessage>(`/${base}/${token ? "confirm" : "request"}`,
           token ? { token, new_password: password } : { email });
         text = response.data.message;
-        if (token) await useAuthStore.getState().logout();
+        if (token) await useAuthStore.getState().logout(false, sessionVersion);
       }
+      if (!canNavigate()) return;
+      const current = new URLSearchParams(window.location.search);
+      if (current.get("token") !== token || (mode === "verify" && (current.get("action") === "email-change") !== emailChange)) return;
       setMessage(text); setDone(Boolean(token)); setPassword(""); setConfirm("");
-      if (token) { window.history.replaceState(null, "", workspaceHref(window.location.pathname, window.location.search));
-        window.dispatchEvent(new Event(WORKSPACE_LOCATION_EVENT)); }
+      if (token) {
+        window.history.replaceState(null, "", workspaceHref(window.location.pathname, window.location.search));
+        window.dispatchEvent(new Event(WORKSPACE_LOCATION_EVENT));
+      }
     } catch (caught) { setError(getApiErrorMessage(caught, "요청을 완료하지 못했습니다.")); }
     finally { setBusy(false); }
   };

@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useDialogDismiss } from "@/components/shared/useDialogDismiss";
 import { workflowJson } from '@/lib/workflows';
 import { chatJson } from "@/lib/chat-api";
 import type { ContextReport } from "@/types/chat";
@@ -13,6 +14,7 @@ export function ContextDialog({ conversationId, connectionId, model, content, on
   const [summary, setSummary] = useState("");
   const [through, setThrough] = useState(-1);
   const [saving, setSaving] = useState(false);
+  const dismiss = useDialogDismiss(onClose, !saving);
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
   useEffect(() => { dialog.current?.showModal(); }, []);
@@ -36,9 +38,9 @@ export function ContextDialog({ conversationId, connectionId, model, content, on
     } catch (caught) { setError(caught instanceof Error ? caught.message : "요약 메모를 저장하지 못했습니다."); }
     finally { setSaving(false); }
   };
-  return <dialog ref={dialog} className="cw-dialog cw-context-dialog" aria-labelledby="context-title" onCancel={onClose} onClose={onClose}>
+  return <dialog ref={dialog} className="cw-dialog cw-context-dialog" aria-labelledby="context-title" {...dismiss} onClose={onClose}>
     <header className="cw-dialog-header"><div><span className="cw-overline">대화 문맥</span><h2 id="context-title">모델에게 전달할 내용</h2></div>
-      <button className="cw-icon-button" type="button" aria-label="문맥 설정 닫기" onClick={onClose}><Icon name="close" /></button></header>
+      <button className="cw-icon-button" type="button" aria-label="문맥 설정 닫기" disabled={saving} onClick={onClose}><Icon name="close" /></button></header>
     {error && <p className="cw-inline-error" role="alert">{error}<button className="cw-text-button" disabled={saving} onClick={() => setRefresh((value) => value + 1)}>다시 불러오기</button></p>}
     {!report && !error && <p role="status">문맥 예산을 계산하는 중…</p>}
     {report && <form onSubmit={(event) => void save(event)}><dl className="cw-context-metrics"><div><dt>입력 예산</dt><dd>{report.input_budget.toLocaleString()} 토큰</dd></div>

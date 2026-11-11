@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { WorkspaceLink } from "@/components/shared/WorkspaceLink";
+import { useDialogDismiss } from "@/components/shared/useDialogDismiss";
 import { appsJson, type AppCatalog, type AppConnection, type GitlabSelection, type ResolvedMergeRequest } from "@/lib/app-connections";
 import { Icon } from "./Icons";
 
@@ -15,6 +16,7 @@ export function GitlabScopeDialog({ onClose, onSelect, terminal, initialReferenc
   onClose: () => void; onSelect: SelectScope; terminal?: Terminal; initialReference?: string; canWriteModel: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const dismiss = useDialogDismiss(onClose);
   const [catalog, setCatalog] = useState<AppCatalog | null>(null), [error, setError] = useState("");
   const [connection, setConnection] = useState(""), [project, setProject] = useState<Project | null>(null);
   const [ref, setRef] = useState("HEAD"), [directory, setDirectory] = useState(""), [paths, setPaths] = useState<string[]>([]);
@@ -33,7 +35,7 @@ export function GitlabScopeDialog({ onClose, onSelect, terminal, initialReferenc
   const connections = catalog?.apps[0]?.connections.filter((item) => item.status === "connected") ?? [];
   const selectedConnection = connections.find(item => item.id === connection);
   const canPublish = mode === "execute" && !!project && !!selectedConnection?.can_publish;
-  return <dialog className="cw-dialog cw-gitlab-dialog" ref={dialog} aria-labelledby="gitlab-scope-title" onCancel={(e) => { e.preventDefault(); onClose(); }}>
+  return <dialog className="cw-dialog cw-gitlab-dialog" ref={dialog} aria-labelledby="gitlab-scope-title" {...dismiss}>
     <header className="cw-dialog-header"><h2 id="gitlab-scope-title">GitLab에서 가져오기</h2>
       <button type="button" className="cw-icon-button" aria-label="GitLab 선택 닫기" onClick={onClose}><Icon name="close" /></button></header>
     <p className="cw-dialog-description">MR이나 프로젝트 파일을 선택하세요. 조회한 자료는 현재 모델 서버로 전달됩니다.</p>

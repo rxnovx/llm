@@ -4,6 +4,7 @@ import { WorkspaceLink as Link } from "@/components/shared/WorkspaceLink";
 import { useRouter } from "next/navigation";
 import { AuthCard, AuthError, AuthField, AuthPageShell, authInputClassName } from "@/components/auth/AuthCard";
 import { GoogleSignInButton } from "@/components/auth/GoogleSignInButton";
+import { useModalNavigation } from "@/components/auth/modal-navigation";
 import { getApiErrorCode, getApiErrorMessage } from "@/lib/api-error";
 import { getSafeNextPath } from "@/lib/auth-router";
 import { useAuthStore } from "@/stores/authStore";
@@ -11,22 +12,28 @@ import { workspaceHref } from "@/lib/workspace-navigation";
 
 export default function LoginPage() {
   const router = useRouter();
+  const canNavigate = useModalNavigation();
   const [loginId, setLoginId] = useState("");
   const [password, setPassword] = useState("");
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [pendingGoogle, setPendingGoogle] = useState<string | null>(null);
-  const complete = () => router.replace(workspaceHref(getSafeNextPath(new URLSearchParams(window.location.search).get("next")), window.location.search), { scroll: false });
+  const complete = () => {
+    if (!canNavigate()) return;
+    const search = window.location.search;
+    router.replace(workspaceHref(getSafeNextPath(new URLSearchParams(search).get("next")), search), { scroll: false });
+  };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (busy) return;
+    if (busy || !canNavigate()) return;
     setBusy(true); setError("");
     try { await useAuthStore.getState().login({ loginId: loginId.trim(), password }); complete(); }
     catch (caught) { setError(getApiErrorMessage(caught, "로그인에 실패했습니다.")); }
     finally { setBusy(false); }
   };
   const google = async (credential: string, acceptTerms = false) => {
+    if (busy || !canNavigate()) return;
     setBusy(true); setError("");
     try { await useAuthStore.getState().loginWithGoogle(credential, acceptTerms); complete(); }
     catch (caught) {

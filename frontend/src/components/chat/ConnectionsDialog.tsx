@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { useDialogDismiss } from "@/components/shared/useDialogDismiss";
 import { chatJson } from "@/lib/chat-api";
 import type { Connection } from "@/types/chat";
 import { Icon } from "./Icons";
@@ -9,6 +10,7 @@ type Props = { open: boolean; onClose: () => void; connections: Connection[]; se
 
 export function ConnectionsDialog({ open, onClose, connections, selected, model, onSelect, disabled }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const dismiss = useDialogDismiss(onClose);
   const [checking, setChecking] = useState("");
   const [results, setResults] = useState<Record<string, { models: string[]; error?: string }>>({});
   useEffect(() => {
@@ -20,12 +22,12 @@ export function ConnectionsDialog({ open, onClose, connections, selected, model,
     try {
       const result = await chatJson<{ models: string[] }>(`/connections/${item.id}/check`, { method: "POST", body: "{}" });
       setResults((old) => ({ ...old, [item.id]: result }));
-      if (item.id === selected && !model && result.models[0]) onSelect(item.id, result.models[0]);
+      if (dialog.current?.open && item.id === selected && !model && result.models[0]) onSelect(item.id, result.models[0]);
     } catch (error) {
       setResults((old) => ({ ...old, [item.id]: { models: [], error: error instanceof Error ? error.message : "연결을 확인하지 못했습니다." } }));
     } finally { setChecking(""); }
   };
-  return <dialog ref={dialog} className="cw-dialog" aria-labelledby="connections-title" onCancel={onClose} onClose={onClose}>
+  return <dialog ref={dialog} className="cw-dialog" aria-labelledby="connections-title" {...dismiss} onClose={onClose}>
     <header className="cw-dialog-header"><div><span className="cw-overline">워크스페이스 설정</span><h2 id="connections-title">모델 연결</h2></div>
       <button className="cw-icon-button" aria-label="연결 설정 닫기" onClick={onClose}><Icon name="close" /></button></header>
     <p className="cw-dialog-description">대화에 사용할 연결을 선택하세요. 모델은 언제든 바꿀 수 있습니다.</p>

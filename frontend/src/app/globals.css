@@ -29,4 +29,26 @@ button:disabled { cursor:wait; }
 .account-notice { display:flex; gap:12px; padding:14px; border:1px solid var(--border); border-radius:8px; }
 .account-button { display:inline-flex; align-items:center; justify-content:center; min-height:44px; padding:8px 18px; background:var(--primary); color:var(--on-primary); border-radius:8px; font-size:14px; font-weight:600; }
 .account-button:disabled { opacity:.6; }
+
+dialog:where(.app-modal,.cw-dialog) {
+  --dialog-gutter:24px;
+  --dialog-inline-gutter:max(var(--dialog-gutter), env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
+  --dialog-block-gutter:max(var(--dialog-gutter), env(safe-area-inset-top, 0px), env(safe-area-inset-bottom, 0px));
+  height:fit-content;
+}
+dialog:is(.app-modal,.cw-dialog)[open] {
+  position:fixed;
+  inset:0;
+  margin:auto;
+  max-width:calc(100% - var(--dialog-inline-gutter) - var(--dialog-inline-gutter));
+  max-height:calc(100vh - var(--dialog-block-gutter) - var(--dialog-block-gutter));
+  max-height:min(var(--dialog-height-limit, 100dvh), calc(100dvh - var(--dialog-block-gutter) - var(--dialog-block-gutter)));
+  overscroll-behavior:contain;
+}
+dialog:is(.app-modal,.cw-dialog)::backdrop { background:rgb(0 0 0 / 40%); }
+:root[data-theme="dark"] dialog:is(.app-modal,.cw-dialog)::backdrop { background:rgb(0 0 0 / 55%); }
+body:has(dialog:is(.app-modal,.cw-dialog)[open]) { overflow:hidden; }
+@media (max-width:700px), (max-height:540px) {
+  dialog:where(.app-modal,.cw-dialog) { --dialog-gutter:16px; }
+}
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none!important; animation:none!important; } }

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { WorkspaceLink as Link } from "@/components/shared/WorkspaceLink";
 import { useRouter } from "next/navigation";
 import { AuthCard, AuthError, AuthField, AuthPageShell, authInputClassName } from "@/components/auth/AuthCard";
+import { useModalNavigation } from "@/components/auth/modal-navigation";
 import { authApi } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/api-error";
 import { useAuthStore } from "@/stores/authStore";
@@ -12,6 +13,7 @@ import { getSafeNextPath } from "@/lib/auth-router";
 
 export default function SignupPage() {
   const router = useRouter();
+  const canNavigate = useModalNavigation();
   const [config, setConfig] = useState<AuthConfig | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -26,7 +28,7 @@ export default function SignupPage() {
   const length = config?.password_min_length ?? 10;
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (busy || !config?.public_registration_enabled) return;
+    if (busy || !canNavigate() || !config?.public_registration_enabled) return;
     if (values.password !== values.confirm) { setError("비밀번호가 일치하지 않습니다."); return; }
     if (groups < 3 || values.password.length < length) { setError("비밀번호 보안 조건을 확인해주세요."); return; }
     setBusy(true); setError("");
@@ -36,8 +38,10 @@ export default function SignupPage() {
         password: values.password, display_name: values.displayName.trim() || null,
         accept_terms: values.consent, locale: "ko", time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       });
+      if (!canNavigate()) return;
       if (data.email_verification_required) { router.replace(workspaceHref(`/user/verify-email?email=${encodeURIComponent(values.email)}`, window.location.search), { scroll: false }); return; }
       await useAuthStore.getState().login({ loginId: values.username, password: values.password });
+      if (!canNavigate()) return;
       router.replace(workspaceHref(getSafeNextPath(new URLSearchParams(window.location.search).get("next")), window.location.search), { scroll: false });
     } catch (caught) { setError(getApiErrorMessage(caught, "회원가입을 완료하지 못했습니다.")); }
     finally { setBusy(false); }

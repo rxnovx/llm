@@ -1,5 +1,6 @@
 "use client";
 import { useEffect,useRef,useState } from 'react';
+import { useDialogDismiss } from '@/components/shared/useDialogDismiss';
 import { assistantJson,knowledgeJson,type AssistantSelection,type KnowledgeBase,type KnowledgeDocument,type McpServer } from '@/lib/knowledge';
 import { UploadQueue } from './UploadQueue';
 import { McpManager } from './McpManager';
@@ -12,6 +13,7 @@ export function AssistantDialog({conversationId,value,onSelect,onClose,admin}:{c
   const [tab,setTab]=useState('knowledge'),[selection,setSelection]=useState(value);
   const [bases,setBases]=useState<KnowledgeBase[]>([]),[base,setBase]=useState(''),[documents,setDocuments]=useState<KnowledgeDocument[]>([]);
   const [servers,setServers]=useState<McpServer[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(false),[uploading,setUploading]=useState(false),[reload,setReload]=useState(0);
+  const dismiss = useDialogDismiss(onClose, !uploading);
   const [name,setName]=useState(''),[mode,setMode]=useState(''),[formats,setFormats]=useState('.pdf,.docx,.xlsx,.csv,.tsv,.txt,.md,.html,.json');
   const [preferences,setPreferences]=useState<Preferences>({instructions:'',memory_enabled:false,revision:0});
   const [memories,setMemories]=useState<{id:string;content:string}[]>([]),[memory,setMemory]=useState('');
@@ -37,7 +39,7 @@ export function AssistantDialog({conversationId,value,onSelect,onClose,admin}:{c
   },[base,owned,reload]);
   async function action(work:()=>Promise<void>){setBusy(true);setError('');try{await work();}catch(e){setError(failure(e));}finally{setBusy(false);}}
   const pending=documents.some(d=>(selection.document_ids.includes(d.id)||!!base&&selection.base_ids.includes(base))&&(d.status!=='ready'||d.needs_reindex));
-  return <dialog ref={ref} className="cw-dialog cw-knowledge-dialog" aria-labelledby="assistant-dialog-title" onCancel={e=>{e.preventDefault();if(!uploading)onClose();}}>
+  return <dialog ref={ref} className="cw-dialog cw-knowledge-dialog" aria-labelledby="assistant-dialog-title" {...dismiss}>
     <header className="cw-dialog-header"><div><span className="cw-overline">대화 도구</span><h2 id="assistant-dialog-title">자료·앱·개인 설정</h2></div><button className="cw-small-button" disabled={uploading} onClick={onClose}>닫기</button></header>
     <section className="cw-knowledge-section" aria-label="자동 처리 설정">
       <label className="cw-knowledge-app"><input type="checkbox" checked={selection.automatic} onChange={e=>setSelection(v=>({...v,automatic:e.target.checked}))}/><span>질문에 따라 자동으로 자료·연결된 앱 사용<small>연결된 내 계정과 접근 가능한 자료를 사용합니다. 앱 자동 선택과 GitLab 자동 분석은 읽기 전용입니다.</small></span></label>

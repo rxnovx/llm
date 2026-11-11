@@ -1,11 +1,13 @@
 "use client";
 import { useEffect,useRef,useState } from 'react';
+import { useDialogDismiss } from '@/components/shared/useDialogDismiss';
 import type { MessageSource } from '@/types/chat';
 import type { KnowledgeSource } from '@/lib/knowledge';
 import { workflowJson,type McpSource } from '@/lib/workflows';
 import { knowledgeJson } from '@/lib/knowledge';
 function SourceDialog({source,onClose}:{source:KnowledgeSource;onClose:()=>void}) {
   const ref=useRef<HTMLDialogElement>(null);const [text,setText]=useState('불러오는 중…');
+  const dismiss = useDialogDismiss(onClose);
   useEffect(()=>{const element=ref.current!;element.showModal();const abort=new AbortController();
     void knowledgeJson<{document:{revision:number;sha256:string};items:{id:string;content:string;location:string}[]}>(`/documents/${source.document_id}/chunks?offset=0`,{signal:abort.signal})
       .then(async value=>{
@@ -17,12 +19,13 @@ function SourceDialog({source,onClose}:{source:KnowledgeSource;onClose:()=>void}
       }).catch(e=>{if(!abort.signal.aborted)setText(e instanceof Error?e.message:'문서를 열 수 없습니다.');});
     return()=>{abort.abort();element.close();};
   },[source]);
-  return <dialog ref={ref} className="cw-dialog cw-knowledge-dialog" onCancel={e=>{e.preventDefault();onClose();}} aria-label="답변 출처"><header className="cw-dialog-header"><div><h2>{source.filename}</h2><p>{source.location} · 버전 {source.revision}</p></div><button className="cw-small-button" onClick={onClose}>닫기</button></header><pre className="cw-knowledge-preview" tabIndex={0}>{text}</pre></dialog>;
+  return <dialog ref={ref} className="cw-dialog cw-knowledge-dialog" aria-label="답변 출처" {...dismiss}><header className="cw-dialog-header"><div><h2>{source.filename}</h2><p>{source.location} · 버전 {source.revision}</p></div><button className="cw-small-button" onClick={onClose}>닫기</button></header><pre className="cw-knowledge-preview" tabIndex={0}>{text}</pre></dialog>;
 }
 function McpEvidenceDialog({source,onClose}:{source:McpSource;onClose:()=>void}){
   const ref=useRef<HTMLDialogElement>(null),[text,setText]=useState('불러오는 중…');
+  const dismiss = useDialogDismiss(onClose);
   useEffect(()=>{ref.current?.showModal();const abort=new AbortController();void workflowJson<{content:string}>(`/evidence/${source.evidence_id}`,{signal:abort.signal}).then(v=>setText(v.content)).catch(e=>{if(!abort.signal.aborted)setText(String(e));});return()=>abort.abort();},[source]);
-  return <dialog ref={ref} className="cw-dialog cw-knowledge-dialog" aria-label="앱 조회 근거" onCancel={e=>{e.preventDefault();onClose();}}><header className="cw-dialog-header"><h2>{source.server} · {source.tool}</h2><button className="cw-small-button" onClick={onClose}>닫기</button></header>{source.truncated&&<p>저장 한도로 일부 결과를 생략했습니다.</p>}<pre className="cw-knowledge-preview" tabIndex={0}>{text}</pre></dialog>;
+  return <dialog ref={ref} className="cw-dialog cw-knowledge-dialog" aria-label="앱 조회 근거" {...dismiss}><header className="cw-dialog-header"><h2>{source.server} · {source.tool}</h2><button className="cw-small-button" onClick={onClose}>닫기</button></header>{source.truncated&&<p>저장 한도로 일부 결과를 생략했습니다.</p>}<pre className="cw-knowledge-preview" tabIndex={0}>{text}</pre></dialog>;
 }
 export function MessageSources({ sources }: { sources: MessageSource[] }) {
   const [opened,setOpened]=useState<KnowledgeSource|McpSource|null>(null);

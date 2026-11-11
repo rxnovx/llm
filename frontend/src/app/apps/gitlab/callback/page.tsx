@@ -1,11 +1,13 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { WorkspaceLink } from "@/components/shared/WorkspaceLink";
+import { useModalNavigation } from "@/components/auth/modal-navigation";
 import { appsJson, notifyAppsChanged, oauthReturnPath } from "@/lib/app-connections";
 import { getSafeNextPath } from "@/lib/auth-router";
 import { useAuthStore } from "@/stores/authStore";
 
 export default function GitlabCallbackPage() {
+  const canNavigate = useModalNavigation();
   const initialized = useAuthStore((s) => s.initialized), user = useAuthStore((s) => s.user);
   const values = useRef<{ state: string; code: string; error: string } | null>(null), started = useRef(false);
   const [result, setResult] = useState<{ username: string; path: string } | null>(null), [error, setError] = useState("");
@@ -21,11 +23,13 @@ export default function GitlabCallbackPage() {
     void appsJson<{ connection: { username: string }; return_path: string; popup: boolean }>("/gitlab/oauth/complete", {
       method: "POST", body: JSON.stringify(values.current),
     }).then((data) => {
-      setResult({ username: data.connection.username, path: data.return_path }); notifyAppsChanged();
+      notifyAppsChanged();
+      if (!canNavigate()) return;
+      setResult({ username: data.connection.username, path: data.return_path });
       if (data.popup) window.close();
       else window.location.replace(getSafeNextPath(data.return_path));
     }).catch((e: unknown) => setError(e instanceof Error ? e.message : "GitLab 인증을 완료하지 못했습니다."));
-  }, [initialized, user]);
+  }, [canNavigate, initialized, user]);
   const failure = error || (initialized && !user ? "인증을 시작한 앱 계정의 로그인이 필요합니다. 다시 로그인한 뒤 설정에서 GitLab 연결을 시작하세요." : "");
   return <section className="settings-access"><h2>GitLab 연결</h2>{result ? <><p role="status">@{result.username} 계정을 연결했습니다. 이 창을 닫고 채팅으로 돌아가세요.</p>
     <WorkspaceLink className="account-button" href={result.path}>앱 연결로 돌아가기</WorkspaceLink></> : failure ? <><p role="alert">{failure}</p>

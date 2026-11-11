@@ -9,6 +9,7 @@ import type { AuthUser } from "@/types/auth";
 import type { ChatMessage, Connection, ContextReport, Conversation, ConversationDetail, QueueState } from "@/types/chat";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
 import { UserAvatar } from "@/components/shared/UserAvatar";
+import { useDialogDismiss } from "@/components/shared/useDialogDismiss";
 import { ConnectionsDialog } from "./ConnectionsDialog";
 import { ContextDialog } from "./ContextDialog";
 import { CopyButton, MessageContent } from "./MessageContent";
@@ -111,6 +112,10 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const [action, setAction] = useState<{ type: "rename" | "delete"; item: Conversation } | null>(null);
   const [title, setTitle] = useState("");
   const [actionBusy, setActionBusy] = useState(false);
+  const closeRetry = () => setRetryConfirmation(null);
+  const closeAction = () => setAction(null);
+  const dismissRetry = useDialogDismiss(closeRetry);
+  const dismissAction = useDialogDismiss(closeAction, !actionBusy);
   const [scrollDown, setScrollDown] = useState(false);
   const editor = useRef<HTMLTextAreaElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -510,6 +515,9 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   };
   const visible = conversations;
   const draftMrLink = gitlabMergeRequestLink(draft);
+  const restoreComposerFocus = () => requestAnimationFrame(() => {
+    if (!document.querySelector("dialog:modal")) editor.current?.focus({ preventScroll: true });
+  });
   const composer = readOnly ? <p className="cw-composer-caption" role="status">프로젝트 대화 · 열람 전용</p> : <form className={`cw-composer ${streaming ? "is-streaming" : ""}`} onDragOver={e=>{if(e.dataTransfer.types.includes('Files'))e.preventDefault();}} onDrop={e=>{e.preventDefault();void attachFiles(Array.from(e.dataTransfer.files));}} onSubmit={(event) => { event.preventDefault(); void send(); }}>
     {uploadOpen&&active&&<UploadQueue key={active.id} ref={uploads} conversationId={active.id} disabled={busy} onBusy={setUploading} onReady={doc=>setAssistantSelection(old=>{
       if(old.document_ids.includes(doc.id))return old;
@@ -629,23 +637,23 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       {error && <div className="cw-error-toast" role="alert"><span>{error}</span><button className="cw-icon-button" aria-label="오류 알림 닫기" onClick={() => setError("")}><Icon name="close" size={16} /></button></div>}
     </main>
     {projectsOpen&&<ProjectsDialog projects={projects} selected={active?.project_id||projectId} active={active} onProjects={setProjects} onChoose={chooseProject} onMoved={item=>{setActive(item);updateConversation(item);setProjectId(item.project_id||'');}} onClose={()=>setProjectsOpen(false)}/>}
-    <dialog ref={retryDialog} className="cw-dialog cw-action-dialog" aria-label="외부 작업 재시도 확인" onCancel={()=>setRetryConfirmation(null)} onClose={()=>setRetryConfirmation(null)}><h2>쓰기 작업을 다시 실행할까요?</h2><p>이 요청은 명령 실행 또는 외부 서비스 변경을 허용했습니다. 이미 처리된 작업도 다시 실행될 수 있으니 작업 기록을 확인하세요.</p><div className="cw-action-buttons"><button className="cw-small-button" onClick={()=>setRetryConfirmation(null)}>취소</button><button className="cw-primary-button" onClick={()=>{const content=retryConfirmation;setRetryConfirmation(null);if(content)void send(content,true,true);}}>확인하고 재시도</button></div></dialog>
+    <dialog ref={retryDialog} className="cw-dialog cw-action-dialog" aria-label="외부 작업 재시도 확인" {...dismissRetry} onClose={closeRetry}><h2>쓰기 작업을 다시 실행할까요?</h2><p>이 요청은 명령 실행 또는 외부 서비스 변경을 허용했습니다. 이미 처리된 작업도 다시 실행될 수 있으니 작업 기록을 확인하세요.</p><div className="cw-action-buttons"><button className="cw-small-button" onClick={closeRetry}>취소</button><button className="cw-primary-button" onClick={()=>{const content=retryConfirmation;closeRetry();if(content)void send(content,true,true);}}>확인하고 재시도</button></div></dialog>
     {scopeOpen && <GitlabScopeDialog terminal={terminal} initialReference={scopeReference}
       canWriteModel={!!connection && !connection.is_test && !!(connection.models.find(item => item.name === model)?.supports_tools ?? connection.supports_tools)}
-      onClose={() => { setScopeOpen(false); editor.current?.focus(); }}
-      onSelect={(selection, publish) => { setAppSelections([selection]); setPublishGitlab(publish); setScopeOpen(false); editor.current?.focus(); }} />}
+      onClose={() => { setScopeOpen(false); restoreComposerFocus(); }}
+      onSelect={(selection, publish) => { setAppSelections([selection]); setPublishGitlab(publish); setScopeOpen(false); restoreComposerFocus(); }} />}
     {workspaceOpen&&active&&<WorkspaceDialog conversationId={active.id} onClose={()=>setWorkspaceOpen(false)}/>}
-    {assistantOpen&&active&&<AssistantDialog key={active.id} conversationId={active.id} admin={!!user?.is_global_admin} value={assistantSelection} onClose={()=>{setAssistantOpen(false);editor.current?.focus();}} onSelect={value=>{setAssistantSelection(value);setAssistantOpen(false);editor.current?.focus();}}/>}
+    {assistantOpen&&active&&<AssistantDialog key={active.id} conversationId={active.id} admin={!!user?.is_global_admin} value={assistantSelection} onClose={()=>{setAssistantOpen(false);restoreComposerFocus();}} onSelect={value=>{setAssistantSelection(value);setAssistantOpen(false);restoreComposerFocus();}}/>}
     {contextOpen && active && <ContextDialog key={active.id} conversationId={active.id} connectionId={selected} model={model} content={draft}
       onClose={() => setContextOpen(false)} onSaved={setContextReport} />}
     <ConnectionsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} connections={connections} selected={selected} model={model} disabled={busy}
       onSelect={(id, nextModel) => { setSelected(id); setModel(nextModel); }} />
-    <dialog ref={actionDialog} className="cw-dialog cw-action-dialog" aria-labelledby="conversation-action-title" onCancel={() => setAction(null)} onClose={() => setAction(null)}>
+    <dialog ref={actionDialog} className="cw-dialog cw-action-dialog" aria-labelledby="conversation-action-title" {...dismissAction} onClose={closeAction}>
       <form onSubmit={(event) => void submitAction(event)}><h2 id="conversation-action-title">{action?.type === "delete" ? "이 대화를 삭제할까요?" : "대화 이름 변경"}</h2>
         {action?.type === "delete" ? <p>대화와 메시지가 함께 삭제됩니다. 이 작업은 되돌릴 수 없습니다.</p> : <input ref={titleEditor} autoFocus aria-label="대화 이름" value={title} onChange={(event) => setTitle(event.target.value)} required maxLength={120}
           onKeyDown={(event) => { if (event.key === "Enter" && (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)) event.preventDefault(); }} />}
         {error && <p className="cw-inline-error" role="alert">{error}</p>}
-        <div className="cw-action-buttons"><button type="button" className="cw-small-button" disabled={actionBusy} onClick={() => setAction(null)}>취소</button>
+        <div className="cw-action-buttons"><button type="button" className="cw-small-button" disabled={actionBusy} onClick={closeAction}>취소</button>
           <button className={`cw-primary-button ${action?.type === "delete" ? "cw-delete-button" : ""}`} disabled={actionBusy || action?.type === "rename" && !title.trim()}>{actionBusy ? "처리 중…" : action?.type === "delete" ? "삭제" : "저장"}</button></div></form>
     </dialog>
   </div>;

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useDialogDismiss } from '@/components/shared/useDialogDismiss';
 import { workflowJson, type Project, type ProjectMember } from '@/lib/workflows';
 import { knowledgeJson, type KnowledgeDocument } from '@/lib/knowledge';
 import type { Conversation } from '@/types/chat';
@@ -31,6 +32,7 @@ export function ProjectsDialog({ projects, selected, active, onProjects, onChoos
   const [newRole, setNewRole] = useState<'editor' | 'viewer'>('viewer');
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const dismiss = useDialogDismiss(onClose, !busy && !uploading);
   const [error, setError] = useState('');
   const [reload, setReload] = useState(0);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -114,8 +116,7 @@ export function ProjectsDialog({ projects, selected, active, onProjects, onChoos
     setPreview({ document, offset, items: result.items });
   });
 
-  return <dialog ref={ref} className="cw-dialog cw-project-dialog" aria-labelledby="projects-title"
-    onCancel={event => { event.preventDefault(); if (!busy && !uploading) onClose(); }}>
+  return <dialog ref={ref} className="cw-dialog cw-project-dialog" aria-labelledby="projects-title" {...dismiss}>
     <header className="cw-dialog-header">
       <h2 id="projects-title">프로젝트</h2>
       <button className="cw-small-button" disabled={busy || uploading} onClick={onClose}>닫기</button>

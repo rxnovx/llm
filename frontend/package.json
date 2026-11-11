@@ -18,7 +18,7 @@
     "test:apps": "node --experimental-strip-types --test tests/app-mentions.test.mjs tests/gitlab-progress.test.mjs",
     "test:markdown": "node --test tests/markdown.test.mjs",
     "test:api": "node --test tests/authenticated-fetch.test.mjs",
-    "test:navigation": "node --experimental-strip-types --test tests/workspace-navigation.test.mjs",
+    "test:navigation": "node --experimental-strip-types --test tests/workspace-navigation.test.mjs tests/modal-dismiss.test.mjs",
     "test:browser": "playwright test",
     "predev": "node scripts/prepare-next-wasm.mjs",
     "prebuild": "node scripts/prepare-next-wasm.mjs",
