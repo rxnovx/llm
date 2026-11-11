@@ -7,9 +7,9 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.modules.auth import service
 from app.modules.auth.dependencies import Authenticated
-from app.modules.auth.schemas import (AccountDeactivateRequest, EmailChangeRequest,
+from app.modules.auth.schemas import (AccountDeactivateRequest,
     GoogleConnectionResponse, GoogleCredentialRequest, MessageResponse,
-    PasswordChangeRequest, PasswordSetRequest, SessionResponse, TokenConfirmRequest,
+    PasswordChangeRequest, PasswordSetRequest, SessionResponse,
     UserResponse, UserUpdateRequest)
 from app.modules.users import avatars
 
@@ -56,16 +56,6 @@ async def upload(request: Request, db: DbSession, context: Authenticated, file: 
         await file.close()
     avatars.delete_owned_avatar(previous, user.id)
     return service.to_user_response(user)
-
-
-@router.post("/me/email-change/request", response_model=MessageResponse)
-def change_email(data: EmailChangeRequest, request: Request, db: DbSession, context: Authenticated):
-    return service.request_email_change(db, user=context.user, data=data, request=request)
-
-
-@router.post("/me/email-change/confirm", response_model=MessageResponse)
-def confirm_email(data: TokenConfirmRequest, request: Request, db: DbSession):
-    return service.confirm_email_change(db, raw_token=data.token, request=request)
 
 
 @router.post("/me/oauth/google", response_model=GoogleConnectionResponse, status_code=201)

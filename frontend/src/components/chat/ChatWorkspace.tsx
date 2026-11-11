@@ -6,26 +6,31 @@ import { useAuthStore } from "@/stores/authStore";
 import { chatFetch, chatJson } from "@/lib/chat-api";
 import { readChatStream } from "@/lib/chat-stream";
 import type { AuthUser } from "@/types/auth";
-import type { ChatMessage, Connection, ContextReport, Conversation, ConversationDetail, QueueState } from "@/types/chat";
+import type { ChatConfig, ChatMessage, Connection, ContextReport, Conversation, ConversationDetail, QueueState } from "@/types/chat";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
 import { UserAvatar } from "@/components/shared/UserAvatar";
+import { useDialogDismiss } from "@/components/shared/useDialogDismiss";
 import { ConnectionsDialog } from "./ConnectionsDialog";
 import { ContextDialog } from "./ContextDialog";
 import { CopyButton, MessageContent } from "./MessageContent";
 import { Icon, Wordmark, type IconName } from "./Icons";
 import "./workspace.css";
 import { replaceConversationLocation, workspaceHref } from "@/lib/workspace-navigation";
-import { backupOAuthDraft, takeOAuthDraft, OAUTH_LEAVING, type GitlabSelection } from "@/lib/app-connections";
-import { appMentionAt, removeAppMention } from "@/lib/app-mentions";
+import { backupOAuthDraft, takeOAuthDraft, OAUTH_LEAVING, gitlabMergeRequestLink, type GitlabSelection } from "@/lib/app-connections";
+import { appMentionAt, GITLAB_MENTION, hasGitlabMention, insertGitlabMention, removeAppMention } from "@/lib/app-mentions";
 import { GitlabScopeDialog } from "./GitlabScopeDialog";
+import { GitlabWorkProgress, gitlabWebUrl } from "./GitlabWorkProgress";
 import { MessageSources } from "./MessageSources";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { AssistantDialog } from './AssistantDialog';
 import { MessageWorkflow } from './MessageWorkflow';
 import { ProjectsDialog } from './ProjectsDialog';
-import { UploadQueue,type UploadHandle } from './UploadQueue';
-import { workflowJson,type Project,type ForkResult } from '@/lib/workflows';
-import { emptySelection,type AssistantSelection } from '@/lib/knowledge';
+import { DraftAttachments, type DraftAttachment } from './DraftAttachments';
+import { ExistingImagePicker } from './ExistingImagePicker';
+import { cancelAttachmentUpload, defaultAttachmentConfig, uploadAttachment, type AttachmentConfig } from '@/lib/attachments';
+import { newRequestId } from '@/lib/request-id';
+import { workflowJson,type Project,type ForkResult,type ResultFile } from '@/lib/workflows';
+import { emptySelection, knowledgeJson, type AssistantSelection, type KnowledgeDocument } from '@/lib/knowledge';
 
 const starters: { icon: IconName; title: string; prompt: string }[] = [
   { icon: "idea", title: "아이디어 정리", prompt: "떠오른 아이디어를 실행 가능한 계획으로 정리하고 싶어요. 먼저 어떤 내용을 알려드리면 좋을까요?" },
@@ -34,6 +39,77 @@ const starters: { icon: IconName; title: string; prompt: string }[] = [
 ];
 const errorText = (error: unknown) => error instanceof Error ? error.message : "요청을 처리하지 못했습니다.";
 const shortDate = (timestamp: number) => new Date(timestamp * 1000).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" });
+const automaticRouteLabels: Record<string, string> = {
+  knowledge: "자동 문서 검색",
+  gitlab: "자동 소스 분석",
+  both: "소스·문서 함께 확인",
+  image: "이미지 생성",
+  image_edit: "이미지 편집",
+  vision: "이미지 분석",
+};
+const imageActivityLabels: Record<string, string> = { generate_image: "이미지 생성", edit_image: "이미지 편집", image_edit: "이미지 편집", analyze_image: "이미지 분석", vision: "이미지 분석" };
+type ImageReference = { id: string; name: string };
+type ImageDraft = { artifact: ImageReference | null; attachments: ImageReference[] };
+const emptyImageDraft = (): ImageDraft => ({ artifact: null, attachments: [] });
+const maxImageInputs = 4;
+const maxImageInputBytes = 10 * 1024 * 1024;
+const maxDocuments = 10;
+const clipboardImageSuffix: Record<string, string> = {
+  'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/tiff': '.tiff',
+};
+function attachmentSuffix(file: File) {
+  const dot = file.name.lastIndexOf('.');
+  return dot > 0 ? file.name.slice(dot).toLowerCase() : '';
+}
+function transferFiles(data: DataTransfer) {
+  const files = Array.from(data.files);
+  if (files.length) return files;
+  return Array.from(data.items).flatMap(item => {
+    const file = item.kind === 'file' ? item.getAsFile() : null;
+    return file ? [file] : [];
+  });
+}
+function assistantDraft(selection?: Partial<AssistantSelection>): AssistantSelection {
+  const text = { ...emptySelection(), ...selection };
+  if (text.image_mode && text.image_mode !== 'auto') text.document_ids = [];
+  delete text.image_mode;
+  delete text.image_artifact_id;
+  delete text.image_document_ids;
+  return text;
+}
+const appOptions = [
+  { id: "gitlab", title: "GitLab", description: "입력창에 @gitlab 추가", icon: "code", names: ["gitlab"] },
+  { id: "knowledge", title: "지식·연결된 앱", description: "문서 검색과 MCP 도구 선택", icon: "plus", names: ["knowledge", "apps", "지식"] },
+  { id: "gitlab-scope", title: "GitLab 범위 직접 선택", description: "프로젝트·파일·MR 지정", icon: "settings", names: ["gitlab"] },
+] as const;
+type AppPicker = NonNullable<ReturnType<typeof appMentionAt>> & { hasTypedMention?: boolean };
+type AppOptionId = typeof appOptions[number]["id"];
+
+function GitlabPublication({ tools }: { tools: ChatMessage["tools"] }) {
+  const publications = tools?.filter(tool => tool.name === "gitlab_publication") ?? [];
+  const activity = publications.findLast(tool => tool.status !== "running") ?? publications.at(-1);
+  if (!activity) return null;
+  let result: { url: string; status?: string; iid?: number; error?: string; commit_url?: string; branch_url?: string; parent_sha?: string; base_sha?: string };
+  try {
+    result = JSON.parse(activity.detail);
+  } catch {
+    return null;
+  }
+  const url = gitlabWebUrl(result?.url);
+  if (!url) return null;
+  const commitUrl = gitlabWebUrl(result.commit_url);
+  const branchUrl = result.status === "pushed" ? gitlabWebUrl(result.branch_url) : "";
+  const label = (result.status === "merge_request" || result.status === "updated") && Number.isInteger(result.iid)
+    ? `GitLab MR !${result.iid} 열기`
+    : "GitLab 커밋 열기";
+  return <div className="cw-message-app">
+    <a href={url} target="_blank" rel="noreferrer" className="cw-text-button">{label} ↗</a>
+    {branchUrl && <a href={branchUrl} target="_blank" rel="noreferrer" className="cw-text-button">푸시한 브랜치 보기 ↗</a>}
+    {commitUrl && <a href={commitUrl} target="_blank" rel="noreferrer" className="cw-text-button">추가 커밋 보기 ↗</a>}
+    {result.parent_sha && result.parent_sha !== result.base_sha && <span> · 게시 중 추가된 커밋 위에 반영되었습니다.</span>}
+    {typeof result.error === "string" && <span> · {result.error}</span>}
+  </div>;
+}
 
 export function ChatWorkspace() {
   const user = useAuthStore((state) => state.user);
@@ -59,6 +135,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const [initializing, setInitializing] = useState(Boolean(user));
   const [loading, setLoading] = useState(false);
   const [streaming, setStreaming] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [searching, setSearching] = useState(false);
@@ -69,22 +146,37 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const [contextReport, setContextReport] = useState<ContextReport | null>(null);
   const [queue, setQueue] = useState<QueueState | null>(null);
   const [appSelections, setAppSelections] = useState<GitlabSelection[]>([]);
-  const [mention, setMention] = useState<ReturnType<typeof appMentionAt>>(null);
+  const [publishGitlab, setPublishGitlab] = useState(false);
+  const [mention, setMention] = useState<AppPicker | null>(null);
   const [mentionChoice,setMentionChoice]=useState(0);
   const [scopeOpen, setScopeOpen] = useState(false), [toolStatus, setToolStatus] = useState("");
+  const [scopeReference, setScopeReference] = useState("");
   const [terminal,setTerminal]=useState({enabled:false,execution_enabled:false}),[workspaceOpen,setWorkspaceOpen]=useState(false);
+  const [imageEditEnabled, setImageEditEnabled] = useState(false);
+  const [imageDraft, setImageDraft] = useState<ImageDraft>(emptyImageDraft);
   const [assistantOpen,setAssistantOpen]=useState(false),[assistantSelection,setAssistantSelection]=useState<AssistantSelection>(emptySelection);
   const [projects,setProjects]=useState<Project[]>([]),[projectId,setProjectId]=useState(''),[projectsOpen,setProjectsOpen]=useState(false);
-  const [uploading,setUploading]=useState(false),[uploadOpen,setUploadOpen]=useState(false),[searchLoading,setSearchLoading]=useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [existingImagesOpen, setExistingImagesOpen] = useState(false);
+  const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
+  const [attachmentConfig, setAttachmentConfig] = useState<AttachmentConfig>(defaultAttachmentConfig);
+  const [searchLoading,setSearchLoading]=useState(false);
   const [retryConfirmation,setRetryConfirmation]=useState<string|null>(null);
-  const retryDialog=useRef<HTMLDialogElement>(null),droppedFiles=useRef<File[]>([]),uploads=useRef<UploadHandle>(null),listVersion=useRef(0);
+  const retryDialog=useRef<HTMLDialogElement>(null),listVersion=useRef(0);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const attachmentSequence = useRef(0);
   const [menu, setMenu] = useState("");
   const [accountOpen, setAccountOpen] = useState(false);
   const [action, setAction] = useState<{ type: "rename" | "delete"; item: Conversation } | null>(null);
   const [title, setTitle] = useState("");
   const [actionBusy, setActionBusy] = useState(false);
+  const closeRetry = () => setRetryConfirmation(null);
+  const closeAction = () => setAction(null);
+  const dismissRetry = useDialogDismiss(closeRetry);
+  const dismissAction = useDialogDismiss(closeAction, !actionBusy);
   const [scrollDown, setScrollDown] = useState(false);
   const editor = useRef<HTMLTextAreaElement>(null);
+  const composing = useRef(false);
   const searchInput = useRef<HTMLInputElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
   const actionDialog = useRef<HTMLDialogElement>(null);
@@ -94,24 +186,127 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   const generation = useRef<{ id: string; conversation: string } | null>(null);
   const pinned = useRef(true);
   const sending = useRef(false);
+  const awaitingStart = useRef(false);
   const connection = connections.find((item) => item.id === selected);
   const busy = streaming || !!active?.busy;
   const subject = user?.subject;
-  const canSend = ready && (!user || !!connection && (connection.is_test || !!model.trim())) && !busy && !loading && !initializing && !uploading;
+  const anyRunning = conversations.some(item => item.busy);
+  useEffect(() => {
+    if (!subject) return;
+    const abort = new AbortController();
+    void knowledgeJson<AttachmentConfig>('/config', { signal: abort.signal })
+      .then(config => { if (!abort.signal.aborted) setAttachmentConfig(config); }).catch(() => {});
+    return () => abort.abort();
+  }, [subject]);
+  useEffect(() => {
+    if (!subject || !anyRunning) return;
+    const abort = new AbortController();
+    let pending = false;
+    const timer = setInterval(() => {
+      if (pending) return;
+      pending = true;
+      void chatJson<{ ids: string[] }>('/active', {
+        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(5000)]),
+      }).then(({ ids }) => {
+        if (abort.signal.aborted) return;
+        const running = new Set(ids);
+        setConversations(old => old.map(item => ({ ...item, busy: running.has(item.id) })));
+      }).catch(() => {}).finally(() => { pending = false; });
+    }, 2500);
+    return () => { abort.abort(); clearInterval(timer); };
+  }, [subject, anyRunning]);
+  const viewer = projects.find(project => project.id === (active ? active.project_id : projectId))?.role === 'viewer';
+  const readOnly = !!active?.read_only || viewer;
+  const canSend = ready && !readOnly && (!user || !!connection && (connection.is_test || !!model.trim())) && !busy && !loading && !starting && !initializing && !uploading;
+  const supportsVision = connection?.models.length
+    ? connection.models.find(profile => profile.name === model)?.supports_vision : connection?.supports_vision;
+  const canUseImageInput = Boolean(connection && !connection.is_test && (supportsVision || imageEditEnabled));
+  const draftMrLink = gitlabMergeRequestLink(draft);
+  const explicitApps = Boolean(appSelections.length || assistantSelection.mcp_ids.length || assistantSelection.parallel_agents ||
+    draftMrLink || hasGitlabMention(draft));
+  const rasterFormats = attachmentConfig.image_formats ?? defaultAttachmentConfig.image_formats;
+  const documentFormats = attachmentConfig.formats ?? defaultAttachmentConfig.formats;
+  const rawImageUpload = (file: File) => canUseImageInput && !explicitApps && rasterFormats.includes(attachmentSuffix(file));
+  const imageUploadLimit = attachmentConfig.image_max_upload_bytes ?? defaultAttachmentConfig.image_max_upload_bytes;
+  const rawFiles = draftAttachments.filter(item => rawImageUpload(item.file));
+  const documentFiles = draftAttachments.filter(item => !rawImageUpload(item.file));
+  const imageInputCount = imageDraft.attachments.length + rawFiles.length;
+  const hasImageInput = Boolean(imageDraft.artifact || imageInputCount);
+  const attachmentIssue = (() => {
+    if (imageDraft.artifact && !messages.some(message => message.artifacts?.some(file => file.id === imageDraft.artifact?.id)))
+      return '이 대화에서 참조할 이미지를 다시 선택하세요.';
+    if (hasImageInput && explicitApps)
+      return '원본 이미지와 선택한 앱 또는 병렬 분석은 별도 메시지로 보내 주세요.';
+    if (hasImageInput && !canUseImageInput)
+      return '이미지 입력을 지원하는 모델이나 이미지 편집 서버를 연결하세요.';
+    if (imageDraft.artifact && imageInputCount) return '생성 이미지와 첨부 이미지 중 하나를 남겨 주세요.';
+    if (imageInputCount > maxImageInputs) return '원본 이미지는 한 번에 네 장까지 첨부할 수 있습니다.';
+    if (rawFiles.some(item => item.file.size > imageUploadLimit) || rawFiles.reduce((sum, item) => sum + item.file.size, 0) > maxImageInputBytes)
+      return '이미지 크기를 첨부 한도 이내로 줄여 주세요.';
+    if (documentFiles.some(item => rasterFormats.includes(attachmentSuffix(item.file)) &&
+        (!attachmentConfig.enabled || !documentFormats.includes(attachmentSuffix(item.file)))))
+      return explicitApps && canUseImageInput ? '원본 이미지를 별도 메시지로 보내거나 OCR 설정을 확인하세요.' :
+        '이미지 입력을 지원하는 모델을 선택하거나 OCR 설정을 확인하세요.';
+    if (documentFiles.length && !attachmentConfig.enabled) return '파일을 첨부하려면 파일 검색을 활성화하세요.';
+    if (documentFiles.some(item => !documentFormats.includes(attachmentSuffix(item.file)) || item.file.size > attachmentConfig.max_upload_bytes))
+      return '첨부한 문서의 형식과 크기를 확인하세요.';
+    if (documentFiles.length + assistantSelection.document_ids.length > maxDocuments)
+      return '선택한 자료를 포함해 문서는 한 번에 10개까지 첨부할 수 있습니다.';
+    return '';
+  })();
+  const attachmentOnlyText = hasImageInput
+    ? documentFiles.length ? '첨부한 이미지와 문서의 내용을 함께 정리해 줘.' : '첨부한 이미지를 설명해 줘.'
+    : documentFiles.length ? '첨부한 자료의 내용을 알려줘.' : '';
   const openModels = () => { if (user) setSettingsOpen(true); else router.push(workspaceHref("/login", window.location.search), { scroll: false }); };
-  const selectGitlab = () => {
-    if (mention) setDraft(removeAppMention(draft, mention));
-    setMention(null);
-    if (!user) { router.push(workspaceHref("/login?next=/user/settings/apps", window.location.search), { scroll: false }); return; }
-    setScopeOpen(true);
-  };
+  const openGitlabScope = (reference: string) => { setScopeReference(reference); setScopeOpen(true); };
   const openAssistant=async()=>{
-    if(mention)setDraft(removeAppMention(draft,mention));setMention(null);
+    setMention(null);
     if(!user){router.push(workspaceHref('/login',window.location.search),{scroll:false});return;}
     try{
       if(!active){const next=await chatJson<Conversation>('/conversations',{method:'POST',body:JSON.stringify({connection_id:selected,model,project_id:projectId||null})});setActive(next);updateConversation(next);replaceConversationLocation(next.id);}
       setAssistantOpen(true);
     }catch(e){setError(errorText(e));}
+  };
+  const visibleAppOptions = mention ? appOptions.filter(option =>
+    (option.id !== "gitlab-scope" || user) && option.names.some(name => name.startsWith(mention.query.toLowerCase())),
+  ) : [];
+  const activeAppOption = visibleAppOptions[mentionChoice] ?? visibleAppOptions[0];
+  const updateTypedMention = (field: HTMLTextAreaElement) => {
+    if (composing.current) return;
+    const next = field.selectionStart === field.selectionEnd ? appMentionAt(field.value, field.selectionStart) : null;
+    setMention(next && `@${next.query.toLowerCase()}` !== GITLAB_MENTION ? { ...next, hasTypedMention: true } : null);
+    setMentionChoice(0);
+  };
+  const openAppPicker = () => {
+    const field = editor.current;
+    const start = field?.selectionStart ?? draft.length;
+    const end = field?.selectionEnd ?? start;
+    const typed = start === end ? appMentionAt(draft, start) : null;
+    setMention(typed ? { ...typed, query: "" } : { start, end, query: "" });
+    setMentionChoice(0);
+    field?.focus();
+  };
+  const chooseApp = (id: AppOptionId) => {
+    if (!mention) return;
+    setMention(null);
+    if (id === "gitlab") {
+      const { value, caret } = insertGitlabMention(draft, mention);
+      const field = editor.current;
+      if (field && value.length > field.maxLength) {
+        setError("메시지는 16,000자까지 입력할 수 있습니다.");
+        return;
+      }
+      setDraft(value);
+      requestAnimationFrame(() => {
+        if (field?.value !== value) return;
+        field.focus({ preventScroll: true });
+        field.setSelectionRange(caret, caret);
+      });
+      return;
+    }
+    if (mention.hasTypedMention) setDraft(removeAppMention(draft, mention));
+    if (id === "gitlab-scope") openGitlabScope(gitlabMergeRequestLink(draft));
+    else void openAssistant();
   };
 
   useEffect(() => {
@@ -133,11 +328,12 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     if (!subject) return;
     const abort = new AbortController();
     void Promise.all([
-      chatJson<{ connections: Connection[]; terminal?:{enabled:boolean;execution_enabled:boolean} }>("/config", { signal: abort.signal }),
+      chatJson<ChatConfig>("/config", { signal: abort.signal }),
       chatJson<{ items: Conversation[]; has_more: boolean }>("/conversations", { signal: abort.signal }),
     ]).then(async ([config, list]) => {
       setConnections(config.connections); setConversations(list.items); setHasMore(list.has_more);
       if(config.terminal)setTerminal(config.terminal);
+      setImageEditEnabled(Boolean(config.images?.edit));
       setSelected(config.connections[0]?.id ?? ""); setModel(config.connections[0]?.default_model ?? "");
       const id = new URLSearchParams(window.location.search).get("chat");
       // A callback tab has no chat query yet; keep the fallback draft for the return navigation.
@@ -147,11 +343,13 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         const detail = await chatJson<ConversationDetail>(`/conversations/${id}`, { signal: abort.signal });
         setActive(detail.conversation); setMessages(detail.messages);
         const previousApp=detail.messages.at(-1)?.apps?.[0];
-        setAssistantSelection({...emptySelection(),...detail.messages.at(-1)?.assistant});
+        setAssistantSelection(assistantDraft(detail.messages.at(-1)?.assistant));
         setAppSelections(!detail.messages.at(-1)?.routing?.automatic_project&&(previousApp?.mode==='workspace'||previousApp?.mode==='execute')?[previousApp]:[]);
         setQueue(detail.generation ?? null);
         generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
-        setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
+        if (!detail.conversation.read_only) {
+          setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
+        }
       }
     }).catch((caught) => { if (!abort.signal.aborted) setError(errorText(caught)); })
       .finally(() => { if (!abort.signal.aborted) setInitializing(false); });
@@ -163,8 +361,12 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     const abort = new AbortController();
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
-      void chatJson<{ connections: Connection[];terminal?:{enabled:boolean;execution_enabled:boolean} }>("/config", { signal: AbortSignal.any([abort.signal, AbortSignal.timeout(6000)]) })
-        .then((value) => { if (!abort.signal.aborted) {setConnections(value.connections);if(value.terminal)setTerminal(value.terminal);} }).catch(() => {});
+      void chatJson<ChatConfig>("/config", { signal: AbortSignal.any([abort.signal, AbortSignal.timeout(6000)]) })
+        .then((value) => { if (!abort.signal.aborted) {
+          setConnections(value.connections);
+          if(value.terminal)setTerminal(value.terminal);
+          setImageEditEnabled(Boolean(value.images?.edit));
+        } }).catch(() => {});
     };
     if (settingsOpen) refresh();
     window.addEventListener("focus", refresh);
@@ -221,7 +423,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   }, [active?.id, active?.busy, streaming]);
 
   useEffect(() => {
-    if (!active?.id || busy || !selected || !model) return;
+    if (!active?.id || readOnly || busy || !selected || !model) return;
     const abort = new AbortController();
     const timer = setTimeout(() => {
       void chatJson<ContextReport>(`/conversations/${active.id}/context/preview`, { method: "POST",
@@ -229,53 +431,131 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         .then((value) => { if (!abort.signal.aborted) setContextReport(value); }).catch(() => {});
     }, 600);
     return () => { clearTimeout(timer); abort.abort(); };
-  }, [active?.id, busy, selected, model, draft]);
+  }, [active?.id, readOnly, busy, selected, model, draft]);
 
   const updateConversation = (item: Conversation) => setConversations(old=>projectId&&item.project_id!==projectId?old:[{...old.find(v=>v.id===item.id),...item},...old.filter(v=>v.id!==item.id)]);
+  const resetAttachmentDraft = () => {
+    setDraftAttachments([]);
+    setExistingImagesOpen(false);
+    setImageDraft(emptyImageDraft());
+  };
   const acceptWorkflow=(result:ForkResult)=>{
     setActive(result.conversation);setMessages(result.messages);setDraft(result.draft||'');setContextReport(null);setQueue(null);generation.current=null;
-    const last=result.messages.at(-1);setAssistantSelection({...emptySelection(),...(result.assistant??last?.assistant)});
+    const last=result.messages.at(-1);setAssistantSelection(assistantDraft(result.assistant??last?.assistant));
+    resetAttachmentDraft();
+    if (result.draft && result.assistant) {
+      const { image_mode: mode, image_artifact_id: artifactId, image_document_ids: imageIds, document_ids: documentIds = [] } = result.assistant;
+      const attachments = imageIds?.length ? imageIds : mode === 'vision' || mode === 'edit' ? documentIds : [];
+      const file = artifactId && result.messages.flatMap(message => message.artifacts ?? []).find(file => file.id === artifactId);
+      setImageDraft({
+        artifact: artifactId ? { id: artifactId, name: file ? file.name : '선택한 이미지' } : null,
+        attachments: attachments.map((id, index) => ({ id, name: `첨부 이미지 ${index + 1}` })),
+      });
+    }
     setAppSelections(result.apps??(!last?.routing?.automatic_project?last?.apps??[]:[]));
+    setPublishGitlab(false);
     setSelected(result.conversation.connection_id);setModel(result.conversation.model);setProjectId(result.conversation.project_id||'');updateConversation(result.conversation);replaceConversationLocation(result.conversation.id);pinned.current=true;
     setError(result.excluded_attachments?`만료되거나 접근할 수 없는 첨부 ${result.excluded_attachments}개는 제외했습니다. 다시 첨부하세요.`:'');
-    setUploadOpen(false);requestAnimationFrame(()=>editor.current?.focus());
+    requestAnimationFrame(()=>editor.current?.focus());
   };
   const continueConversation=async()=>{if(!active||busy)return;setLoading(true);try{acceptWorkflow(await workflowJson<ForkResult>(`/conversations/${active.id}/continue`,{method:'POST'}));}catch(e){setError(errorText(e));}finally{setLoading(false);}};
-  useEffect(()=>{if(uploadOpen&&active&&uploads.current&&droppedFiles.current.length){uploads.current.add(droppedFiles.current);droppedFiles.current=[];}},[active,uploadOpen]);
-  const attachFiles=async(files:File[])=>{
-    if(!user){router.push(workspaceHref('/login',window.location.search),{scroll:false});return;}
-    if(busy||uploading)return;
-    try{
-      if(!active){const next=await chatJson<Conversation>('/conversations',{method:'POST',body:JSON.stringify({connection_id:selected,model,project_id:projectId||null})});setActive(next);updateConversation(next);replaceConversationLocation(next.id);}
-      if(uploads.current)uploads.current.add(files);else droppedFiles.current=files;
-      setUploadOpen(true);
-    }catch(e){setError(errorText(e));}
+  const chooseFiles = () => {
+    if (!user) { router.push(workspaceHref('/login', window.location.search), { scroll: false }); return; }
+    if (canSend && !awaitingStart.current) fileInput.current?.click();
+  };
+  const stageFiles = (files: File[]) => {
+    if (!files.length || readOnly) return;
+    if (!user) { router.push(workspaceHref('/login', window.location.search), { scroll: false }); return; }
+    if (!canSend || awaitingStart.current) return;
+    const allowed = new Set([...documentFormats, ...rasterFormats]);
+    const staged: DraftAttachment[] = [];
+    const rejected: string[] = [];
+    for (let file of files) {
+      const clipboardSuffix = clipboardImageSuffix[file.type];
+      if (!attachmentSuffix(file) && clipboardSuffix) {
+        file = new File([file], (file.name || '클립보드 이미지') + clipboardSuffix, {
+          type: file.type, lastModified: file.lastModified,
+        });
+      }
+      const suffix = attachmentSuffix(file);
+      const maxBytes = rawImageUpload(file) ? imageUploadLimit : attachmentConfig.max_upload_bytes;
+      if (!allowed.has(suffix) || file.size === 0 || file.size > maxBytes) {
+        rejected.push(file.name || '이름 없는 파일');
+        continue;
+      }
+      staged.push({ id: String(++attachmentSequence.current), file,
+        isImage: rasterFormats.includes(suffix) || suffix === '.tif' || suffix === '.tiff' });
+    }
+    if (draftAttachments.length + staged.length > maxDocuments + maxImageInputs) {
+      setError('한 번에 원본 이미지 네 장, 문서 10개까지 첨부할 수 있습니다.');
+      return;
+    }
+    setError(rejected.length ? `${rejected.slice(0, 3).join(', ')} 파일의 형식과 크기를 확인하세요.` : '');
+    if (!staged.length) return;
+    setDraftAttachments(items => [...items, ...staged]);
+    setMention(null);
+    restoreComposerFocus();
+  };
+  const selectExistingImage = (doc: KnowledgeDocument) => {
+    setImageDraft(current => {
+      const file = { id: doc.id, name: doc.filename };
+      return { ...current, attachments: [...current.attachments.filter(item => item.id !== file.id), file] };
+    });
+    setExistingImagesOpen(false);
+    restoreComposerFocus();
+  };
+  const detach = () => {
+    const stream = controller.current;
+    controller.current = null;
+    stream?.abort();
+    generation.current = null;
+    sending.current = false;
+    setStreaming(false);
+    setQueue(null);
+    setToolStatus('');
   };
   const newConversation = () => {
-    if (sending.current || busy || uploading) return;
+    if (awaitingStart.current || uploading) return;
+    detach();
     loadController.current?.abort(); setLoading(false);
-    setUploadOpen(false);setActive(null); setMessages([]); setDraft(""); setError(""); setSidebar(false); setMenu(""); pinned.current = true;
+    setActive(null); setMessages([]); setDraft(""); setError(""); setSidebar(false); setMenu(""); pinned.current = true;
     setContextReport(null); setQueue(null); setContextOpen(false); generation.current = null;
-    setAppSelections([]); setMention(null); setToolStatus("");
+    setAppSelections([]); setPublishGitlab(false); setMention(null); setToolStatus("");
     setAssistantSelection(emptySelection());setAssistantOpen(false);
+    resetAttachmentDraft();
+    if (projects.find(project => project.id === projectId)?.role === 'viewer') setProjectId('');
     replaceConversationLocation(null);
     requestAnimationFrame(() => editor.current?.focus());
   };
+  const chooseProject = (id: string) => {
+    if (awaitingStart.current || uploading) return;
+    newConversation();
+    setProjectId(id);
+  };
   const openConversation = async (item: Conversation) => {
-    if (sending.current || uploading) return;
+    if (awaitingStart.current || uploading) return;
+    if (active?.id === item.id && !item.read_only) {
+      setSidebar(false);
+      if (item.match) document.getElementById(`message-${item.match.message_id}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      return;
+    }
+    detach();
     loadController.current?.abort();
     const abort = new AbortController(); loadController.current = abort;
     setLoading(true); setSidebar(false); setMenu(""); setError("");
     try {
       const detail = await chatJson<ConversationDetail>(`/conversations/${item.id}`, { signal: abort.signal });
       if (abort.signal.aborted) return;
-      setUploadOpen(false);pinned.current = !item.match; setActive(detail.conversation); setMessages(detail.messages); setDraft("");
+      resetAttachmentDraft();pinned.current = !item.match; setActive(detail.conversation); setMessages(detail.messages); setDraft("");
       setContextReport(null); setQueue(detail.generation ?? null); setContextOpen(false);
       generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
-      setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
+      if (!detail.conversation.read_only) {
+        setSelected(detail.conversation.connection_id); setModel(detail.conversation.model);
+      }
       const previousApp=detail.messages.at(-1)?.apps?.[0];
-      setAssistantSelection({...emptySelection(),...detail.messages.at(-1)?.assistant});
-      setAppSelections(!detail.messages.at(-1)?.routing?.automatic_project&&(previousApp?.mode==='workspace'||previousApp?.mode==='execute')?[previousApp]:[]);setMention(null);setToolStatus("");
+      setAssistantSelection(assistantDraft(detail.messages.at(-1)?.assistant));
+      setAppSelections(!detail.messages.at(-1)?.routing?.automatic_project&&(previousApp?.mode==='workspace'||previousApp?.mode==='execute'||previousApp?.mode==='merge_request')?[previousApp]:[]);setMention(null);setToolStatus("");
+      setPublishGitlab(false);
       replaceConversationLocation(item.id);
       if(item.match)requestAnimationFrame(()=>document.getElementById(`message-${item.match!.message_id}`)?.scrollIntoView({block:"center",behavior:"smooth"}));
     } catch (caught) { if (!abort.signal.aborted) setError(errorText(caught)); }
@@ -283,19 +563,36 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
   };
 
   const send = async (content = draft, retry = false, confirmed = false) => {
-    const text = content.trim();
-    if (!text || !canSend || sending.current) return;
+    const text = content.trim() || (retry ? '' : attachmentOnlyText);
+    if (!text || !canSend || sending.current || (!retry && attachmentIssue)) return;
     if (!user) { onGuestDraft(text); router.push(workspaceHref("/login", window.location.search), { scroll: false }); return; }
     const last=messages.at(-1);
     if(retry&&!confirmed&&(last?.assistant?.allow_writes||last?.apps?.some(a=>a.mode==='execute'))){setRetryConfirmation(text);return;}
     onGuestDraft("");
     sending.current = true; setStreaming(true); setError(""); setToolStatus(""); setMention(null); pinned.current = true;
     const abort = new AbortController(); controller.current = abort;
-    const originalDraft = draft;
-    const usedApps = retry ? messages.at(-1)?.apps ?? [] : appSelections;
-    setDraft("");
+    awaitingStart.current = true;
+    setStarting(true);
+    const files = retry ? [] : draftAttachments;
+    const uploadAttempts: string[] = [];
+    const usedApps = retry ? last?.apps ?? [] : appSelections;
+    let usedAssistant: AssistantSelection | undefined = retry ? last?.assistant : {
+      ...assistantSelection,
+      ...(imageDraft.artifact && { image_artifact_id: imageDraft.artifact.id }),
+      ...(imageDraft.attachments.length && { image_document_ids: imageDraft.attachments.map(file => file.id) }),
+    };
+    const acceptDraft = () => {
+      if (retry) return;
+      setDraft('');
+      if (files.length && usedAssistant) setAssistantSelection(assistantDraft(usedAssistant));
+      resetAttachmentDraft();
+    };
+    const showProgress = (id: string, progress: DraftAttachment['progress']) =>
+      setDraftAttachments(items => items.map(item => item.id === id ? { ...item, progress } : item));
     let current = active;
     let assistantId = "";
+    let requestId: string | undefined;
+    let restoredQueue: QueueState | null = null;
     try {
       if (!current) {
         current = await chatJson<Conversation>("/conversations", { method: "POST", signal: abort.signal,
@@ -303,10 +600,51 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         setActive(current); updateConversation(current);
         replaceConversationLocation(current.id);
       }
-      const id = crypto.randomUUID(); generation.current = { id, conversation: current.id };
+      if (files.length) {
+        setUploading(true);
+        const uploadedDocuments = new Set(usedAssistant?.document_ids);
+        const uploadedImages = new Set(usedAssistant?.image_document_ids);
+        const conversationId = current.id;
+        const uploadFailure = new AbortController();
+        const uploadSignal = AbortSignal.any([abort.signal, uploadFailure.signal]);
+        for (let offset = 0; offset < files.length; offset += 2) {
+          const results = await Promise.allSettled(files.slice(offset, offset + 2).map(async ({ file, id }) => {
+            showProgress(id, { stage: 'uploading', percent: 0 });
+            try {
+              const imageInput = rawImageUpload(file);
+              const document = await uploadAttachment(file, { conversationId, imageInput }, {
+                signal: uploadSignal,
+                onAttempt: attemptId => uploadAttempts.push(attemptId),
+                onProgress: percent => showProgress(id, { stage: 'uploading', percent }),
+                onIndexing: () => showProgress(id, { stage: 'indexing' }),
+              });
+              showProgress(id, { stage: 'ready' });
+              return { id: document.id, imageInput };
+            } catch (caught) {
+              uploadSignal.throwIfAborted();
+              const failure = new Error(`${file.name} 첨부 실패 · ${errorText(caught)}`);
+              uploadFailure.abort(failure);
+              throw failure;
+            }
+          }));
+          for (const result of results) {
+            if (result.status === 'rejected') throw result.reason;
+            const { id, imageInput } = result.value;
+            (imageInput ? uploadedImages : uploadedDocuments).add(id);
+          }
+        }
+        usedAssistant = { ...(usedAssistant ?? emptySelection()),
+          document_ids: [...uploadedDocuments],
+          ...(uploadedImages.size && { image_document_ids: [...uploadedImages] }),
+        };
+        setUploading(false);
+      }
+      abort.signal.throwIfAborted();
+      requestId = newRequestId(); generation.current = { id: requestId, conversation: current.id };
       const response = await chatFetch(`/conversations/${current.id}/messages`, { method: "POST", signal: abort.signal,
-        body: JSON.stringify({ content: text, connection_id: selected, model, request_id: id, retry, confirm_write_retry:confirmed, apps: usedApps,
-          assistant:retry?messages.at(-1)?.assistant:assistantSelection }) });
+        body: JSON.stringify({ content: text, connection_id: selected, model, request_id: requestId, retry, confirm_write_retry:confirmed, apps: usedApps,
+          ...(!retry && publishGitlab && usedApps[0]?.mode === "execute" ? { publish_gitlab: true } : {}),
+          assistant:usedAssistant }) });
       if (!response.body) throw new Error("응답 연결을 열지 못했습니다.");
       await readChatStream(response.body, (event) => {
         if (abort.signal.aborted) return;
@@ -314,7 +652,11 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           const { user_message: human, assistant_message: assistant, conversation, context } = event.data;
           if (context) setContextReport(context);
           assistantId = assistant.id;
+          awaitingStart.current = false;
+          setStarting(false);
+          setPublishGitlab(false);
           if (!retry && (!usedApps[0]?.mode || usedApps[0].mode==='files')) setAppSelections([]);
+          acceptDraft();
           setMessages((old) => [...old.filter((item) => item.id !== human.id && item.id !== assistant.id), human, assistant]);
           setActive(conversation); updateConversation(conversation);
           requestAnimationFrame(() => editor.current?.focus());
@@ -334,12 +676,19 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
           setToolStatus("");
           setMessages((old) => old.map((item) => item.id === assistantId ? { ...item, sources: event.data.sources } : item));
         } else if(event.event==='activity') {
-          setToolStatus(event.data.status==='running'?event.data.detail:'');
+          setToolStatus(event.data.status==='running'
+            ? event.data.name === "gitlab_publication" ? "커밋을 완료하고 GitLab MR을 생성하고 있습니다." : event.data.detail
+            : '');
           setMessages(old=>old.map(item=>item.id===assistantId?{...item,tools:[...(item.tools??[]),event.data].slice(-150)}:item));
         } else if(event.event==='workspace') {
           setMessages(old=>old.map(item=>item.id===assistantId?{...item,apps:event.data.selection?[event.data.selection]:item.apps?.map(selection=>({...selection,workspace_id:event.data.id}))}:item));
-          if(!retry&&!event.data.automatic)setAppSelections(old=>old.map(selection=>selection.connection_id===usedApps[0]?.connection_id&&selection.project_id===event.data.project_id?{...selection,workspace_id:event.data.id}:selection));
+          if(!retry&&!event.data.automatic)setAppSelections(old=>old.map(selection=>
+            selection.connection_id === usedApps[0]?.connection_id && selection.project_id === event.data.project_id
+            && selection.ref === event.data.ref && selection.merge_request?.iid === usedApps[0]?.merge_request?.iid
+            && selection.merge_request?.project_id === usedApps[0]?.merge_request?.project_id
+              ? {...selection,workspace_id:event.data.id} : selection));
         } else {
+          generation.current = null;
           setQueue(null);
           setMessages((old) => old.map((item) => item.id === event.data.message.id ? event.data.message : item));
           setActive(event.data.conversation); updateConversation(event.data.conversation);
@@ -347,27 +696,45 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         }
       });
     } catch (caught) {
+      if (controller.current !== abort) return;
       if (abort.signal.aborted) {
-        if (!assistantId) setDraft(originalDraft || text);
         setMessages((old) => old.map((item) => item.status === "pending" ? { ...item, status: "cancelled" } : item));
       } else {
         setError(errorText(caught));
-        if (!assistantId) setDraft(originalDraft || text);
         setMessages((old) => old.map((item) => item.status === "pending" ? { ...item, status: "error", error: errorText(caught) } : item));
       }
       if (current) {
         try {
           const detail = await chatJson<ConversationDetail>(`/conversations/${current.id}`, { signal: AbortSignal.timeout(5000) });
-          setActive(detail.conversation); setMessages(detail.messages); updateConversation(detail.conversation);
+          if (controller.current === abort) {
+            setActive(detail.conversation); setMessages(detail.messages); updateConversation(detail.conversation);
+            restoredQueue = detail.generation ?? null;
+            generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
+            if (!assistantId && requestId && detail.generation?.request_id === requestId) {
+              assistantId = detail.messages.at(-1)?.id ?? '';
+              acceptDraft();
+            }
+          }
         } catch { /* Preserve partial text and the original error while offline. */ }
       }
     } finally {
-      generation.current = null; controller.current = null; sending.current = false; setStreaming(false); setQueue(null); setToolStatus("");
+      if (!assistantId && uploadAttempts.length) await Promise.allSettled(uploadAttempts.map(cancelAttachmentUpload));
+      if (controller.current === abort) {
+        controller.current = null;
+        sending.current = false;
+        awaitingStart.current = false;
+        setStarting(false);
+        setStreaming(false);
+        setUploading(false);
+        if (!assistantId && files.length) setDraftAttachments(items => items.map(item => ({ ...item, progress: undefined })));
+        setQueue(restoredQueue);
+        setToolStatus('');
+      }
     }
   };
   const stop = () => {
     const current = generation.current;
-    controller.current?.abort();
+    if (!current && awaitingStart.current) { controller.current?.abort(); return; }
     if (current) void chatJson(`/conversations/${current.conversation}/cancel`, { method: "POST", body: JSON.stringify({ request_id: current.id }) })
       .catch((caught) => setError(errorText(caught)));
   };
@@ -383,7 +750,10 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
       } else {
         await chatJson(`/conversations/${action.item.id}`, { method: "DELETE" });
         setConversations((old) => old.filter((entry) => entry.id !== action.item.id));
-        if (active?.id === action.item.id) { setActive(null); setMessages([]); setDraft(""); replaceConversationLocation(null); }
+        if (active?.id === action.item.id) {
+          setActive(null); setMessages([]); setDraft(""); resetAttachmentDraft();
+          replaceConversationLocation(null);
+        }
       }
       setError(""); setAction(null);
     } catch (caught) { setError(errorText(caught)); }
@@ -406,54 +776,118 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
     catch (caught) { setError(errorText(caught)); }
   };
   const visible = conversations;
-  const composer = <form className={`cw-composer ${streaming ? "is-streaming" : ""}`} onDragOver={e=>{if(e.dataTransfer.types.includes('Files'))e.preventDefault();}} onDrop={e=>{e.preventDefault();void attachFiles(Array.from(e.dataTransfer.files));}} onSubmit={(event) => { event.preventDefault(); void send(); }}>
-    {uploadOpen&&active&&<UploadQueue key={active.id} ref={uploads} conversationId={active.id} disabled={busy} onBusy={setUploading} onReady={doc=>setAssistantSelection(old=>{
-      if(old.document_ids.includes(doc.id))return old;
-      if(old.document_ids.length>=10)return old;
-      return {...old,document_ids:[...old.document_ids,doc.id]};
-    })}/>}
-    {uploadOpen&&<p className="cw-upload-selection-note">직접 선택한 첨부 {assistantSelection.document_ids.length}/10 · 초과한 자료는 파일·지식에서 선택을 조정하세요.</p>}
-    {!!appSelections.length && <div className="cw-app-selection">{appSelections.map((selection) => <div key={selection.connection_id}><Icon name="code" size={15} /><span>GitLab · {selection.ref} · {selection.mode==='execute'?'분석·실행':selection.mode==='workspace'?'프로젝트 분석':`${selection.paths.length}개 파일`}</span>
-      <button type="button" className="cw-icon-button" aria-label="GitLab 파일 선택 제거" onClick={() => setAppSelections([])}><Icon name="close" size={13} /></button></div>)}</div>}
-    {(assistantSelection.base_ids.length>0||assistantSelection.document_ids.length>0||assistantSelection.mcp_ids.length>0)&&<div className="cw-assistant-selection"><button type="button" onClick={()=>void openAssistant()}>지식 {assistantSelection.base_ids.length} · 첨부 {assistantSelection.document_ids.length} · 앱 {assistantSelection.mcp_ids.length}{assistantSelection.allow_writes?' · 쓰기 허용':''}</button><button type="button" aria-label="자료와 앱 선택 제거" onClick={()=>setAssistantSelection(emptySelection())}>×</button></div>}
-    {mention && <div className="cw-app-mention" id="chat-app-options" role="listbox" aria-label="사용할 앱"><button id="chat-app-gitlab" type="button" role="option" aria-selected={mentionChoice===0}
-      onMouseMove={()=>setMentionChoice(0)} onMouseDown={(e) => e.preventDefault()} onClick={selectGitlab}><Icon name="code" size={20} /><span><strong>GitLab</strong><small>내 프로젝트에서 파일 가져오기</small></span><kbd>↵</kbd></button><button id="chat-app-knowledge" type="button" role="option" aria-selected={mentionChoice===1} onMouseMove={()=>setMentionChoice(1)} onMouseDown={e=>e.preventDefault()} onClick={()=>void openAssistant()}><Icon name="plus" size={20}/><span><strong>지식·연결된 앱</strong><small>문서 검색과 MCP 도구 선택</small></span></button></div>}
+  const restoreComposerFocus = () => requestAnimationFrame(() => {
+    if (!document.querySelector("dialog:modal")) editor.current?.focus({ preventScroll: true });
+  });
+  const referenceImage = (file: ResultFile) => {
+    if (!canSend || !canUseImageInput) return;
+    setImageDraft(current => ({ ...current, artifact: { id: file.id, name: file.name } }));
+    setExistingImagesOpen(false);
+    setMention(null);
+    restoreComposerFocus();
+  };
+  const selectedImages = imageDraft.artifact ? [imageDraft.artifact, ...imageDraft.attachments] : imageDraft.attachments;
+  const imageQueue = queue?.kind === 'image';
+  const composer = readOnly ? <p className="cw-composer-caption" role="status">프로젝트 대화 · 열람 전용</p> : <form
+    className={`cw-composer ${streaming ? "is-streaming" : ""}`}
+    onPaste={event => {
+      const files = transferFiles(event.clipboardData);
+      if (!files.length) return;
+      event.preventDefault();
+      stageFiles(files);
+    }} onSubmit={event => { event.preventDefault(); void send(); }}>
+    <input ref={fileInput} type="file" hidden multiple accept={[...new Set([...documentFormats, ...rasterFormats])].join(',')}
+      onChange={event => { stageFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
+    <DraftAttachments items={draftAttachments} disabled={!canSend} onRemove={id => {
+      setDraftAttachments(items => items.filter(item => item.id !== id));
+      restoreComposerFocus();
+    }} />
+    {existingImagesOpen && active && canUseImageInput && !explicitApps && <ExistingImagePicker key={active.id} conversationId={active.id}
+      disabled={!canSend || imageInputCount >= maxImageInputs}
+      selectedImageIds={imageDraft.attachments.map(file => file.id)} onSelect={selectExistingImage} />}
+    {selectedImages.length > 0 && <ul className="cw-image-inputs" aria-label="참조 이미지">
+      {selectedImages.map(file => <li key={file.id}><span title={file.name}>{file.name}</span>
+        <button type="button" className="cw-icon-button" aria-label={`${file.name} 제거`} disabled={!canSend}
+          onClick={() => {
+            setImageDraft(current => ({
+              artifact: current.artifact?.id === file.id ? null : current.artifact,
+              attachments: current.attachments.filter(item => item.id !== file.id),
+            }));
+            restoreComposerFocus();
+          }}><Icon name="close" size={13} /></button>
+      </li>)}
+    </ul>}
+    {attachmentIssue && <p className="cw-inline-error" id="chat-image-input-note" role="status">{attachmentIssue}</p>}
+    {user && draftMrLink && <div className="cw-app-selection"><button type="button" className="cw-small-button" disabled={!canSend}
+      onClick={() => openGitlabScope(draftMrLink)}>GitLab MR 후속 작업</button></div>}
+    {!!appSelections.length && <div className="cw-app-selection">{appSelections.map((selection) => <div key={selection.connection_id}><Icon name="code" size={15} /><span>GitLab · {selection.merge_request ? `MR !${selection.merge_request.iid}` : selection.ref} · {selection.mode==='execute'?'수정·실행':selection.mode==='workspace'?'프로젝트 분석':selection.merge_request?'리뷰·CI 조회':`${selection.paths.length}개 파일`}</span>
+      {publishGitlab && <button type="button" className="cw-text-button" aria-label="이번 요청의 MR 게시 허용 취소" onClick={() => setPublishGitlab(false)}>{selection.merge_request ? "커밋 허용 ×" : "MR 생성 허용 ×"}</button>}
+      <button type="button" className="cw-icon-button" aria-label="GitLab 선택 제거" onClick={() => { setAppSelections([]); setPublishGitlab(false); }}><Icon name="close" size={13} /></button></div>)}</div>}
+    {(assistantSelection.base_ids.length>0||assistantSelection.document_ids.length>0||assistantSelection.mcp_ids.length>0||assistantSelection.parallel_agents)&&<div className="cw-assistant-selection"><button type="button" onClick={()=>void openAssistant()}>지식 {assistantSelection.base_ids.length} · 첨부 {assistantSelection.document_ids.length} · 앱 {assistantSelection.mcp_ids.length}{assistantSelection.parallel_agents?' · 병렬 Agent':''}{assistantSelection.allow_writes?' · 쓰기 허용':''}</button><button type="button" aria-label="자료와 앱 선택 제거" onClick={()=>setAssistantSelection(emptySelection())}>×</button></div>}
+    {activeAppOption && <div className="cw-app-mention" id="chat-app-options" role="listbox" aria-label="사용할 앱"
+      onPointerDown={event => { if (event.button === 0) event.preventDefault(); }}>
+      {visibleAppOptions.map((option, index) => <button key={option.id} id={`chat-app-${option.id}`} type="button" role="option" tabIndex={-1}
+        aria-label={option.title} aria-selected={activeAppOption.id === option.id} onMouseMove={() => setMentionChoice(index)} onClick={() => chooseApp(option.id)}>
+        <Icon name={option.icon} size={20} /><span><strong>{option.title}</strong><small>{option.description}</small></span>
+        {activeAppOption.id === option.id && <kbd>↵</kbd>}
+      </button>)}
+    </div>}
     <label className="cw-sr-only" htmlFor="chat-message">메시지</label>
     <textarea ref={editor} id="chat-message" placeholder={!user || connection ? "무엇이든 편하게 물어보세요" : "모델을 연결하고 대화를 시작하세요"}
-      value={draft} rows={2} maxLength={16000} disabled={loading || initializing || !!active?.busy && !streaming}
-      role="combobox" aria-expanded={!!mention} aria-autocomplete="list" aria-controls={mention ? "chat-app-options" : undefined} aria-activedescendant={mention ? mentionChoice===0?"chat-app-gitlab":"chat-app-knowledge" : undefined}
-      onBlur={() => setMention(null)} onChange={(event) => { setDraft(event.target.value); const next=appMentionAt(event.target.value,event.target.selectionStart);setMention(next);setMentionChoice(next?.query&&!"gitlab".startsWith(next.query.toLowerCase())?1:0); }}
-      onClick={(event) => setMention(appMentionAt(event.currentTarget.value,event.currentTarget.selectionStart))}
+      value={draft} rows={2} maxLength={16000} readOnly={starting} disabled={loading || initializing || !!active?.busy && !streaming}
+      role="combobox" aria-expanded={!!activeAppOption} aria-autocomplete="list" aria-controls={activeAppOption ? "chat-app-options" : undefined}
+      aria-activedescendant={activeAppOption ? `chat-app-${activeAppOption.id}` : undefined}
+      aria-describedby={attachmentIssue ? "chat-image-input-note" : undefined}
+      onBlur={() => setMention(null)}
+      onChange={event => { setDraft(event.currentTarget.value); updateTypedMention(event.currentTarget); }}
+      onClick={event => updateTypedMention(event.currentTarget)}
+      onCompositionStart={() => { composing.current = true; setMention(null); }}
+      onCompositionEnd={event => {
+        composing.current = false;
+        setDraft(event.currentTarget.value);
+        updateTypedMention(event.currentTarget);
+      }}
+      onKeyUp={event => {
+        if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) updateTypedMention(event.currentTarget);
+      }}
       onKeyDown={(event) => {
-        if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
-        if (mention) {
+        if (composing.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+        if (activeAppOption) {
           if (event.key === "Escape") { event.preventDefault(); setMention(null); return; }
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault();setMentionChoice(v=>v===0?1:0);return; }
-          if (event.key === "Enter" && !event.shiftKey || event.key === "Tab") { event.preventDefault();if(mentionChoice===1)void openAssistant();else selectGitlab();return; }
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            const direction = event.key === "ArrowDown" ? 1 : -1;
+            setMentionChoice(index => (index + direction + visibleAppOptions.length) % visibleAppOptions.length);
+            return;
+          }
+          if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") { event.preventDefault(); chooseApp(activeAppOption.id); return; }
         }
-        if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
+        if (event.key === "Enter" && !event.shiftKey) {
           event.preventDefault(); void send();
         }
       }} />
     <div className="cw-composer-bottom"><button className="cw-model-picker" type="button" disabled={busy} onClick={openModels}>
       <Icon name={connection?.is_test ? "chat" : "server"} size={16} /><span>{connection?.is_test ? connection.name : model || connection?.name || "모델 연결"}</span><Icon name="chevron" size={14} /></button>
-      <button type="button" className="cw-context-button" aria-label="앱 추가" disabled={busy} onClick={() => { const caret = editor.current?.selectionStart ?? draft.length;setMentionChoice(0);setMention({ start: caret, end: caret, query: "" }); editor.current?.focus(); }}>@ 앱</button>
-      <button type="button" className="cw-context-button" disabled={busy||loading||initializing} onClick={()=>void attachFiles([])}>첨부</button>
+      <button type="button" className="cw-context-button" aria-label="앱 추가" disabled={busy || loading || initializing}
+        onPointerDown={event => { if (event.button === 0 && !composing.current) event.preventDefault(); }} onClick={openAppPicker}>@ 앱</button>
+      <button type="button" className="cw-context-button" disabled={!canSend} onClick={chooseFiles}>첨부</button>
+      {canUseImageInput && !explicitApps && active && <button type="button" className="cw-context-button" disabled={!canSend}
+        aria-expanded={existingImagesOpen} onClick={() => setExistingImagesOpen(open => !open)}>기존 이미지</button>}
       <button type="button" className="cw-context-button" disabled={busy||loading||initializing||uploading} onClick={()=>void openAssistant()}>파일·지식</button>
       {active && <button className="cw-context-button" type="button" disabled={busy || !connection} onClick={() => setContextOpen(true)}>문맥</button>}
       {active&&terminal.enabled&&<button className="cw-context-button" type="button" onClick={()=>setWorkspaceOpen(true)}>작업공간</button>}
       <span className="cw-enter-hint">Shift + Enter 줄바꿈</span>
-      {busy ? <button type="button" onClick={stop} className="cw-send" aria-label={queue?.status === "queued" ? "대기 취소" : "응답 중지"}><span className="cw-stop-square" /></button>
-        : <button className="cw-send" disabled={!draft.trim() || !canSend} aria-label="메시지 전송"><Icon name="arrow" size={20} /></button>}</div>
+      {busy ? <button type="button" onClick={stop} className="cw-send" aria-label={uploading ? "첨부 전송 취소" : queue?.status === "queued" ? (imageQueue ? "이미지 대기 취소" : "대기 취소") : imageQueue ? "이미지 작업 중지" : "응답 중지"}><span className="cw-stop-square" /></button>
+        : <button className="cw-send" disabled={!(draft.trim() || attachmentOnlyText) || !canSend || !!attachmentIssue} aria-label="메시지 전송"><Icon name="arrow" size={20} /></button>}</div>
   </form>;
 
   return <div className={`cw-workspace ${sidebar ? "sidebar-open" : ""}`}>
     {sidebar && <button className="cw-sidebar-scrim" aria-label="사이드바 닫기" onClick={() => setSidebar(false)} />}
     <aside className="cw-sidebar" aria-label="대화 탐색"><header className="cw-brand"><Link href="/" onClick={(event) => { event.preventDefault(); newConversation(); }} aria-label="LLM 새 대화"><Wordmark small /><span>llm<span className="cw-brand-dot">.</span></span></Link>
       <button className="cw-icon-button cw-mobile-only" aria-label="사이드바 접기" onClick={() => setSidebar(false)}><Icon name="panel" size={17} /></button></header>
-      <div className="cw-sidebar-actions"><button className="cw-new-chat" disabled={busy} onClick={newConversation}><Icon name="plus" size={18} />새 대화<span>↗</span></button>
+      <div className="cw-sidebar-actions"><button className="cw-new-chat" disabled={starting||uploading} onClick={newConversation}><Icon name="plus" size={18} />새 대화<span>↗</span></button>
         <button className="cw-search-button" onClick={() => { setSearching((old) => !old); requestAnimationFrame(() => searchInput.current?.focus()); }}><Icon name="search" size={17} />대화 찾기<kbd>⌘ K</kbd></button></div>
-      {user&&<div className="cw-project-picker"><label className="cw-sr-only" htmlFor="project-filter">대화 프로젝트</label><select id="project-filter" value={projectId} disabled={busy||uploading} onChange={e=>{setProjectId(e.target.value);newConversation();}}><option value="">모든 대화</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><button className="cw-icon-button" aria-label="프로젝트 관리" disabled={busy||uploading} onClick={()=>setProjectsOpen(true)}><Icon name="plus" size={16}/></button></div>}
+      {user&&<div className="cw-project-picker"><label className="cw-sr-only" htmlFor="project-filter">대화 프로젝트</label><select id="project-filter" value={projectId} disabled={starting||uploading} onChange={e=>chooseProject(e.target.value)}><option value="">내 대화</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><button className="cw-icon-button" aria-label="프로젝트 관리" disabled={starting||uploading} onClick={()=>setProjectsOpen(true)}><Icon name="plus" size={16}/></button></div>}
       {searching && <div className="cw-search-field"><input ref={searchInput} aria-label="대화 제목·본문 검색" placeholder="제목과 본문 전체 검색" value={search} onChange={(event) => setSearch(event.target.value)} />
         <button className="cw-icon-button" aria-label="검색 닫기" onClick={() => { setSearch(""); setSearching(false); }}><Icon name="close" size={14} /></button></div>}
       <div className="cw-history"><div className="cw-section-label">대화 기록</div>
@@ -461,10 +895,10 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         {searchLoading&&<p className="cw-history-empty" role="status">전체 기록에서 검색 중…</p>}
         {!initializing && !searchLoading && !visible.length && <p className="cw-history-empty">{search ? "검색 결과가 없습니다." : <>아직 나눈 대화가 없어요.<br />첫 이야기를 시작해 보세요.</>}</p>}
         <nav aria-label="저장된 대화">{visible.map((item) => <div key={item.id} className={`cw-history-row ${active?.id === item.id ? "is-active" : ""}`}>
-          <button className="cw-history-title" disabled={streaming||uploading} onClick={() => void openConversation(item)} aria-current={active?.id === item.id ? "page" : undefined}>
-            <Icon name="chat" size={15} /><span>{item.title}{item.match&&<small className="cw-search-excerpt">{item.match.excerpt}</small>}</span></button>
-          <button className="cw-history-more" aria-label={`${item.title} 메뉴`} aria-expanded={menu === item.id} disabled={busy} onClick={() => setMenu(menu === item.id ? "" : item.id)}><Icon name="more" size={16} /></button>
-          {menu === item.id && <div className="cw-row-menu"><button onClick={() => rename(item)}><Icon name="edit" size={14} />이름 변경</button>
+          <button className="cw-history-title" disabled={starting||uploading} onClick={() => void openConversation(item)} aria-current={active?.id === item.id ? "page" : undefined}>
+            <Icon name="chat" size={15} /><span>{item.title}{item.busy&&<small className="cw-search-excerpt">작업 중</small>}{item.match&&<small className="cw-search-excerpt">{item.match.excerpt}</small>}</span></button>
+          {!item.read_only&&<button className="cw-history-more" aria-label={`${item.title} 메뉴`} aria-expanded={menu === item.id} disabled={item.busy} onClick={() => setMenu(menu === item.id ? "" : item.id)}><Icon name="more" size={16} /></button>}
+          {!item.read_only && menu === item.id && <div className="cw-row-menu"><button onClick={() => rename(item)}><Icon name="edit" size={14} />이름 변경</button>
             <button className="cw-danger" onClick={() => { setAction({ type: "delete", item }); setMenu(""); setError(""); }}><Icon name="trash" size={14} />삭제</button></div>}</div>)}</nav>
         {hasMore && <button className="cw-load-more" disabled={loading} onClick={() => void loadMore()}>이전 대화 더 보기</button>}</div>
       <footer className="cw-sidebar-footer"><button className="cw-connection-link" onClick={openModels}><Icon name="settings" size={17} />모델 연결<span>{user ? connections.length : ""}</span></button>
@@ -475,11 +909,18 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
             <UserAvatar name={user.display_name || user.username} src={user.avatar_url} className="cw-user-avatar" /><span><strong>{user.display_name || user.username}</strong><small>개인 워크스페이스</small></span><Icon name="chevron" size={15} /></button></div>
           : <div className="cw-guest-account"><Link data-workspace-focus href="/login">로그인</Link><Link href="/user/signup">계정 만들기</Link></div>}</footer>
     </aside>
-    <main className="cw-main"><header className="cw-topbar"><div className="cw-topbar-left"><button className="cw-icon-button cw-mobile-only" aria-label="사이드바 열기" onClick={() => setSidebar(true)}><Icon name="panel" /></button>
+    <main className="cw-main" onDragOver={event => {
+      if (event.dataTransfer.types.includes('Files')) event.preventDefault();
+    }} onDrop={event => {
+      const files = transferFiles(event.dataTransfer);
+      if (!files.length) return;
+      event.preventDefault();
+      stageFiles(files);
+    }}><header className="cw-topbar"><div className="cw-topbar-left"><button className="cw-icon-button cw-mobile-only" aria-label="사이드바 열기" onClick={() => setSidebar(true)}><Icon name="panel" /></button>
       <span className="cw-topbar-workspace">워크스페이스</span><span className="cw-topbar-slash">/</span>
-      {active ? <button className="cw-title-button" disabled={busy || loading} aria-label="대화 이름 변경" title="대화 이름 변경" onClick={() => rename(active)}>
-        <span className="cw-topbar-title">{active.title}</span><Icon name="edit" size={13} /></button> : <span className="cw-topbar-title">새 대화</span>}</div>
-      {user&&<div className="cw-topbar-project"><button className="cw-text-button" disabled={busy||uploading} onClick={()=>setProjectsOpen(true)}>{active?.project_name||projects.find(p=>p.id===projectId)?.name||'프로젝트'}</button>{active&&messages.length>0&&<button className="cw-text-button" disabled={busy||loading||uploading} onClick={()=>void continueConversation()}>새 대화로 이어가기</button>}</div>}
+      {active && !readOnly ? <button className="cw-title-button" disabled={busy || loading} aria-label="대화 이름 변경" title="대화 이름 변경" onClick={() => rename(active)}>
+        <span className="cw-topbar-title">{active.title}</span><Icon name="edit" size={13} /></button> : <span className="cw-topbar-title">{active?.title||'새 대화'}</span>}</div>
+      {user&&<div className="cw-topbar-project"><button className="cw-text-button" disabled={starting||uploading} onClick={()=>setProjectsOpen(true)}>{active?.project_name||projects.find(p=>p.id===projectId)?.name||'프로젝트'}</button>{active&&!readOnly&&messages.length>0&&<button className="cw-text-button" disabled={busy||loading||uploading} onClick={()=>void continueConversation()}>새 대화로 이어가기</button>}</div>}
       {user ? <button className={`cw-mode ${connection?.is_test ? "is-test" : ""}`} onClick={openModels}><span />{connection?.is_test ? "테스트 모드" : connection?.name || "연결 선택"}<Icon name="chevron" size={12} /></button>
         : <div className="cw-guest-topbar"><ThemeToggle /><Link href="/login">로그인</Link></div>}</header>
       <div className={`cw-content ${messages.length ? "has-messages" : ""}`} ref={viewport} onScroll={() => {
@@ -489,29 +930,38 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         {loading && <p className="cw-loading" role="status">대화를 불러오는 중…</p>}
         {!messages.length ? <div className="cw-welcome"><div className="cw-welcome-heading"><div className="cw-welcome-mark"><Wordmark /></div>
           <p className="cw-greeting">{user ? `${user.display_name || user.username}님의 워크스페이스` : "내 모델과, 나의 대화."}</p><h1>무엇을 함께 해볼까요?</h1><p className="cw-welcome-description">생각을 정리하고, 질문하고, 다음 단계로.</p></div>
-          {composer}<div className="cw-starters">{starters.map((item) => <button key={item.title} disabled={busy || loading} onClick={() => { setDraft(item.prompt); editor.current?.focus(); }}>
-            <Icon name={item.icon} size={16} />{item.title}<span>↗</span></button>)}</div>
+          {composer}{!readOnly&&<div className="cw-starters">{starters.map((item) => <button key={item.title} disabled={busy || loading} onClick={() => { setDraft(item.prompt); editor.current?.focus(); }}>
+            <Icon name={item.icon} size={16} />{item.title}<span>↗</span></button>)}</div>}
           {connection?.is_test && <p className="cw-demo-note"><span />현재 테스트 모드입니다. 실제 모델 대신 랜덤 예시 답변이 표시됩니다.</p>}
-          {conversations.length > 0 && <section className="cw-recent"><h2>이어서 나눠볼 이야기</h2>{conversations.slice(0, 3).map((item) => <button key={item.id} disabled={streaming||uploading} onClick={() => void openConversation(item)}>
-            <Icon name="chat" size={15} /><span>{item.title}</span><time>{shortDate(item.updated_at)}</time><span className="cw-recent-arrow">↗</span></button>)}</section>}</div>
-          : <div className="cw-transcript" aria-label="대화 내용">{messages.map((message, index) => <article key={message.id} id={`message-${message.id}`} className={`cw-message cw-message-${message.role}`} aria-label={message.role === "user" ? "내 메시지" : "모델 답변"}>
+          {conversations.length > 0 && <section className="cw-recent"><h2>이어서 나눠볼 이야기</h2>{conversations.slice(0, 3).map((item) => <button key={item.id} disabled={starting||uploading} onClick={() => void openConversation(item)}>
+            <Icon name="chat" size={15} /><span>{item.title}{item.busy && <small className="cw-search-excerpt">작업 중</small>}</span><time>{shortDate(item.updated_at)}</time><span className="cw-recent-arrow">↗</span></button>)}</section>}</div>
+          : <div className="cw-transcript" aria-label="대화 내용" onLoadCapture={event => {
+            if (event.target instanceof HTMLImageElement && pinned.current && viewport.current) {
+              viewport.current.scrollTop = viewport.current.scrollHeight;
+            }
+          }}>{messages.map((message, index) => <article key={message.id} id={`message-${message.id}`} className={`cw-message cw-message-${message.role}`} aria-label={message.role === "user" ? "내 메시지" : "모델 답변"}>
             {message.role === "assistant" && <div className="cw-assistant-label"><Wordmark small /><span>{message.is_test ? "테스트 모델" : message.model}</span>{message.is_test && <small>예시 답변</small>}</div>}
             {message.role === "user" ? <div className="cw-human-text">{message.content}</div> : <>
-              {!!message.apps?.length && <p className="cw-message-app">GitLab · {message.apps[0].mode==='execute'?'프로젝트 분석·실행':message.apps[0].mode==='workspace'?'프로젝트 자동 분석':message.apps[0].paths.join(", ")}
+              {!!message.apps?.length && <p className="cw-message-app">GitLab · {message.apps[0].merge_request ? `기존 MR !${message.apps[0].merge_request.iid}` : message.apps[0].mode==='execute'?'프로젝트 분석·실행':message.apps[0].mode==='workspace'?'프로젝트 자동 분석':message.apps[0].paths.join(", ")}
                 {message.apps[0].workspace_id&&<button type="button" className="cw-text-button" onClick={()=>setWorkspaceOpen(true)}>작업공간 열기</button>}</p>}
-              {(message.routing?.automatic||message.routing?.status==='unverified')&&<p className="cw-message-app">{message.routing.status==='unverified'?'근거 확인 보류':message.routing.route==='knowledge'?'자동 문서 검색':message.routing.route==='gitlab'?'자동 소스 분석':message.routing.route==='both'?'소스·문서 함께 확인':'질문 자동 처리'}</p>}
-              {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {tool.name} · {tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}
-              {message.content ? <MessageContent content={message.content} /> : message.status === "pending" ? toolStatus ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
+              {(message.apps?.[0]?.merge_request || message.tools?.some(tool => tool.name === "gitlab_mr_overview")) &&
+                <GitlabWorkProgress message={message} onFollowup={canSend ? openGitlabScope : undefined} />}
+              <GitlabPublication tools={message.tools} />
+              {(message.routing?.automatic || message.routing?.status === 'unverified' || ['image', 'image_edit', 'vision'].includes(message.routing?.route ?? '')) &&
+                <p className="cw-message-app">{message.routing?.status === 'unverified' ? '근거 확인 보류' : automaticRouteLabels[message.routing?.route ?? ''] ?? '질문 자동 처리'}</p>}
+              {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {imageActivityLabels[tool.name] ?? tool.name} · {tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}
+              {message.content ? <MessageContent content={message.content} /> : message.status === "pending" ? toolStatus && !message.apps?.[0]?.merge_request ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
               <MessageSources sources={message.sources ?? []} />
               {message.status === "error" && <p className="cw-message-error" role="alert">{message.error || "응답이 중단되었습니다. 다시 시도해 주세요."}</p>}
               {message.status === "cancelled" && <p className="cw-stopped">응답이 중지되었습니다.</p>}
               {message.status !== "pending" && <div className="cw-message-actions">{message.content && <CopyButton text={message.content} label="답변 복사" />}
-                {index === messages.length - 1 && <button className="cw-text-button" disabled={!canSend} onClick={() => void send(messages[index - 1]?.content, true)}><Icon name="refresh" size={14} />다시 생성</button>}</div>}</>}
-            {active&&<MessageWorkflow message={message} conversationId={active.id} disabled={busy||loading||uploading} onResult={acceptWorkflow} onFiles={files=>setMessages(old=>old.map(m=>m.id===message.id?{...m,artifacts:files}:m))} onRetry={message.role==='assistant'&&index===messages.length-1?()=>void send(messages[index-1]?.content,true):undefined} onModels={openModels} onApps={()=>void openAssistant()}/>}
+                {!readOnly && index === messages.length - 1 && <button className="cw-text-button" disabled={!canSend} onClick={() => void send(messages[index - 1]?.content, true)}><Icon name="refresh" size={14} />다시 생성</button>}</div>}</>}
+            {active&&!readOnly&&<MessageWorkflow message={message} conversationId={active.id} disabled={busy||loading||starting||uploading} onResult={acceptWorkflow} onFiles={files=>setMessages(old=>old.map(m=>m.id===message.id?{...m,artifacts:files}:m))} onRetry={message.role==='assistant'&&index===messages.length-1?()=>void send(messages[index-1]?.content,true):undefined} onModels={openModels} onApps={()=>void openAssistant()} onReferenceImage={canUseImageInput ? referenceImage : undefined}/>}
           </article>)}</div>}
       </div>
       {messages.length > 0 && <div className="cw-composer-dock">{scrollDown && <button className="cw-scroll-down" aria-label="최신 메시지로 이동" onClick={() => { pinned.current = true; viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: "smooth" }); setScrollDown(false); }}><Icon name="down" size={17} /></button>}
-        {queue?.status === "queued" && <p className="cw-queue-notice" role="status">모델 응답 대기 중 · 관련 대기열 {queue.position}번째<button type="button" className="cw-text-button" onClick={stop}>대기 취소</button></p>}
+        {queue?.status === "queued" && <p className="cw-queue-notice" role="status">{imageQueue ? "이미지 작업 대기 중" : "모델 응답 대기 중"} · {queue.position}번째<button type="button" className="cw-text-button" onClick={stop}>대기 취소</button></p>}
+        {imageQueue && queue.status === "running" && <p className="cw-queue-notice" role="status">이미지 작업 진행 중</p>}
         {contextReport && <div className={`cw-context-status ${contextReport.too_large ? "is-over-budget" : ""}`} role={contextReport.too_large || contextReport.omitted_turns > 0 ? "status" : undefined}>
           <span>입력 추정 {contextReport.estimated_input_tokens.toLocaleString()} / {contextReport.input_budget.toLocaleString()} 토큰</span>
           {contextReport.omitted_turns > 0 && <span>이전 {contextReport.omitted_turns}턴은 이번 문맥에서 제외됩니다.</span>}
@@ -519,21 +969,24 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
         {composer}<p className="cw-composer-caption">{active?.busy && !streaming ? "진행 중인 요청을 불러오고 있습니다…" : connection?.is_test ? "테스트 모드 · 예시 답변이며 실제 모델을 호출하지 않습니다." : "모델의 답변은 부정확할 수 있습니다. 중요한 내용은 확인해 주세요."}</p></div>}
       {error && <div className="cw-error-toast" role="alert"><span>{error}</span><button className="cw-icon-button" aria-label="오류 알림 닫기" onClick={() => setError("")}><Icon name="close" size={16} /></button></div>}
     </main>
-    {projectsOpen&&<ProjectsDialog projects={projects} selected={active?.project_id||projectId} active={active} onProjects={setProjects} onChoose={setProjectId} onMoved={item=>{setActive(item);updateConversation(item);setProjectId(item.project_id||'');}} onClose={()=>setProjectsOpen(false)}/>}
-    <dialog ref={retryDialog} className="cw-dialog cw-action-dialog" aria-label="외부 작업 재시도 확인" onCancel={()=>setRetryConfirmation(null)} onClose={()=>setRetryConfirmation(null)}><h2>쓰기 작업을 다시 실행할까요?</h2><p>이 요청은 명령 실행 또는 외부 서비스 변경을 허용했습니다. 이미 처리된 작업도 다시 실행될 수 있으니 작업 기록을 확인하세요.</p><div className="cw-action-buttons"><button className="cw-small-button" onClick={()=>setRetryConfirmation(null)}>취소</button><button className="cw-primary-button" onClick={()=>{const content=retryConfirmation;setRetryConfirmation(null);if(content)void send(content,true,true);}}>확인하고 재시도</button></div></dialog>
-    {scopeOpen && <GitlabScopeDialog terminal={terminal} onClose={() => { setScopeOpen(false); editor.current?.focus(); }} onSelect={(selection) => { setAppSelections([selection]); setScopeOpen(false); editor.current?.focus(); }} />}
+    {projectsOpen&&<ProjectsDialog projects={projects} selected={active?.project_id||projectId} active={active} onProjects={setProjects} onChoose={chooseProject} onMoved={item=>{setActive(item);updateConversation(item);setProjectId(item.project_id||'');}} onClose={()=>setProjectsOpen(false)}/>}
+    <dialog ref={retryDialog} className="cw-dialog cw-action-dialog" aria-label="외부 작업 재시도 확인" {...dismissRetry} onClose={closeRetry}><h2>쓰기 작업을 다시 실행할까요?</h2><p>이 요청은 명령 실행 또는 외부 서비스 변경을 허용했습니다. 이미 처리된 작업도 다시 실행될 수 있으니 작업 기록을 확인하세요.</p><div className="cw-action-buttons"><button className="cw-small-button" onClick={closeRetry}>취소</button><button className="cw-primary-button" onClick={()=>{const content=retryConfirmation;closeRetry();if(content)void send(content,true,true);}}>확인하고 재시도</button></div></dialog>
+    {scopeOpen && <GitlabScopeDialog terminal={terminal} initialReference={scopeReference}
+      canWriteModel={!!connection && !connection.is_test && !!(connection.models.find(item => item.name === model)?.supports_tools ?? connection.supports_tools)}
+      onClose={() => { setScopeOpen(false); restoreComposerFocus(); }}
+      onSelect={(selection, publish) => { setAppSelections([selection]); setPublishGitlab(publish); setScopeOpen(false); restoreComposerFocus(); }} />}
     {workspaceOpen&&active&&<WorkspaceDialog conversationId={active.id} onClose={()=>setWorkspaceOpen(false)}/>}
-    {assistantOpen&&active&&<AssistantDialog key={active.id} conversationId={active.id} admin={!!user?.is_global_admin} value={assistantSelection} onClose={()=>{setAssistantOpen(false);editor.current?.focus();}} onSelect={value=>{setAssistantSelection(value);setAssistantOpen(false);editor.current?.focus();}}/>}
+    {assistantOpen&&active&&<AssistantDialog key={active.id} conversationId={active.id} admin={!!user?.is_global_admin} value={assistantSelection} onClose={()=>{setAssistantOpen(false);restoreComposerFocus();}} onSelect={value=>{setAssistantSelection(value);setAssistantOpen(false);restoreComposerFocus();}}/>}
     {contextOpen && active && <ContextDialog key={active.id} conversationId={active.id} connectionId={selected} model={model} content={draft}
       onClose={() => setContextOpen(false)} onSaved={setContextReport} />}
     <ConnectionsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} connections={connections} selected={selected} model={model} disabled={busy}
       onSelect={(id, nextModel) => { setSelected(id); setModel(nextModel); }} />
-    <dialog ref={actionDialog} className="cw-dialog cw-action-dialog" aria-labelledby="conversation-action-title" onCancel={() => setAction(null)} onClose={() => setAction(null)}>
+    <dialog ref={actionDialog} className="cw-dialog cw-action-dialog" aria-labelledby="conversation-action-title" {...dismissAction} onClose={closeAction}>
       <form onSubmit={(event) => void submitAction(event)}><h2 id="conversation-action-title">{action?.type === "delete" ? "이 대화를 삭제할까요?" : "대화 이름 변경"}</h2>
         {action?.type === "delete" ? <p>대화와 메시지가 함께 삭제됩니다. 이 작업은 되돌릴 수 없습니다.</p> : <input ref={titleEditor} autoFocus aria-label="대화 이름" value={title} onChange={(event) => setTitle(event.target.value)} required maxLength={120}
           onKeyDown={(event) => { if (event.key === "Enter" && (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)) event.preventDefault(); }} />}
         {error && <p className="cw-inline-error" role="alert">{error}</p>}
-        <div className="cw-action-buttons"><button type="button" className="cw-small-button" disabled={actionBusy} onClick={() => setAction(null)}>취소</button>
+        <div className="cw-action-buttons"><button type="button" className="cw-small-button" disabled={actionBusy} onClick={closeAction}>취소</button>
           <button className={`cw-primary-button ${action?.type === "delete" ? "cw-delete-button" : ""}`} disabled={actionBusy || action?.type === "rename" && !title.trim()}>{actionBusy ? "처리 중…" : action?.type === "delete" ? "삭제" : "저장"}</button></div></form>
     </dialog>
   </div>;

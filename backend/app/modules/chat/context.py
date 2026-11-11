@@ -26,7 +26,7 @@ def completed_history(rows):
     return history
 
 
-def plan(db, conversation_id, connection, model, content='', *, retry=False, strict=True, extra_context=''):
+def plan(db, conversation_id, connection, model, content='', *, retry=False, strict=True, extra_context='', extra_input_tokens=0):
     profile = connection.profile(model)
     rows = list(db.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.position)))
     history = completed_history(rows[:-1] if retry else rows)
@@ -45,7 +45,7 @@ def plan(db, conversation_id, connection, model, content='', *, retry=False, str
     question_text = content + ('\n\n'+extra_context if extra_context else '')
     question = [{'role': 'user', 'content': question_text}] if question_text else []
     budget = profile.context_window - profile.max_output_tokens - 256
-    required = estimate(summary + question)
+    required = estimate(summary + question) + extra_input_tokens
     too_large = required > budget
     if too_large and strict:
         raise HTTPException(422, '현재 질문과 요약 메모가 모델의 입력 문맥 예산을 초과합니다. 내용을 줄이거나 더 큰 문맥의 모델을 선택하세요.')
@@ -58,8 +58,9 @@ def plan(db, conversation_id, connection, model, content='', *, retry=False, str
         used += cost
     messages = summary + [item for pair in included for item in pair] + question
     report = {'context_window': profile.context_window, 'input_budget': budget,
-        'reserved_output_tokens': profile.max_output_tokens, 'estimated_input_tokens': estimate(messages),
-        'estimate_method': 'utf8_bytes_plus_template_allowance', 'is_estimate': True,
+        'reserved_output_tokens': profile.max_output_tokens, 'estimated_input_tokens': used,
+        'estimate_method': 'utf8_bytes_plus_template_and_image_allowance' if extra_input_tokens else 'utf8_bytes_plus_template_allowance',
+        'is_estimate': True,
         'included_turns': len(included), 'omitted_turns': len(available) - len(included),
         'summarized_turns': len(covered), 'summary_included': bool(summary), 'too_large': too_large,
         'summary': note.summary if note else '', 'through_position': note.through_position if note else -1,

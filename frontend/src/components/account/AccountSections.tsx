@@ -5,6 +5,7 @@ import { GoogleSignInButton } from "@/components/auth/GoogleSignInButton";
 import { UserAvatar } from "@/components/shared/UserAvatar";
 import { normalizeAvatarUrl, avatarProfileValue } from "@/lib/avatar-url";
 import { api } from "@/lib/api";
+import { getAuthSessionVersion } from "@/lib/auth";
 import type { AuthUser, AuthMessage, AccountSession } from "@/types/auth";
 const fieldClass = "account-input";
 function formatDate(timestamp: number | null) {
@@ -248,7 +249,7 @@ export function ProfileSection({
             className={`${fieldClass} cursor-not-allowed bg-[var(--surface-soft)] text-[var(--fg-muted)]`}
           />
           <span className="block text-xs font-normal leading-5 text-[var(--fg-subtle)]">
-            이메일은 설정의 계정 및 보안에서 변경할 수 있습니다.
+            로그인 이메일은 가입 후 변경할 수 없습니다.
           </span>
         </label>
         <div className="text-xs leading-5 text-[var(--fg-subtle)] sm:col-span-2">
@@ -266,139 +267,6 @@ export function ProfileSection({
   );
 }
 
-export function EmailChangeSection({
-  user,
-  onSuccess,
-  onError,
-}: {
-  user: AuthUser;
-  onSuccess: (message: string) => void;
-  onError: (error: unknown, fallback: string) => void;
-}) {
-  const [newEmail, setNewEmail] = useState("");
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [saving, setSaving] = useState(false);
-  const googleConnected = user.connected_providers.includes("google");
-
-  const requestChange = async (
-    reauthentication:
-      | { current_password: string }
-      | { google_credential: string },
-  ) => {
-    const normalizedEmail = newEmail.trim().toLowerCase();
-    if (!normalizedEmail) {
-      onError(new Error("새 이메일을 입력해주세요."), "");
-      return;
-    }
-    if (normalizedEmail === user.email) {
-      onError(new Error("현재 이메일과 다른 주소를 입력해주세요."), "");
-      return;
-    }
-
-    setSaving(true);
-    try {
-      const response = await api.post<AuthMessage>(
-        "/users/me/email-change/request",
-        {
-          new_email: normalizedEmail,
-          ...reauthentication,
-        },
-      );
-      setNewEmail("");
-      setCurrentPassword("");
-      onSuccess(response.data.message);
-    } catch (caught) {
-      onError(caught, "이메일 변경 확인 메일을 보내지 못했습니다.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const submitWithPassword = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    await requestChange({ current_password: currentPassword });
-  };
-
-  return (
-    <Card
-      title="로그인 이메일 변경"
-      description="현재 계정으로 다시 인증한 뒤 새 이메일의 확인 링크를 열어야 변경이 완료됩니다."
-    >
-      <div className="space-y-4">
-        <label className="block space-y-2 text-sm font-medium">
-          새 이메일
-          <input
-            type="email"
-            value={newEmail}
-            onChange={(event) => setNewEmail(event.target.value)}
-            autoComplete="email"
-            className={fieldClass}
-            required
-          />
-        </label>
-
-        {user.has_password && (
-          <form
-            onSubmit={submitWithPassword}
-            className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]"
-          >
-            <label className="space-y-2 text-sm font-medium">
-              현재 비밀번호로 확인
-              <input
-                type="password"
-                value={currentPassword}
-                onChange={(event) => setCurrentPassword(event.target.value)}
-                autoComplete="current-password"
-                className={fieldClass}
-                required
-              />
-            </label>
-            <button
-              disabled={saving || !newEmail.trim() || !currentPassword}
-              className="h-11 self-end rounded-[var(--radius-lg)] bg-[var(--primary)] px-4 text-sm font-semibold text-[var(--on-primary)] disabled:opacity-60"
-            >
-              {saving ? "전송 중..." : "확인 메일 보내기"}
-            </button>
-          </form>
-        )}
-
-        {googleConnected && (
-          <div className="space-y-2">
-            {user.has_password && (
-              <p className="text-center text-xs text-[var(--fg-subtle)]">
-                또는
-              </p>
-            )}
-            <p className="text-sm font-medium">연결된 Google 계정으로 확인</p>
-            <div
-              className={
-                saving || !newEmail.trim()
-                  ? "pointer-events-none opacity-50"
-                  : ""
-              }
-            >
-              <GoogleSignInButton
-                onCredential={(credential) =>
-                  requestChange({ google_credential: credential })
-                }
-                onError={(caught) =>
-                  onError(caught, "Google 재인증을 시작하지 못했습니다.")
-                }
-              />
-            </div>
-          </div>
-        )}
-
-        <p className="rounded-[var(--radius-lg)] bg-[var(--surface-soft)] px-3 py-2 text-xs leading-5 text-[var(--fg-muted)]">
-          확인 링크를 열기 전까지 기존 이메일로 로그인할 수 있습니다. 변경이
-          완료되면 모든 기기의 로그인 세션이 자동으로
-          해제됩니다.
-        </p>
-      </div>
-    </Card>
-  );
-}
-
 export function EmailVerificationSection({
   user,
   onSuccess,
@@ -408,31 +276,33 @@ export function EmailVerificationSection({
   onSuccess: (message: string) => void;
   onError: (error: unknown, fallback: string) => void;
 }) {
-  if (!user.email_verification_required || user.is_email_verified) return null;
+  const needsVerification = user.email_verification_required && !user.is_email_verified;
   return (
     <Card
-      title="이메일 인증"
-      description="현재 이메일을 인증해야 다음 로그인부터 계정을 사용할 수 있습니다."
+      title="로그인 이메일"
+      description="로그인 이메일은 가입 후 변경할 수 없습니다."
     >
-      <button
-        onClick={async () => {
-          try {
-            const response = await api.post<AuthMessage>(
-              "/auth/email-verification/request",
-            );
-            onSuccess(response.data.message);
-          } catch (caught) {
-            onError(caught, "인증 안내를 보내지 못했습니다.");
-          }
-        }}
-        className="rounded-[var(--radius-lg)] border border-[var(--border)] px-4 py-2.5 text-sm font-semibold"
-      >
-        인증 안내 다시 받기
-      </button>
+      <p className="break-all text-sm">{user.email}</p>
+      {needsVerification && (
+        <button
+          onClick={async () => {
+            try {
+              const response = await api.post<AuthMessage>(
+                "/auth/email-verification/request",
+              );
+              onSuccess(response.data.message);
+            } catch (caught) {
+              onError(caught, "인증 안내를 보내지 못했습니다.");
+            }
+          }}
+          className="mt-3 rounded-[var(--radius-lg)] border border-[var(--border)] px-4 py-2.5 text-sm font-semibold"
+        >
+          인증 안내 다시 받기
+        </button>
+      )}
     </Card>
   );
 }
-
 
 export function OAuthConnectionSection({
   user,
@@ -520,7 +390,7 @@ export function PasswordSection({
   onError,
 }: {
   hasPassword: boolean;
-  onSuccess: () => Promise<void>;
+  onSuccess: (sessionVersion: number) => Promise<void>;
   onError: (error: unknown, fallback: string) => void;
 }) {
   const [currentPassword, setCurrentPassword] = useState("");
@@ -535,6 +405,7 @@ export function PasswordSection({
       return;
     }
     setSaving(true);
+    const sessionVersion = getAuthSessionVersion();
     try {
       await api.post(
         hasPassword ? "/users/me/password" : "/users/me/password/set",
@@ -542,7 +413,7 @@ export function PasswordSection({
           ? { current_password: currentPassword, new_password: newPassword }
           : { new_password: newPassword },
       );
-      await onSuccess();
+      await onSuccess(sessionVersion);
     } catch (caught) {
       onError(caught, "비밀번호를 변경하지 못했습니다.");
     } finally {

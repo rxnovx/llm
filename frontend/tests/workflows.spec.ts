@@ -39,17 +39,70 @@ test('질문 분기·답변 버전 비교·실제 파일 다운로드와 프로�
   await expect(page.getByLabel('메시지',{exact:true})).toHaveValue('수정한 질문');expect(page.url()).not.toBe(before);
 });
 
-test('여러 첨부의 색인 완료와 본문 검색이 실제 저장된 대화로 이동한다',async({page},info)=>{
-  // Same backend flows are verified by HTTP smoke; this scenario covers the native UI events.
+test('붙여넣거나 놓은 파일을 미리 보고 전송할 때 첨부한다',async({page},info)=>{
   await page.goto('/user/signup');const username=`uploads_${info.project.name}_${Date.now()}`;
   for(const [label,value] of [['표시 이름','첨부 사용자'],['사용자명',username],['이메일',`${username}@example.com`],['비밀번호','WorkflowsBrowserPass123!'],['비밀번호 확인','WorkflowsBrowserPass123!']])await page.getByLabel(label,{exact:true}).fill(value);
   await page.getByRole('checkbox').check();await page.getByRole('button',{name:'회원가입',exact:true}).click();
+  await expect(page.getByRole('heading',{name:'무엇을 함께 해볼까요?'})).toBeVisible();
+  const requests: string[] = [];
+  let sending = false;
+  page.on('request', request => {
+    const path = new URL(request.url()).pathname;
+    if (!sending && request.method() === 'POST' &&
+      /^\/api\/(chat\/conversations|workflows\/uploads|knowledge\/documents)(\/|$)/.test(path)) requests.push(path);
+  });
+
+  const previews = page.getByRole('list', {name:'첨부 미리보기'});
+  const editor = page.getByLabel('메시지', {exact:true});
+  const imagePasted = await editor.evaluate(async element => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 12;
+    canvas.height = 12;
+    const image = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!image) throw new Error('테스트 이미지를 만들지 못했습니다.');
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([image], 'clipboard.png', {type:'image/png'}));
+    const paste = new ClipboardEvent('paste', {clipboardData:transfer, bubbles:true, cancelable:true});
+    element.dispatchEvent(paste);
+    return paste.defaultPrevented;
+  });
+  expect(imagePasted).toBe(true);
+  const thumbnail = previews.getByRole('img', {name:'clipboard.png'});
+  await expect(thumbnail).toBeVisible();
+  await expect(thumbnail).toHaveJSProperty('naturalWidth', 12);
+  await previews.getByRole('button', {name:'clipboard.png 제거'}).click();
+  await expect(previews).toHaveCount(0);
+
+  const chooser = page.waitForEvent('filechooser');
   await page.getByRole('button',{name:'첨부',exact:true}).click();
-  await page.locator('.cw-composer input[type=file]').setInputFiles([{name:'one.md',mimeType:'text/markdown',buffer:Buffer.from('첫 번째 문서입니다.')},{name:'two.md',mimeType:'text/markdown',buffer:Buffer.from('두 번째 문서입니다.')}]);
-  await expect(page.locator('.cw-upload-queue li').filter({hasText:'검색 준비됨'})).toHaveCount(2,{timeout:30000});
-  await expect(page.locator('.cw-assistant-selection')).toContainText('첨부 2');
-  await page.getByLabel('메시지',{exact:true}).fill('본문에서 찾을 고유 문구');await page.getByRole('button',{name:'메시지 전송',exact:true}).click();
+  await (await chooser).setFiles({name:'one.md',mimeType:'text/markdown',buffer:Buffer.from('첫 번째 문서입니다.')});
+  const dropped = await page.evaluateHandle(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['두 번째 문서입니다.'], 'two.md', {type:'text/markdown'}));
+    transfer.items.add(new File(['제거할 문서입니다.'], 'remove.md', {type:'text/markdown'}));
+    return transfer;
+  });
+  await page.locator('.cw-main').dispatchEvent('drop', {dataTransfer:dropped});
+  await dropped.dispose();
+  await expect(previews.getByRole('listitem')).toHaveCount(3);
+  await previews.getByRole('button', {name:'remove.md 제거'}).click();
+  await expect(previews.getByRole('listitem')).toHaveCount(2);
+  await expect(previews).toContainText('one.md');
+  await expect(previews).toContainText('two.md');
+  await editor.fill('본문에서 찾을 고유 문구');
+  expect(requests).toEqual([]);
+  expect(new URL(page.url()).searchParams.has('chat')).toBe(false);
+
+  const turn = page.waitForRequest(request => request.method() === 'POST' &&
+    /^\/api\/chat\/conversations\/[^/]+\/messages$/.test(new URL(request.url()).pathname), {timeout:30000});
+  sending = true;
+  await page.getByRole('button',{name:'메시지 전송',exact:true}).click();
+  const payload = (await turn).postDataJSON();
+  expect(payload.assistant.document_ids).toHaveLength(2);
   await expect(page.getByRole('button',{name:'답변 복사',exact:true})).toBeVisible();
+  await expect(previews).toHaveCount(0);
+  const sidebar = page.getByRole('button', {name:'사이드바 열기'});
+  if (await sidebar.isVisible()) await sidebar.click();
   await page.getByRole('button',{name:'대화 찾기'}).click();await page.getByLabel('대화 제목·본문 검색').fill('고유 문구');
   await expect(page.locator('.cw-search-excerpt')).toContainText('고유 문구');
 });

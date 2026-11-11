@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | `simple-auth-platform/app/core/security.py` | `backend/app/core/security.py` | scrypt, JWT 검증, 해시 유지; PAT 생성 제외 |
 | `simple-auth-platform/app/modules/auth/` | `backend/app/modules/auth/` | 계정 모델·인증·회전·메일·세션·속도 제한·감사 기록 추출 |
-| `simple-auth-platform/app/modules/users/router.py` | `backend/app/modules/users/router.py` | 프로필·비밀번호·세션·Google·이메일 변경 API 유지 |
+| `simple-auth-platform/app/modules/users/router.py` | `backend/app/modules/users/router.py` | 프로필·비밀번호·세션·Google API 유지 |
 | `myfront/src/components/auth/AuthCard.tsx` | `frontend/src/components/auth/AuthCard.tsx` | 공통 폼 디자인 유지, 서비스 표시를 LLM으로 변경 |
 | `myfront/src/components/user/UserAccountPage.tsx` | `frontend/src/components/account/AccountSections.tsx` | 프로필·사진·계정 보안 폼 추출, 앱별 설정 제외 |
 | `myfront/src/lib/auth.ts` | `frontend/src/lib/auth.ts` | 메모리 토큰·갱신 단일화·탭 통신 유지, 체험·관리자 대리 접속 제외 |

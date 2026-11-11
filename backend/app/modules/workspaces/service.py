@@ -39,7 +39,7 @@ def authorize(db,row):
             or not user or not user.is_active or user.registration_status!='approved'):
         raise HTTPException(409,'GitLab 연결이나 대화가 변경되었습니다. 작업공간을 다시 연결하세요.')
     from app.modules.integrations.config import instance
-    if instance(account.provider_id).fingerprint()!=account.provider_fingerprint:
+    if instance(account.provider_id).granted_scopes(account.provider_fingerprint) is None:
         raise HTTPException(409,'GitLab 서버 등록이 변경되었습니다. 계정을 다시 연결하세요.')
     return account
 
@@ -51,7 +51,9 @@ async def permission(bind,row):
     except GitlabError as error:raise HTTPException(403,str(error)) from None
 
 
-async def ensure(bind,user_id,conversation_id,selection):
+async def ensure(bind,user_id,conversation_id,selection,*,expected_commit=None,expected_generation=None):
+    if selection.mode not in {'workspace', 'execute'} or selection.merge_request and not expected_commit:
+        raise HTTPException(422, 'MR 작업공간은 채팅에서 선택하세요.' if selection.merge_request else '프로젝트 분석 또는 실행 모드를 선택하세요.')
     if not client.enabled():raise HTTPException(503,'운영자가 Terminal MCP 서버를 연결해야 합니다.')
     execute=selection.mode=='execute'
     if execute and not get_settings().terminal_execution_enabled:
@@ -69,6 +71,10 @@ async def ensure(bind,user_id,conversation_id,selection):
                 Workspace.connection_id==str(selection.connection_id),Workspace.project_id==selection.project_id,
                 Workspace.ref==selection.ref,Workspace.allow_execution==execute,Workspace.status=='ready').order_by(Workspace.created_at.desc()))
         if row:authorize(db,row)
+        if row and expected_commit and json.loads(row.source_json).get('commit') != expected_commit:
+            row = None  # Keep the previous copy, but check out the current MR head.
+        if row and expected_generation is not None and row.connection_generation != expected_generation:
+            raise HTTPException(409, 'GitLab 계정 연결이 변경되었습니다. MR을 다시 선택하세요.')
     if row:
         await permission(bind,row)
         try:
@@ -81,16 +87,28 @@ async def ensure(bind,user_id,conversation_id,selection):
             with Session(bind) as db:
                 db.execute(update(Workspace).where(Workspace.id==row.id).values(status='closed'));db.commit()
             selection.workspace_id=None
-            return await ensure(bind,user_id,conversation_id,selection)
+            return await ensure(bind,user_id,conversation_id,selection,
+                expected_commit=expected_commit,expected_generation=expected_generation)
     upstream=GitlabClient(bind,user_id,selection.connection_id)
+    upstream.generation=expected_generation
     try:
-        project=await upstream.get(f'/projects/{selection.project_id}')
-        commit=await upstream.get(f'/projects/{selection.project_id}/repository/commits/{quote(selection.ref,safe="")}')
+        path=f'/projects/{selection.project_id}'
+        project=await upstream.get(path)
+        ref=quote(selection.ref,safe='')
+        if expected_commit:
+            branch=await upstream.get(path + f'/repository/branches/{ref}')
+            if branch.get('name') != selection.ref:
+                raise HTTPException(409, 'MR의 소스 브랜치를 확인할 수 없습니다.')
+            commit=branch['commit']
+        else:
+            commit=await upstream.get(path + f'/repository/commits/{ref}')
         namespace=validate_path(project['path_with_namespace'])
         import re
         if not re.fullmatch('[a-fA-F0-9]{40,64}',commit['id']):raise ValueError()
     except GitlabError as error:raise HTTPException(502,str(error)) from None
-    except (ValueError,KeyError,TypeError):raise HTTPException(502,'GitLab 저장소 응답 형식을 확인하세요.') from None
+    except (ValueError,KeyError,TypeError,AttributeError):raise HTTPException(502,'GitLab 저장소 응답 형식을 확인하세요.') from None
+    if expected_commit and (project.get('id') != selection.project_id or commit['id'] != expected_commit):
+        raise HTTPException(409, 'MR 소스 브랜치가 변경되었습니다. 최신 MR에서 다시 실행하세요.')
     source={'project':namespace,'commit':commit['id'],'base_url':upstream.provider.base_url,'project_id':selection.project_id}
     with Session(bind,expire_on_commit=False) as db:
         row=Workspace(user_id=user_id,conversation_id=conversation_id,connection_id=str(selection.connection_id),

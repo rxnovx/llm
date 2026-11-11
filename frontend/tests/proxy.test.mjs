@@ -155,6 +155,27 @@ test("proxy routes cannot reach the other application's API", async () => {
   assert.equal((await fetch(`${origin}/api/auth/admin`)).status, 404);
   assert.equal((await fetch(`${origin}/api/auth/config`, { method: "POST", headers: csrf })).status, 404);
 });
+test("account proxy no longer forwards requests to change the login email", async () => {
+  for (const action of ["request", "confirm"]) {
+    assert.equal((await fetch(`${origin}/api/account/users/me/email-change/${action}`, {
+      method: "POST", headers: { ...csrf, authorization: "Bearer test-access-token" },
+      body: "{}",
+    })).status, 404);
+  }
+});
+
+test("GitLab MR resolution forwards the caller's authenticated selection and applies the origin check", async () => {
+  mode = "tokens";
+  const url = `${origin}/api/apps/gitlab/merge-request/resolve`;
+  const body = JSON.stringify({ reference: "https://gitlab.example/team/app/-/merge_requests/27" });
+  const headers = { ...csrf, "content-type": "application/json", authorization: "Bearer test-access-token" };
+  assert.equal((await fetch(url, { method: "POST", headers: { ...headers, origin: "https://other.example" }, body })).status, 403);
+  assert.equal((await fetch(url, { method: "POST", headers, body })).status, 200);
+  assert.equal(received.path, "/apps/gitlab/merge-request/resolve");
+  assert.equal(received.headers.authorization, "Bearer test-access-token");
+  assert.equal(received.body, body);
+  assert.equal((await fetch(url)).status, 404);
+});
 
 test("oversized request bodies are rejected before reaching the API", async () => {
   const response = await fetch(`${origin}/api/account/users/me/avatar`, { method: "POST", headers: csrf,
@@ -243,6 +264,29 @@ test("connection edits forward JSON and authorization, enforce CSRF and bound th
   const before = received;
   assert.equal((await fetch(`${origin}/api/admin/connections`,{method:"POST",headers:csrf,body:"x".repeat(256*1024+1)})).status,413);
   assert.equal(received,before);
+});
+
+test("image diagnostics proxy forwards only the status read and same-origin probe", async () => {
+  mode = "tokens";
+  const status = `${origin}/api/admin/images`;
+  const probe = `${status}/probe`;
+  const authorization = "Bearer operator";
+  assert.equal((await fetch(status, { headers: { authorization, cookie: "private=value" } })).status, 200);
+  assert.equal(received.path, "/admin/images");
+  assert.equal(received.headers.authorization, authorization);
+  assert.equal(received.headers.cookie, undefined);
+  assert.equal((await fetch(probe, { method: "POST", body: '{"mode":"edit"}' })).status, 403);
+  assert.equal((await fetch(probe, { method: "POST", headers: { ...csrf, origin: "https://elsewhere.example" } })).status, 403);
+  assert.equal((await fetch(probe, { method: "POST", headers: { ...csrf, authorization }, body: '{"mode":"edit"}' })).status, 200);
+  assert.equal(received.path, "/admin/images/probe");
+  assert.deepEqual(JSON.parse(received.body), { mode: "edit" });
+  const cancel = "/admin/images/probe/32847bb8-028d-4824-a8bc-a063f1ae08ff/cancel";
+  assert.equal((await fetch(`${origin}/api${cancel}`, { method: "POST" })).status, 403);
+  assert.equal((await fetch(`${origin}/api${cancel}`, { method: "POST", headers: { ...csrf, authorization } })).status, 200);
+  assert.equal(received.path, cancel);
+  assert.equal((await fetch(`${probe}/invalid-id/cancel`, { method: "POST", headers: csrf })).status, 404);
+  assert.equal((await fetch(probe)).status, 404);
+  assert.equal((await fetch(status, { method: "PATCH", headers: csrf })).status, 404);
 });
 
 test("context preview and summary edits keep chat route and CSRF boundaries", async () => {

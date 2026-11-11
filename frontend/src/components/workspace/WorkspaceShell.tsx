@@ -1,8 +1,10 @@
 "use client";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { ModalNavigationContext } from "@/components/auth/modal-navigation";
 import { ChatWorkspace } from "@/components/chat/ChatWorkspace";
 import { Icon } from "@/components/chat/Icons";
+import { useDialogDismiss } from "@/components/shared/useDialogDismiss";
 import { modalContentScope, workspaceModal, workspaceReturnUrl, WORKSPACE_LOCATION_EVENT } from "@/lib/workspace-navigation";
 import { useAuthStore } from "@/stores/authStore";
 import "./workspace-shell.css";
@@ -20,19 +22,22 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
 function RouteModal({ children, kind, title, route, identity }: { children: ReactNode; kind: string; title: string; route: string; identity: string }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
-  const backdropDown = useRef(false);
+  const closing = useRef(false);
   const router = useRouter();
-  const close = () => router.replace(workspaceReturnUrl(window.location.search), { scroll: false });
+  const close = () => {
+    closing.current = true;
+    router.replace(workspaceReturnUrl(window.location.search), { scroll: false });
+  };
+  const dismiss = useDialogDismiss(close);
+  useLayoutEffect(() => { closing.current = false; }, [route]);
   useEffect(() => {
     const element = dialog.current!;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     element.showModal();
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     return () => {
-      element.close(); document.body.style.overflow = previousOverflow;
+      element.close();
       const visible = (target: HTMLElement | null) => {
-        if (!target?.isConnected || target.closest("dialog")) return false;
+        if (!target?.isConnected || target === document.body || target.closest("dialog, [inert]")) return false;
         const box = target.getBoundingClientRect();
         return box.width > 0 && box.height > 0 && box.right > 0 && box.left < window.innerWidth && box.bottom > 0 && box.top < window.innerHeight;
       };
@@ -43,15 +48,19 @@ function RouteModal({ children, kind, title, route, identity }: { children: Reac
   }, []);
   useEffect(() => { heading.current?.focus({ preventScroll: true }); }, [route, identity]);
   return <dialog ref={dialog} className={`app-modal app-modal-${kind}`} aria-modal="true" aria-labelledby="app-modal-heading"
-    data-workspace-modal={kind} onCancel={(event) => { event.preventDefault(); close(); }}
-    onPointerDown={(event) => { const box = event.currentTarget.getBoundingClientRect(); backdropDown.current = event.target === event.currentTarget &&
-      (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom); }}
-    onClick={(event) => { if (backdropDown.current && event.target === event.currentTarget) {
-      const box = event.currentTarget.getBoundingClientRect();
-      if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) close();
-    } }}>
+    data-workspace-modal={kind} {...dismiss}>
     <header className="app-modal-header"><h1 ref={heading} id="app-modal-heading" tabIndex={-1}>{title}</h1>
       <button type="button" className="app-modal-close" aria-label={`${title} 닫기`} onClick={close}><Icon name="close" size={19} /></button></header>
-    <div className="app-modal-body" key={modalContentScope(kind, identity)}>{children}</div>
+    <RouteModalBody key={route} route={route} scope={modalContentScope(kind, identity)} closing={closing}>{children}</RouteModalBody>
   </dialog>;
+}
+
+function RouteModalBody({ children, route, scope, closing }: {
+  children: ReactNode; route: string; scope: string; closing: RefObject<boolean>;
+}) {
+  const body = useRef<HTMLDivElement>(null);
+  const canNavigate = () => body.current !== null && !closing.current && window.location.pathname === route;
+  return <ModalNavigationContext.Provider value={canNavigate}>
+    <div className="app-modal-body" ref={body} key={scope}>{children}</div>
+  </ModalNavigationContext.Provider>;
 }

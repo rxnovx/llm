@@ -1,10 +1,18 @@
 import { authenticatedFetch } from "./authenticated-fetch";
 
-export type AppConnection = { id: string; app: "gitlab"; provider_id: string; username: string; display_name: string; status: "connected" | "needs_reconnect" };
-export type AppProvider = { id: string; name: string; base_url: string; ready: boolean; reason: string | null };
+export type AppConnection = { id: string; app: "gitlab"; provider_id: string; username: string; display_name: string; status: "connected" | "needs_reconnect"; can_publish?: boolean };
+export type AppProvider = { id: string; name: string; base_url: string; ready: boolean; reason: string | null; publish_enabled?: boolean };
 export type AppCatalog = { apps: { id: "gitlab"; name: string; description: string; providers: AppProvider[]; connections: AppConnection[] }[] };
-export type GitlabSelection = { app: "gitlab"; connection_id: string; project_id: number; ref: string; paths: string[]; mode?: "files"|"workspace"|"execute"; workspace_id?: string };
+export type GitlabSelection = { app: "gitlab"; connection_id: string; project_id: number; ref: string; paths: string[];
+  mode?: "files" | "workspace" | "execute" | "merge_request"; workspace_id?: string; merge_request?: { project_id: number; iid: number } };
+export type MergeRequestSummary = {
+  iid: number; project: string; url: string; title: string; state: string; source_branch: string; target_branch: string; editable: boolean;
+};
+export type ResolvedMergeRequest = { selection: GitlabSelection; merge_request: MergeRequestSummary };
 export type GitlabSource = { id: string; app: "gitlab"; project: string; path: string; start_line: number; end_line: number; commit: string; url: string; working_copy?: boolean };
+export function gitlabMergeRequestLink(text: string): string {
+  return text.match(/https?:\/\/[^\s<>"\x60]+\/-\/merge_requests\/[1-9][0-9]{0,11}(?:\/(?:diffs|commits|pipelines))?\/?(?![\w/])/)?.[0] ?? "";
+}
 export const APPS_CHANGED = "llm:apps-changed";
 export const OAUTH_LEAVING = "llm:oauth-leaving";
 const DRAFT_KEY = "llm:oauth-draft";
@@ -43,13 +51,13 @@ export function oauthReturnPath(owner: string | undefined) {
   } catch { /* Storage may be unavailable. */ }
   return "/user/settings/apps";
 }
-export async function connectGitlab(provider: string) {
+export async function connectGitlab(provider: string, publish = false) {
   const popup = window.open("about:blank", "_blank", "popup,width=620,height=780");
   if (popup) popup.opener = null;
   try {
     const chat = new URLSearchParams(window.location.search).get("chat");
     const data = await appsJson<{ authorize_url: string }>(`/gitlab/${encodeURIComponent(provider)}/authorize`, {
-      method: "POST", body: JSON.stringify({ chat_id: chat, popup: !!popup }),
+      method: "POST", body: JSON.stringify({ chat_id: chat, popup: !!popup, ...(publish ? { publish } : {}) }),
     });
     if (popup) {
       if (popup.closed) throw new Error("인증 창이 닫혔습니다. 다시 연결하세요.");

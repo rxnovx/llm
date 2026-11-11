@@ -1,5 +1,6 @@
 const CHAT_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 export const WORKSPACE_LOCATION_EVENT = "llm:workspace-location";
+const LOGIN_RETURN_PATHS = new Set(["/", "/admin", "/user/profile", "/user/profile/edit", "/user/settings", "/user/settings/apps"]);
 const routes: Record<string, { kind: "auth" | "settings" | "admin"; title: string }> = {
   "/login": { kind: "auth", title: "로그인" },
   "/user/signup": { kind: "auth", title: "계정 만들기" },
@@ -38,6 +39,15 @@ export function workspaceHref(href: string, search: string) {
         && !/[\\\r\n]/.test(next)) url.searchParams.set("next", next);
   }
   return url.pathname + url.search + url.hash;
+}
+export function getSafeNextPath(value: string | null | undefined) {
+  if (!value || !value.startsWith("/") || value.startsWith("//") || /[\\\r\n]/.test(value)) return "/";
+  const url = new URL(value, "https://llm.invalid");
+  return url.origin === "https://llm.invalid" && LOGIN_RETURN_PATHS.has(url.pathname) ? url.pathname + url.search : "/";
+}
+export function loginReturnUrl(search: string) {
+  const next = getSafeNextPath(new URLSearchParams(search).get("next"));
+  return next === "/" || next.startsWith("/?") ? "/" : workspaceHref(next, search);
 }
 export function conversationLocation(pathname: string, search: string, id: string | null) {
   const query = new URLSearchParams(search);

@@ -1,2 +1,2 @@
--r requirements-gitlab.txt
-mcp==2.3.0
+# 기존 설치 명령과의 호환용입니다.
+-r requirements.txt

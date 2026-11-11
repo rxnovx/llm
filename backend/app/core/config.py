@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = Field(120, ge=5, le=600)
     llm_max_tokens: int = Field(2048, ge=64, le=16384)
     llm_provider_keys_json: SecretStr = SecretStr('{}')
-    llm_user_concurrency: int = Field(1, ge=1, le=20)
+    llm_user_concurrency: int = Field(2, ge=1, le=20)
     llm_user_queue_limit: int = Field(2, ge=1, le=20)
     llm_queue_capacity: int = Field(50, ge=1, le=500)
     llm_queue_wait_seconds: int = Field(30, ge=1, le=300)
@@ -74,8 +74,21 @@ class Settings(BaseSettings):
     assistant_max_retrieval_rounds: int = Field(2, ge=1, le=3)
 
     artifact_pdf_font_path: str = ''
+    image_generation_url: str = ''
+    image_generation_model: str = Field('', max_length=200)
+    image_generation_api_key: SecretStr = SecretStr('')
+    image_generation_timeout_seconds: int = Field(180, ge=5, le=600)
+    image_edit_url: str = ''
+    image_edit_model: str = Field('', max_length=200)
+    image_edit_api_key: SecretStr = SecretStr('')
+    image_max_concurrent: int = Field(1, ge=1, le=64)
+    image_user_concurrency: int = Field(1, ge=1, le=64)
+    image_queue_capacity: int = Field(20, ge=1, le=500)
+    image_queue_wait_seconds: int = Field(120, ge=1, le=600)
     knowledge_enabled: bool = True
     knowledge_worker_enabled: bool = True
+    knowledge_ocr_enabled: bool = True
+    knowledge_ocr_languages: str = Field("eng", pattern=r"^[a-zA-Z0-9_]+(?:\+[a-zA-Z0-9_]+){0,4}$", max_length=80)
     knowledge_max_upload_bytes: int = Field(10*1024*1024,ge=1024,le=20*1024*1024)
     knowledge_max_documents: int = Field(100,ge=1,le=1000)
     knowledge_max_user_bytes: int = Field(64*1024*1024,ge=1024*1024,le=1024*1024*1024)

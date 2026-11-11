@@ -5,6 +5,9 @@ import json
 from pathlib import Path
 import re
 import sys
+import time
+
+from . import ocr
 import zipfile
 
 SUPPORTED={'.txt','.md','.markdown','.csv','.tsv','.json','.html','.htm','.pdf','.docx','.xlsx'}
@@ -16,11 +19,16 @@ def archive(raw):
         if len(entries)>5000 or sum(e.file_size for e in entries)>40*1024*1024:
             raise ValueError('압축 문서의 내용이 너무 큽니다.')
 
-def extract(raw,filename):
+def extract(raw, filename, *, ocr_languages=None):
     suffix=Path(filename).suffix.lower()
-    if suffix not in SUPPORTED:raise ValueError('지원하지 않는 파일 형식입니다.')
-    parts=[]
-    if suffix=='.pdf':
+    if suffix not in SUPPORTED and suffix not in ocr.IMAGE_FORMATS:
+        raise ValueError('지원하지 않는 파일 형식입니다.')
+    parts = []
+    if suffix in ocr.IMAGE_FORMATS:
+        if not ocr_languages:
+            raise ValueError('이미지 OCR을 활성화하고 Tesseract를 설치하세요.')
+        parts.append(('이미지 · OCR', ocr.image_text(raw, ocr_languages, time.monotonic() + 18)))
+    elif suffix=='.pdf':
         from pypdf import PdfReader
         reader=PdfReader(io.BytesIO(raw),strict=False)
         if reader.is_encrypted:raise ValueError('암호가 설정된 PDF는 지원하지 않습니다.')
@@ -28,6 +36,11 @@ def extract(raw,filename):
         for i,page in enumerate(reader.pages):
             parts.append((f'{i+1}쪽',page.extract_text() or ''))
             if sum(len(t) for _,t in parts)>MAX_TEXT:raise ValueError('추출된 문서가 너무 큽니다.')
+        if ocr_languages and ocr.installed():
+            scanned_pages = [i + 1 for i, (_, value) in enumerate(parts) if not value.strip() and reader.pages[i].images]
+            for page, text in ocr.pdf_text(raw, scanned_pages, ocr_languages) if scanned_pages else ():
+                parts[page - 1] = (f'{page}쪽 · OCR', text)
+
     elif suffix=='.docx':
         archive(raw)
         from docx import Document
@@ -96,7 +109,7 @@ if __name__=='__main__':
     try:
         payload=json.loads(sys.stdin.buffer.read(30*1024*1024))
         import base64
-        value=extract(base64.b64decode(payload['data']),payload['filename'])
+        value=extract(base64.b64decode(payload['data']),payload['filename'],ocr_languages=payload.get('ocr_languages'))
         print(json.dumps({'chunks':value},ensure_ascii=False))
-    except ImportError:print(json.dumps({'error':'문서 추출 의존성이 없습니다. requirements-knowledge.txt를 설치하세요.'}))
+    except ImportError:print(json.dumps({'error':'문서 추출 의존성이 없습니다. requirements.txt를 설치하세요.'}))
     except Exception as error:print(json.dumps({'error':str(error)[:250] if isinstance(error,ValueError) else '문서를 추출하지 못했습니다. 파일 형식과 내용을 확인하세요.'}))

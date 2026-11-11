@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
-from . import config, service, transport
+from . import config, merge_requests, service, transport
 
 router = APIRouter(prefix='/apps',tags=['apps'])
 Database = Annotated[Session,Depends(get_db)]
@@ -17,6 +17,7 @@ class AuthorizeInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     chat_id: UUID | None = None
     popup: bool = False
+    publish: bool = False
 
 
 class CompleteInput(BaseModel):
@@ -31,10 +32,19 @@ def catalog(context: Authenticated,db: Database):
     return service.catalog(db,context.user.id)
 
 
+@router.post('/gitlab/merge-request/resolve')
+async def resolve_merge_request(data: merge_requests.ResolveInput, context: Authenticated, db: Database):
+    bind, user_id = db.get_bind(), context.user.id
+    connection = merge_requests.find_connection(db, user_id, data.reference, data.connection_id, data.project_id)
+    db.rollback()
+    return await merge_requests.resolve(bind, user_id, connection)
+
+
 @router.post('/gitlab/{provider_id}/authorize')
 def authorize(provider_id: str,data: AuthorizeInput,context: Authenticated,db: Database,
               x_oauth_browser: str | None = Header(None)):
-    return service.authorize(db,context,provider_id,x_oauth_browser,str(data.chat_id) if data.chat_id else None,data.popup)
+    return service.authorize(db,context,provider_id,x_oauth_browser,str(data.chat_id) if data.chat_id else None,data.popup,
+        publish=data.publish)
 
 
 @router.post('/gitlab/oauth/complete')

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { conversationLocation, modalContentScope, replaceConversationLocation, workspaceHref, workspaceModal, workspaceReturnUrl,
+import { conversationLocation, getSafeNextPath, loginReturnUrl, modalContentScope, replaceConversationLocation, workspaceHref, workspaceModal, workspaceReturnUrl,
   WORKSPACE_LOCATION_EVENT } from "../src/lib/workspace-navigation.ts";
-import { getSafeNextPath } from "../src/lib/auth-router.ts";
 
 const chat = "12345678-1234-1234-1234-123456789abc";
 test("chat is the root surface; all account/auth/operator routes select a modal", () => {
@@ -25,12 +24,18 @@ test("auth-to-auth links and successful login retain a safe return target", () =
   const signup=new URL(workspaceHref("/user/signup",search),"https://llm.invalid");
   assert.equal(signup.searchParams.get("next"),"/admin");
   assert.equal(signup.searchParams.get("chat"),chat);
-  const destination=workspaceHref(getSafeNextPath(signup.searchParams.get("next")),signup.search);
-  assert.equal(destination,`/admin?chat=${chat}`);
+  assert.equal(loginReturnUrl(signup.search),`/admin?chat=${chat}`);
   for (const next of ["https://evil.example","//evil.example","/admin\\evil","/admin\n","/user/recover?token=secret"]) {
     assert.equal(new URL(workspaceHref("/login",`?next=${encodeURIComponent(next)}`),"https://llm.invalid").searchParams.has("next"),false);
     assert.equal(getSafeNextPath(next),"/");
   }
+});
+test("ordinary login starts a fresh chat even when the auth modal carried an old conversation", () => {
+  const search=`?chat=${chat}`;
+  assert.equal(loginReturnUrl(search),"/");
+  assert.equal(loginReturnUrl(`${search}&next=${encodeURIComponent(`/?chat=${chat}`)}`),"/");
+  assert.equal(loginReturnUrl(`${search}&next=//evil.example`),"/");
+  assert.equal(loginReturnUrl(`${search}&next=%2Fuser%2Fsettings%2Fapps`),`/user/settings/apps?chat=${chat}`);
 });
 test("closing a modal returns only to a validated conversation in the workspace", () => {
   assert.equal(workspaceReturnUrl(`?chat=${chat}&next=https://evil.example&token=secret`),`/?chat=${chat}`);

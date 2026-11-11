@@ -6,7 +6,7 @@ import time
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select, update
@@ -18,15 +18,21 @@ from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
 from app.modules.chat.models import Admission, ContextNote, Conversation, GenerationRun, Message
 from app.modules.chat import context as context_budget, providers, scheduler
+from app.modules.integrations import config as gitlab_config, service as gitlab_connections
+from app.modules.integrations import merge_requests
 from app.modules.integrations.models import MessageContext
 from app.modules.integrations.tools import GitlabSelection, read_context
 from app.modules.integrations.transport import GitlabError
 from app.modules.workspaces import agent as workspace_agent
 from app.modules.workspaces import client as workspace_client
 from app.modules.assistant import context as assistant_context
+from app.modules.assistant import gitlab as gitlab_prompt
 from app.modules.assistant.models import TurnContext
+from app.modules.knowledge.models import Document
 from app.modules.workflows import conversations as workflows
-from app.modules.workflows.models import AutoSummary
+from app.modules.workflows import image_inputs, image_queue
+from app.modules.workflows.models import AutoSummary, UploadAttempt
+from app.modules.workflows.projects import project_access, project_role
 
 router = APIRouter(prefix='/chat', tags=['chat'])
 Database = Annotated[Session, Depends(get_db)]
@@ -52,6 +58,7 @@ class TurnInput(ConversationInput):
     request_id: UUID
     retry: bool = False
     confirm_write_retry: bool = False
+    publish_gitlab: bool = False
     apps: list[GitlabSelection] | None = Field(None,max_length=1)
     assistant: assistant_context.Selection | None = None
 
@@ -71,9 +78,12 @@ class NoteInput(BaseModel):
     revision: int = Field(0, ge=0)
 
 
-def conversation_data(item: Conversation):
+def conversation_data(item: Conversation, *, shared=False):
     return {key: getattr(item, key) for key in ('id', 'title', 'connection_id', 'model', 'created_at', 'updated_at')} | {
-        'busy': bool(item.generation_id and item.generation_until > time.time()),**workflows.conversation_extra(item)}
+        'busy': bool(not shared and item.generation_id and item.generation_until > time.time()),
+        **workflows.conversation_extra(item),
+        **({'read_only': True, 'parent_id': None} if shared else {}),
+    }
 
 
 def message_data(item: Message):
@@ -99,6 +109,7 @@ def config(context: Authenticated, db: Database):
     try:
         settings=get_settings()
         return {'connections': [item.public() for item in providers.connections(settings, db, context.user)],
+            'images': {'generate': bool(settings.image_generation_url.strip()), 'edit': bool(settings.image_edit_url.strip())},
             'terminal':{'enabled':workspace_client.enabled(),'execution_enabled':settings.terminal_execution_enabled}}
     except providers.ProviderError as error:
         raise HTTPException(503, str(error)) from None
@@ -123,6 +134,8 @@ def list_conversations(context: Authenticated, db: Database, limit: int = Query(
 
 @router.post('/conversations', status_code=201)
 def create_conversation(data: CreateConversationInput, context: Authenticated, db: Database):
+    if data.project_id:
+        scheduler.lock(db)
     connection = connection_for(data.connection_id, db, context.user)
     if data.model or connection.model:
         try:
@@ -130,16 +143,36 @@ def create_conversation(data: CreateConversationInput, context: Authenticated, d
         except providers.ProviderError as error:
             raise HTTPException(422, str(error)) from None
     item = Conversation(user_id=context.user.id, connection_id=connection.id, model=data.model or connection.model)
-    if data.project_id:workflows.project_owned(db,context.user.id,data.project_id)
     db.add(item);db.flush()
     if data.project_id:workflows.attach_project(db,context.user.id,item.id,data.project_id)
     db.commit()
     return conversation_data(item)
 
 
+@router.get('/active')
+def active_conversations(context: Authenticated, db: Database):
+    rows = db.scalars(select(Conversation.id).where(
+        Conversation.user_id == context.user.id,
+        Conversation.generation_id.is_not(None),
+        Conversation.generation_until > int(time.time()),
+    ))
+    return {'ids': list(rows)}
+
+
 @router.get('/conversations/{conversation_id}')
 def get_conversation(conversation_id: UUID, context: Authenticated, db: Database):
-    item = owned(db, conversation_id, context.user.id)
+    item = db.get(Conversation, str(conversation_id))
+    if item is None:
+        raise HTTPException(404, '대화를 찾을 수 없습니다.')
+    if item.user_id != context.user.id:
+        project = workflows.project_for(db, item.id)
+        if not project_role(db, project, context.user.id):
+            raise HTTPException(404, '대화를 찾을 수 없습니다.')
+        messages = db.scalars(select(Message).where(Message.conversation_id == item.id, Message.status == 'complete')
+            .order_by(Message.position))
+        documents = set(db.scalars(select(Document.id).where(Document.base_id == project.base_id))) if project.base_id else set()
+        return {'conversation': conversation_data(item, shared=True),
+            'messages': [workflows.shared_payload(message, documents) for message in messages], 'generation': None}
     messages = db.scalars(select(Message).where(Message.conversation_id == item.id).order_by(Message.position)).all()
     if item.generation_until<=time.time() and any(m.status=='pending' for m in messages):
         scheduler.lock(db);db.refresh(item)
@@ -157,9 +190,13 @@ def get_conversation(conversation_id: UUID, context: Authenticated, db: Database
     position = db.scalar(select(func.count(Admission.id)).join(GenerationRun).where(
         Admission.state == 'queued', Admission.id <= admission.id, Admission.expires_at > int(time.time()),
         or_(GenerationRun.connection_id == item.connection_id, GenerationRun.user_id == context.user.id))) if admission and admission.state == 'queued' else 0
+    generation = None
+    if item.generation_id and item.generation_until > time.time():
+        generation = image_queue.snapshot(db, item.generation_id) or {
+            'request_id': item.generation_id, 'status': admission.state if admission else 'tool_waiting', 'position': position,
+        }
     return {'conversation': conversation_data(item), 'messages': [message_data(message) for message in messages],
-        'generation': {'request_id': item.generation_id, 'status': admission.state if admission else 'running', 'position': position}
-            if item.generation_id and item.generation_until > time.time() else None}
+        'generation': generation}
 
 
 @router.post('/conversations/{conversation_id}/context/preview')
@@ -244,12 +281,22 @@ class Turn:
     previous_message: dict | None = None
     previous_connection: str | None = None
     started_clock: float = 0
+    parallel_used: bool = False
+    publish_gitlab: bool = False
+    gitlab_generation: int | None = None
+    gitlab_request: gitlab_prompt.Prompt | None = None
+    gitlab_publication: str = 'merge_request'
+    gitlab_local_commit: bool = False
 
 
-def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, connection: providers.Connection) -> Turn:
+def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, connection: providers.Connection,
+            *, gitlab_request: gitlab_prompt.Prompt | None = None) -> Turn:
     started_clock = time.monotonic()
     scheduler.lock(db)
     item = owned(db, conversation_id, user_id)
+    project = workflows.project_for(db, item.id)
+    if project:
+        project_access(db, user_id, project.id, write=True)
     content = data.content.strip()
     if not content:
         raise HTTPException(422, '메시지를 입력해 주세요.')
@@ -309,6 +356,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     for app in apps:
         if app.get('mode')=='files':app.pop('mode',None)
         if app.get('workspace_id') is None:app.pop('workspace_id',None)
+        if app.get('merge_request') is None:app.pop('merge_request',None)
     if data.retry and (any(a.get('mode')=='execute' for a in apps) or (data.assistant.allow_writes if data.assistant else assistant.assistant_context and json.loads(assistant.assistant_context.data_json).get('allow_writes'))) and not data.confirm_write_retry:
         raise HTTPException(409,'외부 변경·명령이 다시 실행될 수 있습니다. 쓰기 재시도를 명시적으로 확인하세요.')
     workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute'})
@@ -316,6 +364,15 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         if not workspace_client.enabled():raise HTTPException(503,'운영자가 Terminal MCP 서버를 연결해야 합니다.')
         if connection.provider!='test' and not connection.profile(model).supports_tools:
             raise HTTPException(422,'이 모델의 도구 호출 사용이 설정되지 않았습니다. 다른 모델을 선택하거나 운영자에게 설정을 요청하세요.')
+    gitlab_generation = None
+    if data.publish_gitlab:
+        if data.retry or not data.apps or data.apps[0].mode != 'execute' or connection.provider == 'test':
+            raise HTTPException(422, 'MR 게시는 실제 모델의 프로젝트 분석·실행을 선택한 새 요청에서 허용할 수 있습니다.')
+        account = gitlab_connections.owned(db, user_id, data.apps[0].connection_id)
+        gitlab_connections.require_publish(account, gitlab_config.instance(account.provider_id))
+        gitlab_generation = account.generation
+    elif apps and apps[0].get('merge_request'):
+        gitlab_generation = gitlab_connections.owned(db, user_id, apps[0]['connection_id']).generation
     if apps and not workspace_mode and context_budget.reference_budget(db,item.id,connection,model,content)<2000:
         raise HTTPException(422,'GitLab 파일을 담을 문맥 예산이 부족합니다. 질문·요약 메모를 줄이거나 더 큰 문맥의 모델을 선택하세요.')
     if assistant.source_record is None:
@@ -325,13 +382,34 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     if assistant.decision_record:assistant.decision_record.data_json='{}'
     options=data.assistant.model_dump(mode='json') if data.assistant is not None else (
         json.loads(assistant.assistant_context.data_json) if data.retry and assistant.assistant_context else {})
-    assistant_context.validate(db,user_id,item.id,options,connection,model)
-    if assistant.assistant_context is None:assistant.assistant_context=TurnContext(data_json=json.dumps(options))
-    else:assistant.assistant_context.data_json=json.dumps(options)
+    image_mode = options.get('image_mode', 'auto')
+    image_source = image_inputs.reference(options)
+    document_ids = set(options.get('document_ids', [])) | set(image_inputs.attachment_ids(options))
+    if (image_mode != 'auto' or image_source) and (apps or data.publish_gitlab or gitlab_request):
+        raise HTTPException(422, '이 요청에서 이미지 작업과 GitLab 작업 중 하나를 선택하세요.')
+    if image_source and (options.get('mcp_ids') or options.get('parallel_agents')):
+        raise HTTPException(422, '이미지 원본과 선택한 앱·병렬 분석은 별도의 메시지로 보내세요.')
+    settings = get_settings()
+    render_only = image_mode in {'generate', 'edit'}
     try:
-        history, report = context_budget.plan(db, item.id, connection, model, content)
+        connection.profile(model)
+        assistant_context.validate(db,user_id,item.id,options,connection,model)
+        if image_source:
+            image_inputs.validate_reference(db, user_id, item.id, options, assistant.id if data.retry else None)
+        if render_only:
+            history, report = [{'role': 'user', 'content': content}], None
+        else:
+            history, report = context_budget.plan(db, item.id, connection, model, content)
     except providers.ProviderError as error:
         raise HTTPException(422, str(error)) from None
+    if image_mode == 'edit' and not image_source:
+        reference_id = image_inputs.latest_artifact_id(db, user_id, item.id,
+            before_message_id=assistant.id if data.retry else None)
+        if reference_id is None:
+            raise HTTPException(422, '편집할 이미지를 선택하거나 첨부하세요.')
+        options['image_artifact_id'] = reference_id
+    if assistant.assistant_context is None:assistant.assistant_context=TurnContext(data_json=json.dumps(options))
+    else:assistant.assistant_context.data_json=json.dumps(options)
     item.connection_id, item.model, item.updated_at = connection.id, model, now
     if not rows:
         db.execute(update(Conversation).where(Conversation.id == item.id, Conversation.title == '새 대화')
@@ -339,21 +417,34 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         db.refresh(item, attribute_names=['title'])
     message_state=workflows.state_for(db,assistant)
     message_state.last_run=str(data.request_id);message_state.error_code=None;message_state.phase='queued'
+    deadline = now + settings.llm_queue_wait_seconds + 15
+    if render_only:
+        deadline = now + settings.image_queue_wait_seconds + settings.image_generation_timeout_seconds + 15
+        item.generation_until = deadline
     run = GenerationRun(id=str(data.request_id), user_id=user_id, conversation_id=item.id,
         connection_id=connection.id, provider=connection.provider, model=model,
-        is_test=connection.provider == 'test', status='queued', started_at=now,
-        deadline_at=now + get_settings().llm_queue_wait_seconds + 15)
+        is_test=connection.provider == 'test', status='tool_waiting' if render_only else 'queued',
+        started_at=now, deadline_at=deadline)
     db.add(run)
     try:
         db.flush()
-        scheduler.enqueue(db, run, get_settings())
+        if not render_only:scheduler.enqueue(db, run, settings)
+        if document_ids and image_mode != 'generate':
+            # Upload cancellation uses the same lock. Mark the attempts attached
+            # together, including the one that created a reused document.
+            db.execute(update(UploadAttempt).where(
+                UploadAttempt.owner_id == user_id, UploadAttempt.conversation_id == item.id,
+                UploadAttempt.document_id.in_(document_ids), UploadAttempt.status == 'complete',
+            ).values(status='attached'))
         db.commit()
     except IntegrityError:
         db.rollback()
         raise HTTPException(409, '동시에 처리된 요청입니다. 새 요청으로 다시 시도해 주세요.') from None
     return Turn(item.id, str(data.request_id), assistant.id, history,
         {'conversation': conversation_data(item), 'user_message': message_data(user_message),
-         'assistant_message': message_data(assistant) | {'content': ''}, 'context': report}, previous_message, previous_connection, started_clock)
+         'assistant_message': message_data(assistant) | {'content': ''}, **({'context': report} if report else {})},
+        previous_message, previous_connection, started_clock,
+        publish_gitlab=data.publish_gitlab, gitlab_generation=gitlab_generation, gitlab_request=gitlab_request)
 
 
 def event(name: str, data: dict) -> str:
@@ -389,11 +480,25 @@ async def guarded_parts(iterator, cancelled):
 
 
 @router.post('/conversations/{conversation_id}/messages')
-def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Database):
+async def send(conversation_id: UUID, data: TurnInput, request: Request, context: Authenticated, db: Database):
     user_id = context.user.id
+    explicit_image = data.assistant is not None and data.assistant.image_mode != 'auto'
+    gitlab_request = None if explicit_image or data.retry or data.publish_gitlab else gitlab_prompt.prompt(data.content)
+    image_source = data.assistant and (data.assistant.image_document_ids or data.assistant.image_artifact_id)
+    if not explicit_image and not image_source and not data.apps and not data.retry and not data.publish_gitlab and not gitlab_request:
+        candidate = merge_requests.automatic_connection(db, user_id, gitlab_prompt.unquoted(data.content))
+        if candidate:
+            owned(db, conversation_id, user_id)
+            bind = db.get_bind()
+            db.rollback()
+            resolved = await merge_requests.resolve(bind, user_id, candidate)
+            data.apps = [GitlabSelection.model_validate(resolved['selection'])]
     connection = connection_for(data.connection_id, db, context.user)
-    turn = prepare(db, conversation_id, context.user.id, data, connection)
+    turn = prepare(db, conversation_id, context.user.id, data, connection, gitlab_request=gitlab_request)
     settings, bind = get_settings(), db.get_bind()
+    options = turn.start['assistant_message']['assistant']
+    image_mode = options.get('image_mode', 'auto')
+    render_only = image_mode in {'generate', 'edit'}
 
     async def generate():
         text, status, error = '', 'cancelled', None
@@ -420,7 +525,8 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
         try:
             yield event('start', turn.start)
             last_queue_notice = 0.0
-            while True:
+            state, admitted = 'running', connection
+            while not render_only:
                 with Session(bind, expire_on_commit=False) as session:
                     state, position, admitted = scheduler.poll(session, turn.request_id, settings, providers.resolve)
                     if state == 'running':
@@ -436,21 +542,31 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
             if state == 'expired':
                 raise TimeoutError('queue')
             if state == 'running':
-                from app.modules.workflows.summary import ensure_summary
-                async for summary_event in ensure_summary(bind,user_id,turn,admitted,settings,cancelled):
-                    yield event(*summary_event)
-                with Session(bind) as session:
-                    turn.history,report=context_budget.plan(session,turn.conversation_id,admitted,turn.start['conversation']['model'],data.content.strip())
-                    turn.start['context']=report
-                phase='model'
-                yield event('queue', {'status': 'running', 'position': 0, 'request_id': turn.request_id})
+                if not render_only:
+                    if image_mode == 'auto':
+                        from app.modules.workflows.summary import ensure_summary
+                        async for summary_event in ensure_summary(bind,user_id,turn,admitted,settings,cancelled):
+                            yield event(*summary_event)
+                    with Session(bind) as session:
+                        turn.history,report=context_budget.plan(session,turn.conversation_id,admitted,turn.start['conversation']['model'],data.content.strip())
+                        turn.start['context']=report
+                    phase='model'
+                    yield event('queue', {'status': 'running', 'position': 0, 'request_id': turn.request_id})
                 apps = turn.start['assistant_message']['apps']
-                workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute'})
-                options=turn.start['assistant_message']['assistant']
-                with Session(bind) as session:general_mode=assistant_context.active(session,user_id,options,question=data.content.strip(),conversation_id=turn.conversation_id,connection=admitted)
-                async with asyncio.timeout(settings.terminal_agent_timeout_seconds if workspace_mode or general_mode else settings.llm_timeout_seconds):
+                workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute','merge_request'})
+                with Session(bind) as session:
+                    general_mode = image_mode != 'auto' or bool(turn.gitlab_request) or assistant_context.active(
+                        session, user_id, options, question=data.content.strip(), conversation_id=turn.conversation_id,
+                        connection=admitted, model=turn.start['conversation']['model'])
+                if render_only:
+                    timeout = settings.image_queue_wait_seconds + settings.image_generation_timeout_seconds + 5
+                elif image_mode == 'vision' or not (workspace_mode or general_mode):
+                    timeout = settings.llm_timeout_seconds
+                else:
+                    timeout = settings.terminal_agent_timeout_seconds
+                async with asyncio.timeout(timeout):
                     if workspace_mode or general_mode:
-                        workspace_selection=GitlabSelection.model_validate(apps[0]) if workspace_mode else None
+                        workspace_selection=GitlabSelection.model_validate(apps[0]) if apps and (workspace_mode or turn.gitlab_request) else None
                         iterator=workspace_agent.stream(bind,user_id,turn,workspace_selection,admitted,settings,cancelled,options=options)
                         async with aclosing(guarded_parts(iterator,cancelled)) as parts:
                             async for kind,payload in parts:
@@ -503,7 +619,10 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
             error = str(caught) if isinstance(caught, (providers.ProviderError,GitlabError)) else '대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.' if str(caught) == 'queue' else '응답 시간이 초과되었습니다. 다시 시도해 주세요.'
         except HTTPException as caught:
             status,error='error',str(caught.detail)
-            error_code='app_connection' if phase.startswith(('mcp','gitlab')) or caught.status_code in {401,403,502,503} else 'workspace_error' if workspace_selection else 'context_limit'
+            if phase in {'generate_image', 'edit_image'}:
+                error_code = 'image_generation_error'
+            else:
+                error_code='token_quota' if caught.status_code == 429 else 'app_connection' if phase.startswith(('mcp','gitlab')) or caught.status_code in {401,403,502,503} else 'workspace_error' if workspace_selection else 'context_limit'
         except Exception:
             status, error = 'error', '응답을 처리하지 못했습니다. 다시 시도해 주세요.'
             error_code = 'internal_error'
@@ -562,5 +681,17 @@ def send(conversation_id: UUID, data: TurnInput, context: Authenticated, db: Dat
         if saved:
             yield event('done' if status == 'complete' else status, saved | {'detail': error})
 
-    return StreamingResponse(generate(), media_type='text/event-stream',
+    async def metered_events():
+        from . import usage
+
+        token = usage.scope.set(usage.Scope(bind, user_id, turn.request_id))
+        try:
+            async with aclosing(generate()) as events:
+                async for item in events:
+                    yield item
+        finally:
+            usage.scope.reset(token)
+
+    subscription = request.app.state.generation_jobs.start(metered_events())
+    return StreamingResponse(subscription.stream(), media_type='text/event-stream',
         headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})

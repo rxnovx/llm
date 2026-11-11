@@ -1,9 +1,16 @@
+import asyncio
+from contextlib import aclosing
+from hashlib import sha256
+import secrets
+from uuid import UUID, uuid4
 from datetime import datetime, time as day_time, timedelta
 import time
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.orm import Session, aliased
 
@@ -12,8 +19,10 @@ from app.db.session import get_db
 from app.modules.auth.dependencies import AuthContext, Authenticated
 from app.modules.auth.models import AuditLog, RefreshSession, User
 from app.modules.chat.models import ConnectionSetting, Conversation, GenerationRun as Run, Message
-from app.modules.chat import providers, registry, scheduler
+from app.modules.chat import providers, registry, scheduler, usage
+from app.modules.chat.independent import admitted
 from app.modules.auth.audit import add_audit_log
+from app.modules.workflows import image_queue, images
 
 router = APIRouter(prefix='/admin', tags=['operations'])
 Database = Annotated[Session, Depends(get_db)]
@@ -170,6 +179,104 @@ def managed_connections(context: Admin, db: Database):
         raise HTTPException(503, str(error)) from None
 
 
+class ImageProbeInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    mode: Literal['generate', 'edit']
+    request_id: UUID = Field(default_factory=uuid4)
+
+
+def image_providers(settings):
+    return {
+        'generate': {'configured': bool(settings.image_generation_url.strip()),
+                     'model': settings.image_generation_model.strip() or None},
+        'edit': {'configured': bool(settings.image_edit_url.strip()),
+                 'model': settings.image_edit_model.strip() or None},
+    }
+
+
+@router.get('/images')
+def image_status(context: Admin, db: Database):
+    settings = get_settings()
+    return image_providers(settings) | {
+        'limits': {
+            'max_concurrent': settings.image_max_concurrent,
+            'user_concurrency': settings.image_user_concurrency,
+            'queue_capacity': settings.image_queue_capacity,
+            'queue_wait_seconds': settings.image_queue_wait_seconds,
+            'timeout_seconds': settings.image_generation_timeout_seconds,
+        },
+        'queue': image_queue.counts(db),
+    }
+
+
+@router.post('/images/probe')
+async def probe_image(data: ImageProbeInput, request: Request, context: Admin, db: Database):
+    settings = get_settings()
+    if not image_providers(settings)[data.mode]['configured']:
+        return JSONResponse(status_code=503, content={
+            'code': 'disabled', 'detail': '이미지 서버 주소를 환경 설정에 등록해 주세요.',
+        })
+
+    bind, user_id, request_id = db.get_bind(), context.user.id, str(uuid4())
+    db.rollback()
+    started = time.monotonic()
+    running = False
+
+    def cancelled():
+        with Session(bind) as session:
+            return image_queue.probe_cancelled(session, user_id, request_id)
+
+    async def run():
+        nonlocal running
+        wait = image_queue.wait(bind, user_id, request_id, settings, chat=False, probe_id=str(data.request_id))
+        async with aclosing(wait) as queue:
+            async for _ in queue:
+                pass
+        running = True
+        if cancelled():
+            raise image_queue.Cancelled()
+        return await images.probe(settings, data.mode)
+
+    task = asyncio.create_task(run())
+    code, status, headers = 'ok', 200, None
+    try:
+        while not task.done():
+            if await request.is_disconnected() or running and cancelled():
+                raise image_queue.Cancelled()
+            await asyncio.wait({task}, timeout=0.5)
+        result = task.result()
+        payload = result | {'elapsed_ms': round((time.monotonic() - started) * 1000)}
+    except image_queue.Cancelled:
+        code, status = 'cancelled', 409
+        payload = {'code': code, 'detail': '이미지 서버 진단이 취소되었습니다.'}
+    except images.ImageError as error:
+        code, status = error.code, error.status_code
+        payload = {'code': code, 'detail': str(error.detail)}
+    except HTTPException as error:
+        status, headers = error.status_code, error.headers
+        code = {429: 'queue_full', 504: 'queue_timeout'}.get(status, 'queue_error')
+        payload = {'code': code, 'detail': str(error.detail)}
+    finally:
+        task.cancel()
+        try:
+            await asyncio.gather(task, return_exceptions=True)
+        finally:
+            image_queue.finish(bind, request_id)
+
+    add_audit_log(db, action='admin.image.probe', outcome='success' if status == 200 else 'failure',
+                  actor_user_id=user_id, request=request, details={'mode': data.mode, 'code': code})
+    db.commit()
+    return JSONResponse(status_code=status, content=payload, headers=headers)
+
+
+@router.post('/images/probe/{request_id}/cancel', status_code=204)
+def cancel_image_probe(request_id: UUID, context: Admin, db: Database):
+    if not image_queue.request_probe_cancel(db, context.user.id, str(request_id)):
+        raise HTTPException(404, '진단 요청이 아직 접수되지 않았거나 이미 종료되었습니다.')
+    db.commit()
+    return Response(status_code=204)
+
+
 def save_connection(data: registry.ConnectionInput, context, db, *, creating=False):
     settings = get_settings()
     scheduler.lock(db)
@@ -214,3 +321,154 @@ def update_connection(connection_id: str, data: registry.ConnectionInput, contex
     if connection_id != data.id:
         raise HTTPException(422, '연결 ID는 변경할 수 없습니다.')
     return save_connection(data, context, db)
+
+
+class TokenBudgetInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    daily_tokens: int = Field(ge=0, le=1_000_000_000)
+
+
+class ServiceKeyInput(TokenBudgetInput):
+    user_id: UUID
+    label: str = Field(min_length=1, max_length=100)
+
+
+class ServiceKeyUpdate(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    daily_tokens: int | None = Field(None, ge=0, le=1_000_000_000)
+    revoke: bool = False
+
+
+class ProbeInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    model: str = Field('', max_length=200)
+
+
+@router.get('/usage')
+def user_usage(context: Admin, db: Database, q: str = Query('', max_length=100),
+               offset: int = Query(0, ge=0)):
+    users = select(User).order_by(User.username)
+    if q.strip():
+        users = users.where(User.username.icontains(q.strip(), autoescape=True))
+    rows = list(db.scalars(users.offset(offset).limit(21)))
+    items = []
+    for user in rows[:20]:
+        budget = db.get(usage.UserBudget, user.id)
+        items.append({'user_id': user.id, 'username': user.username,
+                      'daily_tokens': budget.daily_tokens if budget else 0,
+                      **usage.totals(db, user_id=user.id)})
+    return {'items': items, 'has_more': len(rows) > 20, 'day': usage.day()}
+
+
+@router.patch('/usage/{user_id}')
+def set_user_budget(user_id: UUID, data: TokenBudgetInput, request: Request, context: Admin, db: Database):
+    scheduler.lock(db)
+    if not db.get(User, str(user_id)):
+        raise HTTPException(404, '사용자를 찾을 수 없습니다.')
+    row = db.get(usage.UserBudget, str(user_id))
+    if not row:
+        row = usage.UserBudget(user_id=str(user_id))
+        db.add(row)
+    row.daily_tokens = data.daily_tokens
+    add_audit_log(db, action='llm.budget.updated', actor_user_id=context.user.id,
+                  target_user_id=str(user_id), request=request, details={'daily_tokens': data.daily_tokens})
+    db.commit()
+    return {'daily_tokens': data.daily_tokens}
+
+
+def key_summary(row, db):
+    return {name: getattr(row, name) for name in (
+        'id', 'user_id', 'label', 'prefix', 'daily_tokens', 'created_at', 'revoked'
+    )} | usage.totals(db, key_id=row.id)
+
+
+@router.get('/service-keys')
+def service_keys(user_id: UUID, context: Admin, db: Database):
+    rows = db.scalars(select(usage.ServiceKey).where(usage.ServiceKey.user_id == str(user_id))
+                      .order_by(usage.ServiceKey.revoked, usage.ServiceKey.created_at.desc()).limit(50))
+    return {'items': [key_summary(row, db) for row in rows]}
+
+
+@router.post('/service-keys', status_code=201)
+def create_service_key(data: ServiceKeyInput, request: Request, context: Admin, db: Database):
+    scheduler.lock(db)
+    user = db.get(User, str(data.user_id))
+    if not user or not user.is_active or user.registration_status != 'approved':
+        raise HTTPException(404, '승인된 활성 사용자를 선택하세요.')
+    if not data.label.strip():
+        raise HTTPException(422, '서비스 이름을 입력하세요.')
+    count = db.scalar(select(func.count(usage.ServiceKey.id)).where(
+        usage.ServiceKey.user_id == user.id, usage.ServiceKey.revoked.is_(False)))
+    if count >= 20:
+        raise HTTPException(422, '사용자별 활성 서비스 키는 최대 20개입니다.')
+    secret = 'llm_sk_' + secrets.token_urlsafe(32)
+    row = usage.ServiceKey(id=str(uuid4()), user_id=user.id, label=data.label.strip(),
+                           digest=sha256(secret.encode()).hexdigest(), prefix=secret[:15],
+                           daily_tokens=data.daily_tokens, created_at=int(time.time()))
+    db.add(row)
+    add_audit_log(db, action='llm.service_key.created', actor_user_id=context.user.id,
+                  target_user_id=user.id, request=request, details={'key_id': row.id})
+    db.commit()
+    return key_summary(row, db) | {'secret': secret}
+
+
+@router.patch('/service-keys/{key_id}')
+def update_service_key(key_id: UUID, data: ServiceKeyUpdate, request: Request, context: Admin, db: Database):
+    scheduler.lock(db)
+    row = db.get(usage.ServiceKey, str(key_id))
+    if not row:
+        raise HTTPException(404, '서비스 키를 찾을 수 없습니다.')
+    if data.daily_tokens is not None:
+        row.daily_tokens = data.daily_tokens
+    if data.revoke:
+        row.revoked = True
+    add_audit_log(db, action='llm.service_key.revoked' if data.revoke else 'llm.service_key.updated',
+                  actor_user_id=context.user.id, target_user_id=row.user_id,
+                  request=request, details={'key_id': row.id})
+    db.commit()
+    return key_summary(row, db)
+
+
+@router.post('/connections/{connection_id}/probe')
+async def probe_connection(connection_id: str, data: ProbeInput, context: Admin, db: Database):
+    settings = get_settings()
+    bind, user_id = db.get_bind(), context.user.id
+    try:
+        connection = providers.resolve(settings, connection_id, db, context.user)
+    except providers.ProviderError as error:
+        raise HTTPException(502, str(error)) from None
+    db.rollback()
+    try:
+        models = await providers.list_models(connection)
+    except providers.ProviderError as error:
+        raise HTTPException(502, '모델 목록 조회 실패 · ' + str(error)) from None
+    if connection.provider == 'test':
+        return {'status': 'test', 'models': models, 'model': 'demo', 'sample': None, 'elapsed_ms': None}
+    allowed = {profile.name for profile in connection.models}
+    available = [name for name in models if not allowed or name in allowed]
+    model = data.model or connection.model or (available[0] if available else '')
+    if model not in available:
+        raise HTTPException(422, '목록 조회는 성공했습니다. 서버에 등록된 테스트 모델을 선택하세요.')
+    started = time.monotonic()
+    parts = []
+    try:
+        async with asyncio.timeout(45):
+            async with admitted(bind, user_id, connection, model, settings) as (selected, run_id):
+                token = usage.scope.set(usage.Scope(bind, user_id, run_id))
+                try:
+                    source = providers.stream_reply(selected, model,
+                        [{'role': 'user', 'content': 'Reply with a short confirmation: 연결 확인'}],
+                        settings, max_tokens=min(256, selected.profile(model).max_output_tokens))
+                    async with aclosing(source):
+                        async for part in source:
+                            parts.append(part)
+                            if sum(map(len, parts)) > 4096:
+                                raise providers.ProviderError('테스트 응답이 길이 한도를 초과했습니다.')
+                    if not ''.join(parts).strip():
+                        raise providers.ProviderError('표시할 텍스트 답변이 비어 있습니다.')
+                finally:
+                    usage.scope.reset(token)
+    except (providers.ProviderError, TimeoutError) as error:
+        raise HTTPException(502, '목록 조회 성공 · 테스트 답변 실패 · ' + (str(error) or '시간 초과')) from None
+    return {'status': 'ready', 'models': available, 'model': model,
+            'sample': ''.join(parts)[:500], 'elapsed_ms': round((time.monotonic() - started) * 1000)}

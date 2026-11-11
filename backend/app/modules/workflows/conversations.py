@@ -14,6 +14,7 @@ from app.modules.knowledge import service as knowledge
 from app.modules.knowledge.models import Document
 from .models import (Project,ProjectConversation,ConversationState,MessageVersion,MessageState,
     AttachmentScope,Artifact,ArtifactScope,AutoSummary,ToolEvidence)
+from .projects import project_access, project_role
 
 
 def owned(db,user_id,conversation_id,*,idle=False):
@@ -44,7 +45,7 @@ def attach_project(db,user_id,conversation_id,project_id):
     owned(db,user_id,conversation_id,idle=True)
     link=db.get(ProjectConversation,str(conversation_id))
     if project_id:
-        project=project_owned(db,user_id,project_id)
+        project, _ = project_access(db, user_id, project_id, write=True)
         if link:link.project_id=project.id
         else:db.add(ProjectConversation(conversation_id=str(conversation_id),project_id=project.id))
     elif link:db.delete(link)
@@ -87,12 +88,26 @@ def message_extra(item,run_id=None):
 
 def payload(item,run_id=None):
     record=item.source_record
+    traces = item.tool_traces[-80:]
+    if len(item.tool_traces) > len(traces):
+        pinned = [trace for trace in item.tool_traces[:-80]
+                  if trace.name.startswith('gitlab_mr_') or trace.name == 'gitlab_publication'][-12:]
+        traces = pinned + traces[len(pinned):]
     return {k:getattr(item,k) for k in ['id','role','content','status','model','is_test','error','created_at']}|{
         'apps':json.loads(record.apps_json) if record else [],'sources':json.loads(record.sources_json) if record else [],
         'assistant':json.loads(item.assistant_context.data_json) if item.assistant_context else {},
         'routing':json.loads(item.decision_record.data_json) if item.decision_record else {},
-        'tools':[{'name':t.name,'step':t.step,'status':t.status,'detail':t.detail} for t in item.tool_traces[-80:]],
+        'tools':[{'name':t.name,'step':t.step,'status':t.status,'detail':t.detail} for t in traces],
         **message_extra(item,run_id)}
+
+
+def shared_payload(item, base_documents):
+    record = item.source_record
+    sources = json.loads(record.sources_json) if record else []
+    return {key: getattr(item, key) for key in ('id', 'role', 'content', 'status', 'model', 'is_test', 'created_at')} | {
+        'error': None,
+        'sources': [source for source in sources if source.get('app') == 'knowledge' and source.get('document_id') in base_documents],
+    }
 
 
 def state_for(db,message):
@@ -151,6 +166,8 @@ def grant_attachments(db,user_id,parent_id,child_id,ids):
 
 
 def fork(db,user_id,conversation_id,message_id,*,content=None,version=None,tail_only=False):
+    from . import image_inputs
+
     lock(db);parent=owned(db,user_id,conversation_id,idle=True)
     target=db.get(Message,str(message_id))
     if not target or target.conversation_id!=parent.id:raise HTTPException(404,'분기할 메시지를 찾을 수 없습니다.')
@@ -164,7 +181,8 @@ def fork(db,user_id,conversation_id,message_id,*,content=None,version=None,tail_
     child=Conversation(user_id=user_id,connection_id=parent.connection_id,model=parent.model,title=(parent.title[:105]+' · 이어가기' if tail_only else parent.title[:105]+' · 분기'))
     db.add(child);db.flush();db.add(ConversationState(conversation_id=child.id,parent_id=parent.id,parent_message_id=target.id))
     project=project_for(db,parent.id)
-    if project:db.add(ProjectConversation(conversation_id=child.id,project_id=project.id))
+    if project_role(db, project, user_id) in {'owner', 'editor'}:
+        db.add(ProjectConversation(conversation_id=child.id,project_id=project.id))
     all_documents=set();target_options={};target_apps=[]
     for position,original in enumerate(rows):
         data=json.loads(version.payload_json) if version and original.id==target.id else payload(original)
@@ -178,7 +196,8 @@ def fork(db,user_id,conversation_id,message_id,*,content=None,version=None,tail_
                 cloned=ToolEvidence(owner_id=user_id,message_id=copied.id,run_id=evidence.run_id,server_id=evidence.server_id,fingerprint=evidence.fingerprint,label=evidence.label,tool=evidence.tool,content=evidence.content,sha256=evidence.sha256)
                 db.add(cloned);db.flush();source['evidence_id']=cloned.id
         opts=apply_payload(db,copied,data,branch=True)
-        all_documents.update(opts.get('document_ids',[]));all_documents.update(s['document_id'] for s in data.get('sources',[]) if s.get('app')=='knowledge')
+        all_documents.update(opts.get('document_ids',[]));all_documents.update(image_inputs.attachment_ids(opts))
+        all_documents.update(s['document_id'] for s in data.get('sources',[]) if s.get('app')=='knowledge')
         for artifact in data.get('artifacts',[]):
             row=db.get(Artifact,artifact['id'])
             if row and row.owner_id==user_id:db.add(ArtifactScope(artifact_id=row.id,message_id=copied.id))
@@ -194,9 +213,11 @@ def fork(db,user_id,conversation_id,message_id,*,content=None,version=None,tail_
             for app in target_apps:
                 app.pop('workspace_id',None)
                 if app.get('mode')=='execute':app['mode']='workspace'
-        all_documents.update(target_options.get('document_ids',[]))
+        all_documents.update(target_options.get('document_ids',[]));all_documents.update(image_inputs.attachment_ids(target_options))
     allowed=grant_attachments(db,user_id,parent.id,child.id,all_documents)
     target_options['document_ids']=[i for i in target_options.get('document_ids',[]) if i in allowed]
+    if 'image_document_ids' in target_options:
+        target_options['image_document_ids']=[i for i in target_options['image_document_ids'] if i in allowed]
     if not tail_only:
         for model in [ContextNote,AutoSummary]:
             note=db.get(model,parent.id)
@@ -220,28 +241,38 @@ def preserve_shared_files(db,conversation_id):
         if scope:doc.conversation_id=scope.conversation_id
         else:knowledge.remove(db,doc)
     message_ids=select(Message.id).where(Message.conversation_id==conversation_id)
-    for artifact in db.scalars(select(Artifact).where(Artifact.message_id.in_(message_ids))):
+    linked_ids = select(ArtifactScope.artifact_id).where(ArtifactScope.message_id.in_(message_ids))
+    candidates = select(Artifact).where(or_(Artifact.message_id.in_(message_ids),
+        Artifact.message_id.is_(None) & Artifact.id.in_(linked_ids)))
+    for artifact in db.scalars(candidates):
         other=db.scalar(select(ArtifactScope).join(Message,Message.id==ArtifactScope.message_id).where(ArtifactScope.artifact_id==artifact.id,Message.conversation_id!=conversation_id))
         if not other:db.delete(artifact)
     db.flush()
 
 
 def search(db,user_id,query='',project_id=None,limit=50,offset=0):
-    statement=select(Conversation).where(Conversation.user_id==user_id)
+    statement = select(Conversation)
     if project_id:
-        project_owned(db,user_id,project_id)
+        project_access(db, user_id, project_id)
         statement=statement.join(ProjectConversation,ProjectConversation.conversation_id==Conversation.id).where(ProjectConversation.project_id==str(project_id))
+    else:
+        statement = statement.where(Conversation.user_id == user_id)
     pattern='%'+query.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
     if query:
-        matches=select(Message.id).where(Message.conversation_id==Conversation.id,Message.content.ilike(pattern,escape='\\')).exists()
+        visible = or_(Conversation.user_id == user_id, Message.status == 'complete')
+        matches=select(Message.id).where(Message.conversation_id==Conversation.id,visible,Message.content.ilike(pattern,escape='\\')).exists()
         statement=statement.where(or_(Conversation.title.ilike(pattern,escape='\\'),matches))
     rows=list(db.scalars(statement.order_by(Conversation.updated_at.desc(),Conversation.id.desc()).offset(offset).limit(limit+1)))
     result=[]
     from app.modules.chat.router import conversation_data
     for row in rows[:limit]:
-        data=conversation_data(row)
+        shared = row.user_id != user_id
+        data=conversation_data(row, shared=shared)
         if query:
-            hit=db.scalar(select(Message).where(Message.conversation_id==row.id,Message.content.ilike(pattern,escape='\\')).order_by(Message.position.desc()))
+            matching = select(Message).where(Message.conversation_id==row.id,Message.content.ilike(pattern,escape='\\'))
+            if shared:
+                matching = matching.where(Message.status == 'complete')
+            hit=db.scalar(matching.order_by(Message.position.desc()).limit(1))
             if hit:
                 at=hit.content.casefold().find(query.casefold());start=max(0,at-60)
                 data['match']={'message_id':hit.id,'role':hit.role,'excerpt':hit.content[start:start+220]}

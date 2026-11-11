@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 type Context = { params: Promise<{ path: string[] }> };
 const rules = [
   [/^users\/me$/, ["GET", "PATCH", "DELETE"]],
-  [/^users\/me\/(avatar|password|password\/set|deactivate|email-change\/request|email-change\/confirm|oauth\/google)$/, ["POST"]],
+  [/^users\/me\/(avatar|password|password\/set|deactivate|oauth\/google)$/, ["POST"]],
   [/^users\/me\/oauth\/google$/, ["DELETE"]],
   [/^users\/me\/sessions$/, ["GET"]],
   [/^users\/me\/sessions\/[a-f0-9-]{36}$/, ["DELETE"]],

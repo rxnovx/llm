@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.core.config import get_settings
 
 SCOPES = 'read_user read_api read_repository'
+PUBLISH_SCOPES = SCOPES + ' api'
 
 
 class GitlabInstance(BaseModel):
@@ -18,6 +19,7 @@ class GitlabInstance(BaseModel):
     base_url: str = Field(max_length=1000)
     client_id: str = Field(min_length=1, max_length=500)
     secret_ref: str = Field(pattern=r'^[a-zA-Z0-9_-]{1,64}$')
+    allow_publish: bool = False
 
     @model_validator(mode='after')
     def url(self):
@@ -30,7 +32,7 @@ class GitlabInstance(BaseModel):
         return self
 
     def public(self):
-        return {'id':self.id,'name':self.name,'base_url':self.base_url}
+        return {'id':self.id,'name':self.name,'base_url':self.base_url,'publish_enabled':self.allow_publish}
 
     def secret(self):
         try:
@@ -42,9 +44,18 @@ class GitlabInstance(BaseModel):
         except (ValueError,TypeError,KeyError):
             raise HTTPException(503,'GitLab OAuth 서버 인증 설정이 필요합니다.') from None
 
-    def fingerprint(self):
-        value = [self.id,self.base_url,self.client_id,callback_uri(),SCOPES]
+    def fingerprint(self, scopes=SCOPES):
+        value = [self.id,self.base_url,self.client_id,callback_uri(),scopes]
         return hashlib.sha256(json.dumps(value).encode()).hexdigest()
+
+    def granted_scopes(self, fingerprint):
+        for scopes in (SCOPES, PUBLISH_SCOPES):
+            if self.fingerprint(scopes) == fingerprint:
+                return scopes
+        return None
+
+    def can_publish(self, fingerprint):
+        return self.allow_publish and self.fingerprint(PUBLISH_SCOPES) == fingerprint
 
 
 def callback_uri():

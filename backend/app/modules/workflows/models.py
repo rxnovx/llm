@@ -1,5 +1,5 @@
 """Additive workflow tables; existing account/chat/document columns are unchanged."""
-from sqlalchemy import Boolean,ForeignKey,Integer,LargeBinary,String,Text,UniqueConstraint
+from sqlalchemy import Boolean,CheckConstraint,ForeignKey,Integer,LargeBinary,String,Text,UniqueConstraint
 from sqlalchemy.orm import Mapped,mapped_column,relationship
 from app.db.base import Base
 from app.modules.knowledge.models import uid,now
@@ -20,6 +20,15 @@ class ProjectConversation(Base):
     __tablename__='assistant_project_conversations'
     conversation_id: Mapped[str]=mapped_column(ForeignKey('chat_conversations.id',ondelete='CASCADE'),primary_key=True)
     project_id: Mapped[str]=mapped_column(ForeignKey('assistant_projects.id',ondelete='CASCADE'),index=True)
+
+
+class ProjectMember(Base):
+    __tablename__ = 'assistant_project_members'
+    __table_args__ = (CheckConstraint("role IN ('editor', 'viewer')"),)
+
+    project_id: Mapped[str] = mapped_column(ForeignKey('assistant_projects.id', ondelete='CASCADE'), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), primary_key=True, index=True)
+    role: Mapped[str] = mapped_column(String(12))
 
 
 class ConversationState(Base):
@@ -87,6 +96,19 @@ class ArtifactScope(Base):
     artifact_id: Mapped[str]=mapped_column(ForeignKey('assistant_artifacts.id',ondelete='CASCADE'),primary_key=True)
     message_id: Mapped[str]=mapped_column(ForeignKey('chat_messages.id',ondelete='CASCADE'),primary_key=True)
     artifact=relationship(Artifact,lazy='selectin')
+
+
+class ImageAdmission(Base):
+    __tablename__ = 'assistant_image_admissions'
+    __table_args__ = (CheckConstraint("state IN ('queued', 'running')"), UniqueConstraint('user_id', 'probe_id'))
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(36), unique=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
+    probe_id: Mapped[str | None] = mapped_column(String(36))
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    state: Mapped[str] = mapped_column(String(10))
+    expires_at: Mapped[int] = mapped_column(Integer, index=True)
 
 
 class ToolEvidence(Base):

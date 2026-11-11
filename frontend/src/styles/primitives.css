@@ -1,0 +1,126 @@
+:where(.account-card, .ops-panel, .ops-stats > div) {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+}
+
+.account-card { padding: 24px; }
+.account-notice {
+  display: flex;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+
+:where(
+  .account-input,
+  .cw-action-dialog input,
+  .cw-connection-detail :is(input, select),
+  .cw-context-label :is(textarea, select),
+  .cw-scope-field :is(input, select),
+  .cw-terminal-output input,
+  .cw-knowledge-inline input,
+  .cw-mcp-form input,
+  .cw-knowledge-section textarea,
+  .cw-workflow-dialog :is(textarea, select),
+  .ops-dashboard :is(input:not([type="checkbox"]), select, textarea)
+) {
+  min-width: 0;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--fg);
+
+  &:hover:not(:disabled) { border-color: var(--control-border-hover); }
+  &:focus-visible { border-color: var(--focus); }
+}
+
+.account-input {
+  width: 100%;
+  height: var(--control-height);
+  padding: 0 12px;
+  font-size: var(--text-base);
+}
+
+:where(.account-button, .cw-primary-button, .cw-small-button, .settings-outline-button, .ops-button) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  text-decoration: none;
+}
+
+:where(.account-button, .cw-primary-button) {
+  min-height: var(--control-height);
+  background: var(--primary);
+  color: var(--on-primary);
+  font-weight: 600;
+}
+
+:where(.account-button, .cw-primary-button):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 90%, var(--surface));
+}
+
+.account-button { padding: 8px 18px; font-size: var(--text-base); }
+
+:where(.cw-small-button, .settings-outline-button, .ops-button) {
+  min-height: var(--control-height-compact);
+  border-color: var(--control-border);
+  background: var(--surface);
+  color: var(--fg);
+}
+
+:where(.cw-small-button, .settings-outline-button, .ops-button, .app-modal-close, .cw-icon-button):hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+:where(.account-button, .cw-primary-button, .cw-small-button, .settings-outline-button, .ops-button):disabled {
+  opacity: .55;
+}
+
+:where(.app-modal-close, .cw-icon-button) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-height-compact);
+  height: var(--control-height-compact);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  flex-shrink: 0;
+}
+
+dialog:where(.app-modal, .cw-dialog) {
+  --dialog-gutter: 24px;
+  --dialog-inline-gutter: max(var(--dialog-gutter), env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
+  --dialog-block-gutter: max(var(--dialog-gutter), env(safe-area-inset-top, 0px), env(safe-area-inset-bottom, 0px));
+  height: fit-content;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-dialog);
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: var(--shadow-dialog);
+}
+
+dialog:is(.app-modal, .cw-dialog)[open] {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  max-width: calc(100% - var(--dialog-inline-gutter) - var(--dialog-inline-gutter));
+  max-height: calc(100vh - var(--dialog-block-gutter) - var(--dialog-block-gutter));
+  max-height: min(var(--dialog-height-limit, 100dvh), calc(100dvh - var(--dialog-block-gutter) - var(--dialog-block-gutter)));
+  overscroll-behavior: contain;
+}
+
+dialog:is(.app-modal, .cw-dialog)::backdrop { background: rgb(0 0 0 / 40%); }
+:root[data-theme="dark"] dialog:is(.app-modal, .cw-dialog)::backdrop { background: rgb(0 0 0 / 55%); }
+body:has(dialog:is(.app-modal, .cw-dialog)[open]) { overflow: hidden; }
+
+@media (max-width: 700px), (max-height: 540px) {
+  dialog:where(.app-modal, .cw-dialog) { --dialog-gutter: 16px; }
+}

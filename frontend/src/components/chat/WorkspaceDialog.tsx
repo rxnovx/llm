@@ -1,5 +1,6 @@
 "use client";
 import { useEffect,useRef,useState } from "react";
+import { useDialogDismiss } from "@/components/shared/useDialogDismiss";
 import { authenticatedFetch } from "@/lib/authenticated-fetch";
 import type { Workspace } from "@/types/chat";
 import { Icon } from "./Icons";
@@ -12,6 +13,7 @@ type Output={job_id:string;status:string;exit_code:number|null;next_cursor:numbe
 const failure=(e:unknown)=>e instanceof Error?e.message:"작업을 완료하지 못했습니다.";
 export function WorkspaceDialog({conversationId,onClose}:{conversationId:string;onClose:()=>void}) {
   const dialog=useRef<HTMLDialogElement>(null);
+  const dismiss = useDialogDismiss(onClose);
   const [items,setItems]=useState<Workspace[]>([]),[selected,setSelected]=useState("");
   const [error,setError]=useState(""),[busy,setBusy]=useState(false),[result,setResult]=useState("");
   const [query,setQuery]=useState(""),[path,setPath]=useState(""),[command,setCommand]=useState("");
@@ -53,7 +55,7 @@ export function WorkspaceDialog({conversationId,onClose}:{conversationId:string;
     try{const value=await request<Record<string,unknown>>(`/${workspace.id}/tools`,{method:'POST',body:JSON.stringify({name,arguments:args})});setResult(JSON.stringify(value,null,2));return value;}
     catch(e){setError(failure(e));}finally{setBusy(false);}
   };
-  return <dialog ref={dialog} className="cw-dialog cw-workspace-dialog" aria-labelledby="workspace-title" onCancel={e=>{e.preventDefault();onClose();}}>
+  return <dialog ref={dialog} className="cw-dialog cw-workspace-dialog" aria-labelledby="workspace-title" {...dismiss}>
     <header className="cw-dialog-header"><div><span className="cw-overline">현재 대화</span><h2 id="workspace-title">프로젝트 작업공간</h2></div><button type="button" className="cw-icon-button" aria-label="작업공간 닫기" onClick={onClose}><Icon name="close"/></button></header>
     <p className="cw-dialog-description">GitLab 계정을 연결한 뒤 그룹/프로젝트 분석을 요청하면 자동으로 작업공간을 만듭니다. @GitLab에서 직접 선택할 수도 있습니다. 같은 작업공간의 소스와 수정 사항을 이어서 사용할 수 있습니다.</p>
     {error&&<p role="alert" className="cw-inline-error">{error}</p>}

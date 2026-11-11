@@ -2,10 +2,12 @@
 import { useEffect, useState } from "react";
 import { WorkspaceLink as Link } from "@/components/shared/WorkspaceLink";
 import { useRouter } from "next/navigation";
+import { useModalNavigation } from "@/components/auth/modal-navigation";
 import { useAuthStore } from "@/stores/authStore";
 import { api } from "@/lib/api";
+import { getAuthSessionVersion } from "@/lib/auth";
 import { getApiErrorMessage } from "@/lib/api-error";
-import { AvatarSection, ProfileSection, EmailChangeSection, EmailVerificationSection,
+import { AvatarSection, ProfileSection, EmailVerificationSection,
   OAuthConnectionSection, PasswordSection, SessionSection, DangerSection } from "./AccountSections";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
 import type { AccountSession } from "@/types/auth";
@@ -25,6 +27,7 @@ const sections: { id: Section; label: string; title: string; icon: IconName }[] 
 ];
 export function AccountPage({ initialSection = "general" }: { initialSection?: Section }) {
   const router = useRouter();
+  const canNavigate = useModalNavigation();
   const user = useAuthStore((s) => s.user);
   const initialized = useAuthStore((s) => s.initialized);
   const [tab, setTab] = useState<Section>(initialSection);
@@ -46,10 +49,13 @@ export function AccountPage({ initialSection = "general" }: { initialSection?: S
     await useAuthStore.getState().refreshUser();
     setError(""); setMessage(text);
   };
-  const logout = async (all = false) => {
+  const logout = async (all = false, sessionVersion = getAuthSessionVersion()) => {
     if (loggingOut) return;
     setLoggingOut(true);
-    try { await useAuthStore.getState().logout(all); router.replace(workspaceHref("/login", window.location.search), { scroll: false }); }
+    try {
+      const signedOut = await useAuthStore.getState().logout(all, sessionVersion);
+      if (signedOut && canNavigate()) router.replace(workspaceHref("/login", window.location.search), { scroll: false });
+    }
     catch (caught) { fail(caught, "로그아웃을 완료하지 못했습니다. 다시 시도해주세요."); }
     finally { setLoggingOut(false); }
   };
@@ -61,7 +67,7 @@ export function AccountPage({ initialSection = "general" }: { initialSection?: S
     <Icon name={item.icon} size={18} /><span>{item.label}</span></button>)}</nav>
     {user.is_global_admin && <Link className="settings-admin-link" href="/admin"><Icon name="server" size={17} />운영 대시보드</Link>}
     <div className="settings-identity"><UserAvatar src={user.avatar_url} name={user.display_name || user.username} className="size-8 shrink-0 rounded-full" /><div><strong>{user.display_name || user.username}</strong><span>@{user.username}</span></div></div>
-  </aside><section className="settings-content" aria-labelledby="settings-section-title"><header><h2 id="settings-section-title">{sections.find((item) => item.id === tab)!.title}</h2></header>
+  </aside><section className="settings-content" key={tab} aria-labelledby="settings-section-title"><header><h2 id="settings-section-title">{sections.find((item) => item.id === tab)!.title}</h2></header>
     {message && <p className="account-notice mb-5 text-[var(--success)]" role="status">{message}</p>}
     {error && <p className="account-notice mb-5 text-[var(--error)]" role="alert">{error}</p>}
     <div className="space-y-5">
@@ -73,22 +79,23 @@ export function AccountPage({ initialSection = "general" }: { initialSection?: S
       {tab === "apps" && <AppConnections />}
       {tab === "security" && <>
         <EmailVerificationSection user={user} onSuccess={setMessage} onError={fail} />
-        <EmailChangeSection user={user} onSuccess={setMessage} onError={fail} />
         <OAuthConnectionSection user={user} onSuccess={success} onError={fail} />
-        <PasswordSection hasPassword={user.has_password} onSuccess={async () => { await logout(); }} onError={fail} />
+        <PasswordSection hasPassword={user.has_password} onSuccess={(sessionVersion) => logout(false, sessionVersion)} onError={fail} />
       </>}
       {tab === "sessions" && <>{sessionsLoading ? <p className="settings-loading" role="status">로그인 기기를 불러오는 중…</p> : <SessionSection sessions={sessions} onRevoke={async (session) => {
+          const sessionVersion = getAuthSessionVersion();
           try { await api.delete(`/users/me/sessions/${session.id}`);
-            if (session.is_current) await logout();
+            if (session.is_current) await logout(false, sessionVersion);
             else { setSessions((old) => old.filter((s) => s.id !== session.id)); setMessage("로그인 세션을 해제했습니다."); }
           } catch (caught) { fail(caught, "세션을 해제하지 못했습니다."); }
         }} />}
         <div className="flex justify-end"><button className="text-sm underline" disabled={loggingOut} onClick={() => void logout(true)}>모든 기기에서 로그아웃</button></div>
       </>}
-      {tab === "account" && <><div className="settings-row"><div><h3>이메일</h3><p>{user.email}</p></div><button className="settings-text-button" onClick={() => setTab("security")}>변경</button></div>
+      {tab === "account" && <><div className="settings-row"><div><h3>로그인 이메일</h3><p>{user.email}</p></div></div>
         <div className="settings-row"><div><h3>현재 기기에서 로그아웃</h3><p>저장한 대화는 다시 로그인하면 볼 수 있습니다.</p></div><button className="settings-outline-button" disabled={loggingOut} onClick={() => void logout()}>로그아웃</button></div>
         <DangerSection hasPassword={user.has_password} onDeactivate={async (password) => {
-          try { await api.post("/users/me/deactivate", { current_password: password }); await logout(); }
+          const sessionVersion = getAuthSessionVersion();
+          try { await api.post("/users/me/deactivate", { current_password: password }); await logout(false, sessionVersion); }
           catch (caught) { fail(caught, "계정을 비활성화하지 못했습니다."); }
         }} />
       </>}

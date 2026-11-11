@@ -9,6 +9,7 @@ const rules = [
   [/^catalog$/, ["GET"]],
   [/^gitlab\/[a-zA-Z0-9_-]{1,64}\/authorize$/, ["POST"]],
   [/^gitlab\/oauth\/complete$/, ["POST"]],
+  [/^gitlab\/merge-request\/resolve$/, ["POST"]],
   [new RegExp(`^connections/${uuid}$`), ["DELETE"]],
   [new RegExp(`^connections/${uuid}/projects(?:/[1-9][0-9]*/(?:tree|branches))?$`), ["GET"]],
 ] as const;
