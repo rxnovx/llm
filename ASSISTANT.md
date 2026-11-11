@@ -117,4 +117,4 @@ MCP_SECRETS_JSON={"search":"your-private-service-token"}
 
 프로젝트 경로를 포함한 분석 요청은 모델의 구조화된 판단 후 내 GitLab 연결에서 프로젝트를 조회하고 읽기 전용 Terminal MCP 분석으로 이어집니다. 자동 RAG는 준비된 내 자료·공유 자료·현재 대화 첨부에서만 검색합니다. 근거가 부족한 초안은 보류하고 제한된 횟수로 재검색·재작성하며, 확인하지 못하면 보류 답변을 저장합니다.
 
-설정 모달의 자동 처리·검색 방식, 서버의 ASSISTANT_* 설정, 실제 코드 분석 알고리즘·한계와 이번 미실행 검증 항목은 [AUTOMATIC_ASSISTANT.md](AUTOMATIC_ASSISTANT.md)에 있습니다. 근거 점검은 모든 할루시네이션 탐지를 보장하지 않습니다.
+설정 모달의 자동 처리·검색 방식, 서버의 ASSISTANT_* 설정, 실제 코드 분석 알고리즘·한계와 실행 검증 결과는 [AUTOMATIC_ASSISTANT.md](AUTOMATIC_ASSISTANT.md)에 있습니다. 실제 폐쇄망 연결·모델 품질·단말 확인은 별도로 필요하며, 근거 점검은 모든 할루시네이션 탐지를 보장하지 않습니다.

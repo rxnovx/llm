@@ -166,4 +166,4 @@ Python은 표준 AST로 함수·클래스·import·문법상 호출 표현을 �
 
 repository_index·code_definition·code_references·call_hierarchy·dependency_graph·code_context를 추가했습니다. Python AST 및 JS/TS Tree-sitter의 스코프·import 바인딩으로 관계 후보를 찾고 실제 소스 구간을 반환합니다. 동적 호출·외부 모듈·지원하지 않는 바인딩은 미해석으로 남깁니다. 정의 id는 파일·줄·한정 이름이며 내용 해시는 편집 시 캐시 무효화에 사용합니다.
 
-자동 GitLab 분석은 기존 사용자·대화별 워크스페이스와 일회용 브로커를 사용하며 실행 권한을 요청하거나 승격하지 않습니다. 도구·범위 제한·질문 기반 연결 방법은 [AUTOMATIC_ASSISTANT.md](AUTOMATIC_ASSISTANT.md)를 참고하세요. 이번 추가 도구의 실행 검증은 아직 수행하지 못했습니다.
+자동 GitLab 분석은 기존 사용자·대화별 워크스페이스와 일회용 브로커를 사용하며 실행 권한을 요청하거나 승격하지 않습니다. 도구·범위 제한·질문 기반 연결 방법은 [AUTOMATIC_ASSISTANT.md](AUTOMATIC_ASSISTANT.md)를 참고하세요. 새 도구의 정의·참조·호출·캐시·권한 경계와 실제 Git HTTP·MCP 통신 자동 검증은 통과했습니다. 실제 사용자 모델·GitLab 계정 서버·Docker·Termux 실행은 별도 검증 대상입니다.

@@ -1,10 +1,30 @@
 # 계정·대화·운영 기능 검증
 
+## 자동 판단·RAG·코드 분석 최신 검증 — 2026-11-11
+
+PR #4의 `02114ee` 소스를 새 검증 폴더로 복원하고 원격 223개 파일의 Git blob 해시와 전체 tree 일치를 확인했습니다. 아래 결과는 복원한 코드와 작업공간 UUID 직렬화 수정에 대한 결과입니다. GitHub Actions는 사용하지 않았습니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 백엔드 전체 | `python -m pytest -q`: **186개 통과**, 57.36초. 비밀번호 강도 검사의 기존 Starlette 상태 코드 상수 폐기 예정 경고 2건만 남음 |
+| 추가 자동 처리·코드 분석 | 최초 대상 테스트 30개 통과. 실제 Git HTTP clone·MCP SDK/HTTP·출처·권한·재검색·보류·취소·중복 실행 방지·공유 해제·재생성 복원·정적 관계·캐시 검증 포함 |
+| 작업공간 직렬화 | workspace_id에 UUID 객체를 할당하도록 수정. 자동 clone·명령 실행 흐름에서 Pydantic 직렬화 경고를 실패로 처리하는 회귀 조건 추가 |
+| 프론트엔드 Node | `node --experimental-strip-types --test tests/*.test.mjs`: **69개 통과**, 프록시·SSE·CSRF·자료/앱·환경 우선순위·Markdown·WASM·모달 이동 포함 |
+| 정적 검사·빌드 | `npm run typecheck`, `npm run lint`, `npm run build` 모두 통과 |
+| 실제 서버 HTTP | `scripts/smoke_standalone.py` 통과. 실제 Python·빌드된 Next 서버에서 계정·스트리밍·운영·문맥/대기열·GitLab API 대역·multipart 업로드/자동 색인/RAG/인용/삭제·개인 설정 확인 |
+| 브라우저 | Playwright Chromium이 `socket() failed: Operation not permitted`, `ptrace: Operation not permitted`로 시작하지 못함. 공유 Chrome도 준비된 테스트 프로세스의 localhost:3101에 `ERR_CONNECTION_REFUSED`로 접근하지 못함. 실제 화면·포커스·모바일·IME·스크린샷은 통과로 기록하지 않음 |
+
+Python 3.12.14, Node 24.22.1을 사용했습니다. 모델 추론·GitLab 계정 API·임베딩/Qdrant/재정렬은 로컬 대역 또는 HTTP 계약으로 검사하며, 사용자의 실제 폐쇄망 서버에 접속한 결과가 아닙니다. 실제 모델의 JSON/도구 선택·답변/검색 품질·부하, 실제 GitLab OAuth·Qdrant·Docker/Compose/Nginx·PostgreSQL·사설 CA·Termux/Android는 해당 환경에서 추가 검증해야 합니다.
+
+자동화 가능한 기본 검증은 개발 측에서 완료하고, 실제 서비스 연결과 단말에서만 확인할 수 있는 부분을 환경별 검증으로 구분합니다. 아래 기록은 이전 커밋 또는 초기 작성 당시의 이력입니다.
+
+## 이전 검증 기록
+
 검증일: 2026-11-10. Node.js 24.22.1, Python 3.12.14. 이 저장소의 루트 경로와 LLM 서비스 식별자로 다시 검증했습니다. GitHub Actions는 실행하지 않았습니다.
 
 ## 범용 대화·파일 RAG·MCP 앱 추가 검증
 
-검증일: 2026-11-11 (Asia/Seoul). 기존 PR #4에 범용 기능을 추가한 최신 검증 기록입니다.
+검증일: 2026-11-11 (Asia/Seoul). 기존 PR #4에 범용 기능을 처음 추가한 이전 커밋의 검증 기록입니다.
 
 | 검증 | 결과 |
 | --- | --- |
@@ -158,7 +178,7 @@ FastAPI 테스트 실행 시 상위 Starlette의 httpx 및 HTTP 422 상수에 �
 
 ## 2026-11-10 추가 변경: 자동 판단·근거 점검·코드 관계 분석
 
-**상태: 이번 변경은 실행 미검증.** 작업 실행 환경이 unavailable 상태여서 Python/Node 실행·타입 검사·린트·빌드·브라우저 검증을 수행하지 못했습니다. 이 문서 앞부분의 성공 기록은 이전 커밋의 결과입니다. GitHub Actions는 실행하지 않았습니다.
+**초기 등록 당시 상태: 실행 미검증.** `02114ee`를 등록할 때 작업 실행 환경이 unavailable 상태여서 Python/Node 실행·타입 검사·린트·빌드·브라우저 검증을 수행하지 못했습니다. 이후 환경 복구 후의 결과는 이 문서 상단의 최신 검증 항목에 기록했습니다. GitHub Actions는 실행하지 않았습니다.
 
 추가한 테스트 범위:
 - 수동 선택 없는 질문 → 연결된 프로젝트 조회 → 실제 Git HTTP clone·MCP 색인·출처·저장

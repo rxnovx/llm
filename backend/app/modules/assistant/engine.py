@@ -3,6 +3,7 @@ import asyncio
 import json
 import time
 from urllib.parse import quote
+from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -122,7 +123,7 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
         if selection:
             yield 'activity',record('gitlab_checkout','running','선택한 프로젝트를 작업공간에 준비하고 있습니다.')
             row=await service.ensure(bind,user_id,turn.conversation_id,selection)
-            selection.workspace_id=row.id
+            selection.workspace_id=UUID(row.id)
             yield 'workspace',service.public(row)
             yield 'activity',record('gitlab_checkout','complete','프로젝트 작업공간을 준비했습니다.')
             tools=await client.manifest(row)

@@ -27,6 +27,7 @@ def saved(client,headers,conversation):
     return client.get('/chat/conversations/'+conversation,headers=headers).json()['messages'][-1]
 
 
+@pytest.mark.filterwarnings('error:Pydantic serializer warnings:UserWarning')
 def test_plain_project_question_resolves_clones_indexes_and_persists_without_picker(client,account,workspace_stack,monkeypatch):
     _,commit=workspace_stack
     headers=auth(account());connection=connect(client,headers);conversation=create(client,headers)
@@ -152,6 +153,7 @@ def test_auto_rag_modes_control_prefetch(client,account,monkeypatch,mode):
     assert bool(message['sources'])==(mode=='always')
 
 
+@pytest.mark.filterwarnings('error:Pydantic serializer warnings:UserWarning')
 def test_execution_is_not_replayed_when_grounding_requests_more_evidence(client,account,workspace_stack,monkeypatch):
     terminal,_=workspace_stack
     headers=auth(account());connection=connect(client,headers);conversation=create(client,headers);kb=base(client,headers)
