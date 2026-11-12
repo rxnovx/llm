@@ -136,7 +136,6 @@ export CARGO_BUILD_TARGET="aarch64-linux-android"
 
 # cryptography 설치
 python -m pip install 'cryptography>=46.0.7,<51'
-<<<<<<< HEAD
 
 # Termux 패키지 업데이트
 pkg update && pkg upgrade -y
@@ -166,13 +165,16 @@ python -m pip install --no-build-isolation lxml
 
 # 전체 requirements 설치
 python -m pip install -r requirements.txt
-=======
->>>>>>> f9d54596ffc17a8c157430ac7c8b63fbe1bb9f9a
 ```
 
 ```bash
+# 3.13
 LD_PRELOAD="$PREFIX/lib/libpython3.13.so${LD_PRELOAD:+:$LD_PRELOAD}" \
 python main.py
+
+# 3.14
+LD_PRELOAD="$PREFIX/lib/libpython3.14.so${LD_PRELOAD:+:$LD_PRELOAD}" \
+python -c "from cryptography.hazmat.bindings._rust import exceptions; print('SUCCESS')"
 ```
 
 #### 3. 프론트엔드 실행
