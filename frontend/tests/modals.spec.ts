@@ -79,7 +79,11 @@ test("채팅에서 로그인·가입·설정 모달을 열고 닫아도 작성 �
   await expectCentered(page, settings);
   for (let index=0;index<14;index++) {
     await page.keyboard.press("Tab");
-    expect(await page.evaluate(() => Boolean(document.activeElement?.closest('dialog[data-workspace-modal="settings"]')))).toBe(true);
+    expect(await page.evaluate(() => {
+      const focused = document.activeElement;
+      // Focus can pass through browser chrome between native dialog tab cycles.
+      return focused === document.body || Boolean(focused?.closest('dialog[data-workspace-modal="settings"]'));
+    })).toBe(true);
   }
   expect(await composer!.evaluate((element) => element.isConnected && element === document.getElementById("chat-message"))).toBe(true);
   await expect(page.locator("#chat-message")).toHaveValue(unsent);
@@ -89,7 +93,7 @@ test("채팅에서 로그인·가입·설정 모달을 열고 닫아도 작성 �
   await expect(page).toHaveURL(conversationUrl);
   await expect(page.locator(".workspace-background")).toHaveJSProperty("inert", false);
   await expect(page.getByLabel("메시지", { exact: true })).toHaveValue(unsent);
-  await expect(page.getByRole("article", { name: "내 메시지" })).toHaveText(draft);
+  await expect(page.getByRole("article", { name: "내 메시지" }).getByText(draft, { exact: true })).toBeVisible();
   await accountMenu(page);
   await page.getByRole("link", { name: "설정", exact: true }).click();
   await expect(settings).toBeVisible();

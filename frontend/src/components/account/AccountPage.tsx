@@ -13,7 +13,6 @@ import { ThemeToggle } from "@/components/shared/ThemeToggle";
 import type { AccountSession } from "@/types/auth";
 import { Icon, type IconName } from "@/components/chat/Icons";
 import { UserAvatar } from "@/components/shared/UserAvatar";
-import { workspaceHref } from "@/lib/workspace-navigation";
 import { AppConnections } from "./AppConnections";
 
 type Section = "general" | "profile" | "security" | "sessions" | "account" | "apps";
@@ -54,7 +53,7 @@ export function AccountPage({ initialSection = "general" }: { initialSection?: S
     setLoggingOut(true);
     try {
       const signedOut = await useAuthStore.getState().logout(all, sessionVersion);
-      if (signedOut && canNavigate()) router.replace(workspaceHref("/login", window.location.search), { scroll: false });
+      if (signedOut && canNavigate()) router.replace("/login", { scroll: false });
     }
     catch (caught) { fail(caught, "로그아웃을 완료하지 못했습니다. 다시 시도해주세요."); }
     finally { setLoggingOut(false); }

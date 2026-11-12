@@ -333,6 +333,14 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             document = client.get('/').text
             assert 'data-workspace-background' in document and re.search(r'<textarea\b[^>]*id="chat-message"',document)
             assert 'data-workspace-modal=' not in document
+            conversation_id = '12345678-1234-1234-1234-123456789abc'
+            conversation_page = f'/c/{conversation_id}'
+            legacy = client.get('/', params={'chat': conversation_id, 'token': 'discard'})
+            assert legacy.status_code == 307 and legacy.headers['location'] == conversation_page
+            assert client.get('/', params={'chat': 'invalid'}).status_code == 200
+            page = client.get(conversation_page)
+            assert page.status_code == 200 and 'data-workspace-modal=' not in page.text
+            assert client.get('/c/invalid').status_code == 404
             modal_paths = {
                 '/login':'auth','/user/signup':'auth','/user/reset-password':'auth','/user/verify-email':'auth','/user/recover':'auth',
                 '/user/profile':'settings','/user/profile/edit':'settings','/user/settings':'settings','/admin':'admin',

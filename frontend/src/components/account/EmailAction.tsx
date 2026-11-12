@@ -9,7 +9,7 @@ import { getAuthSessionVersion } from "@/lib/auth";
 import { getApiErrorMessage } from "@/lib/api-error";
 import { useAuthStore } from "@/stores/authStore";
 import type { AuthMessage } from "@/types/auth";
-import { workspaceHref, WORKSPACE_LOCATION_EVENT } from "@/lib/workspace-navigation";
+import { notifyWorkspaceLocation, workspaceHref } from "@/lib/workspace-navigation";
 
 export function EmailAction({ mode }: { mode: "verify" | "reset" | "recover" }) {
   const query = useSearchParams();
@@ -52,8 +52,8 @@ export function EmailAction({ mode }: { mode: "verify" | "reset" | "recover" }) 
       if (current.get("token") !== token || (mode === "verify" && current.get("action") === "email-change")) return;
       setMessage(text); setDone(Boolean(token)); setPassword(""); setConfirm("");
       if (token) {
-        window.history.replaceState(null, "", workspaceHref(window.location.pathname, window.location.search));
-        window.dispatchEvent(new Event(WORKSPACE_LOCATION_EVENT));
+        window.history.replaceState(null, "", workspaceHref(window.location.pathname, window.location));
+        notifyWorkspaceLocation();
       }
     } catch (caught) { setError(getApiErrorMessage(caught, "요청을 완료하지 못했습니다.")); }
     finally { setBusy(false); }

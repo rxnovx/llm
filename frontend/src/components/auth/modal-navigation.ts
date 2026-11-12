@@ -1,7 +1,7 @@
 "use client";
 import { createContext, useContext } from "react";
 import { useRouter } from "next/navigation";
-import { loginReturnUrl, replaceConversationLocation } from "@/lib/workspace-navigation";
+import { loginReturnUrl, updateConversationLocation, workspaceConversationId } from "@/lib/workspace-navigation";
 
 export const ModalNavigationContext = createContext<() => boolean>(() => true);
 
@@ -15,12 +15,9 @@ export function useCompleteLogin() {
   const router = useRouter();
   return () => {
     if (!canNavigate()) return;
-    const search = window.location.search;
-    const destination = loginReturnUrl(search);
-    if (destination === "/" && new URLSearchParams(search).has("chat")) {
-      // The authenticated workspace reads the current URL on its first mount.
-      replaceConversationLocation(null);
-    }
+    const destination = loginReturnUrl(window.location.search);
+    // Drop the guest modal's background before activating a fresh workspace.
+    if (destination === "/" && workspaceConversationId(window.location)) updateConversationLocation(null, "replace");
     router.replace(destination, { scroll: false });
   };
 }

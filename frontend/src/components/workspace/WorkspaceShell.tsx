@@ -1,22 +1,34 @@
 "use client";
-import { useEffect, useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
+import { Suspense, useEffect, useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ModalNavigationContext } from "@/components/auth/modal-navigation";
 import { ChatWorkspace } from "@/components/chat/ChatWorkspace";
 import { Icon } from "@/components/chat/Icons";
 import { useDialogDismiss } from "@/components/shared/useDialogDismiss";
-import { modalContentScope, workspaceModal, workspaceReturnUrl, WORKSPACE_LOCATION_EVENT } from "@/lib/workspace-navigation";
+import { conversationIdFromPath, conversationLoginUrl, modalContentScope, workspaceConversationId, workspaceModal, workspaceReturnUrl } from "@/lib/workspace-navigation";
 import { useAuthStore } from "@/stores/authStore";
+import { useWorkspaceRoute, WorkspaceLocationContext, WorkspaceLocationObserver } from "./workspace-location";
 import "./workspace-shell.css";
 
 export function WorkspaceShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const location = useWorkspaceRoute(pathname);
   const identity = useAuthStore((state) => state.user?.subject ?? "guest");
+  const initialized = useAuthStore((state) => state.initialized);
+  const router = useRouter();
   const modal = workspaceModal(pathname);
-  useEffect(() => { window.dispatchEvent(new Event(WORKSPACE_LOCATION_EVENT)); }, [pathname]);
-  return <div className="workspace-app"><div className="workspace-background" data-workspace-background inert={modal ? true : undefined} aria-hidden={modal ? true : undefined}>
-    <ChatWorkspace />
-  </div>{modal && <RouteModal kind={modal.kind} title={modal.title} route={pathname} identity={identity}>{children}</RouteModal>}</div>;
+  useEffect(() => {
+    const id = conversationIdFromPath(pathname);
+    if (id && initialized && identity === "guest" && window.location.pathname === pathname) {
+      router.replace(conversationLoginUrl(id), { scroll: false });
+    }
+  }, [pathname, initialized, identity, router]);
+  return <WorkspaceLocationContext.Provider value={location}>
+    <Suspense fallback={null}><WorkspaceLocationObserver /></Suspense>
+    <div className="workspace-app"><div className="workspace-background" data-workspace-background inert={modal ? true : undefined} aria-hidden={modal ? true : undefined}>
+      <ChatWorkspace conversationId={workspaceConversationId(location)} pathname={location.pathname} />
+    </div>{modal && <RouteModal kind={modal.kind} title={modal.title} route={pathname} identity={identity}>{children}</RouteModal>}</div>
+  </WorkspaceLocationContext.Provider>;
 }
 
 function RouteModal({ children, kind, title, route, identity }: { children: ReactNode; kind: string; title: string; route: string; identity: string }) {

@@ -4,6 +4,10 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { appMentionAt, hasGitlabMention, insertGitlabMention, removeAppMention } from "../src/lib/app-mentions.ts";
+import * as workspaceNavigation from "../src/lib/workspace-navigation.ts";
+
+const chat = "12345678-1234-1234-1234-123456789abc";
+const returnTo = `returnTo=${encodeURIComponent(`/c/${chat}`)}`;
 
 test("app mentions match standalone prefixes at the caret and preserve surrounding text", () => {
   for (const value of ["@", "@Git", "이 코드 @gitlab"]) assert.ok(appMentionAt(value,value.length));
@@ -50,8 +54,9 @@ function environment({ popup = null, reply = {}, failure = null } = {}) {
   const exports = {}, storage = new Map(), calls = [], events = [];
   const context = vm.createContext({ exports, URLSearchParams, Date, Event,
     sessionStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key,value) => storage.set(key,value), removeItem: (key) => storage.delete(key) },
-    window: { open: () => popup, location: { search:"?chat=conversation-one", assign: (url) => calls.push(url) }, dispatchEvent: (event) => events.push(event.type) },
-    require: () => ({ authenticatedFetch: async (url, init) => { calls.push({ url, init }); if (failure) throw failure; return Response.json(reply); } }),
+    window: { open: () => popup, location: { pathname: "/user/settings/apps", search: `?${returnTo}`, assign: (url) => calls.push(url) }, dispatchEvent: (event) => events.push(event.type) },
+    require: (name) => name === "./workspace-navigation" ? workspaceNavigation
+      : { authenticatedFetch: async (url, init) => { calls.push({ url, init }); if (failure) throw failure; return Response.json(reply); } },
   });
   const code = ts.transpileModule(readFileSync("src/lib/app-connections.ts","utf8"),{ compilerOptions:{ module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022 } }).outputText;
   vm.runInContext(code,context);
@@ -62,9 +67,8 @@ test("full-navigation fallback preserves only an expiring owner/chat-scoped draf
   env.backupOAuthDraft("alice","작성 중인 질문","chat-a");
   assert.equal(env.takeOAuthDraft("bob","chat-a"),null);
   assert.equal(env.takeOAuthDraft("alice","chat-a"),null);
-  const chat="12345678-1234-1234-1234-123456789abc";
   env.backupOAuthDraft("alice","질문",chat);
-  assert.equal(env.oauthReturnPath("alice"),`/user/settings/apps?chat=${chat}`);
+  assert.equal(env.oauthReturnPath("alice"),`/user/settings/apps?${returnTo}`);
   assert.equal(env.oauthReturnPath("bob"),"/user/settings/apps");
   assert.equal(env.takeOAuthDraft("alice",chat),"질문");
   env.backupOAuthDraft("alice","작성 중인 질문","chat-a");
@@ -74,6 +78,7 @@ test("full-navigation fallback preserves only an expiring owner/chat-scoped draf
   assert.equal(env.takeOAuthDraft("alice","chat-a"),null);
   await env.connectGitlab("office");
   assert.equal(JSON.parse(env.calls[0].init.body).popup,false);
+  assert.equal(JSON.parse(env.calls[0].init.body).chat_id,chat);
   assert.deepEqual(env.events,["llm:oauth-leaving"]);
   assert.equal(env.calls[1],"https://gitlab.example/oauth/authorize");
 });
