@@ -311,15 +311,35 @@ async def tool_reply(connection,model,history,tools,settings):
             detail = f'완료 항목은 {labels}입니다.' if labels else '완료한 항목을 확인하지 못했습니다.'
             return {'role': 'assistant', 'content': '테스트 모드에서 병렬 분석 작업 흐름을 실행했습니다. ' + detail,
                     'tool_calls': []}
-        if 'create_document' in names:
-            if not any(m.get('tool_name')=='create_document' for m in history):
-                import re
-                question=next((m['content'] for m in reversed(history) if m['role']=='user'),'')
-                format=next((f for f in ['xlsx','csv','pdf','txt','md'] if f in question.lower()),'xlsx' if '엑셀' in question else 'md')
-                return {'role':'assistant','content':'','tool_calls':[{'id':'demo-document','type':'function','function':{'name':'create_document','arguments':{'name':'테스트 결과','format':format,'content':'테스트 모드에서 생성한 예시 문서입니다.','columns':['항목','내용'],'rows':[['실행','파일 생성 검증'],['모드','테스트']]}}}]}
-            result=next((m for m in reversed(history) if m.get('tool_name')=='create_document'),None)
-            if result and 'error' in json.loads(result['content']):return {'role':'assistant','content':'테스트 파일을 생성하지 못했습니다. 작업 기록과 문서 생성 의존성·입력 제한을 확인하세요.','tool_calls':[]}
-            return {'role':'assistant','content':'테스트 문서를 생성했습니다. 아래 결과 파일에서 미리보기와 다운로드를 사용할 수 있습니다. 실제 모델의 생성 결과는 아닙니다.','tool_calls':[]}
+        from app.modules.workflows import artifacts
+        if names & artifacts.FILE_TOOLS:
+            result = next((m for m in reversed(history) if m.get('tool_name') in artifacts.FILE_TOOLS), None)
+            if result:
+                detail = ('테스트 파일을 생성하지 못했습니다. 작업 기록에서 원인을 확인하세요.'
+                          if 'error' in json.loads(result['content']) else '테스트 모드에서 다운로드할 수 있는 예시 파일을 만들었습니다.')
+                return {'role': 'assistant', 'content': detail, 'tool_calls': []}
+            question = next((m['content'].lower() for m in reversed(history) if m['role'] == 'user'), '')
+            sample = '테스트 모드에서 생성한 예시 문서입니다.'
+            if artifacts.ARCHIVE_TOOL in names:
+                name = artifacts.ARCHIVE_TOOL
+                arguments = {'name': '테스트 결과', 'entries': [{'path': 'README.txt', 'content': sample}]}
+            elif artifacts.DOCUMENT_TOOL in names:
+                name = artifacts.DOCUMENT_TOOL
+                file_format = next((fmt for fmt in ['html', 'docx', 'pptx', 'xlsx', 'csv', 'pdf', 'txt', 'md'] if fmt in question),
+                                   'xlsx' if '엑셀' in question else 'md')
+                arguments = {'name': '테스트 결과', 'format': file_format}
+                if file_format == 'pptx':
+                    arguments['slides'] = [{'title': '테스트 발표자료', 'bullets': [sample]}]
+                elif file_format == 'html':
+                    arguments['content'] = f'<main><h1>테스트 발표자료</h1><p>{sample}</p></main>'
+                else:
+                    arguments.update(content=sample, columns=['항목', '내용'],
+                                     rows=[['실행', '파일 생성 검증'], ['모드', '테스트']])
+            else:
+                return {'role': 'assistant', 'content': 'WAV를 만들려면 도구 호출을 지원하는 실제 채팅 모델을 연결하세요.', 'tool_calls': []}
+            return {'role': 'assistant', 'content': '', 'tool_calls': [
+                {'id': 'demo-file', 'type': 'function', 'function': {'name': name, 'arguments': arguments}},
+            ]}
         if 'repo_map' not in names:
             return {'role':'assistant','content':'테스트 모드에서 선택한 자료와 앱 연결 흐름을 확인했습니다. '+('[KS1]' if any('[KS1]' in m.get('content','') for m in history) else '')+'\n\n실제 모델이 작성한 분석은 아닙니다. 실제 연결을 선택하면 자료 검색과 도구 호출을 사용해 답변합니다.','tool_calls':[]}
         if any('[GL1]' in m.get('content','') for m in history):

@@ -17,7 +17,7 @@ from app.modules.chat.models import Conversation,Message
 from app.modules.chat.scheduler import lock
 from app.modules.knowledge.models import KnowledgeBase,Document
 from app.modules.knowledge import service as knowledge
-from . import conversations as service,artifacts
+from . import conversations as service, artifacts, document_formats
 from .models import Project,ProjectConversation,ProjectMember,MessageVersion,ConversationState,UploadAttempt,Feedback,Artifact
 from .projects import available_projects, project_access
 
@@ -56,7 +56,7 @@ class SummaryInput(BaseModel):
 
 class ExportInput(BaseModel):
     model_config=ConfigDict(extra='forbid')
-    format: Literal['md','txt','csv','xlsx','pdf']
+    format: artifacts.ExportFormat
     name: str=Field('대화 결과',min_length=1,max_length=140)
 
 
@@ -238,7 +238,7 @@ def select_version(message_id: UUID,version_id: UUID,context: Authenticated,db: 
 
 
 @router.get('/formats')
-def formats(context: Authenticated):return {'formats':artifacts.formats()}
+def formats(context: Authenticated):return {'formats':[file_format for file_format in artifacts.formats() if file_format != 'pptx']}
 
 
 @router.post('/messages/{message_id}/export',status_code=201)
@@ -268,8 +268,15 @@ def owned_artifact(db,user_id,artifact_id):
 @router.get('/artifacts/{artifact_id}')
 def preview(artifact_id: UUID,context: Authenticated,db: Database):
     row=owned_artifact(db,context.user.id,artifact_id);data=json.loads(row.payload_json)
-    return service.artifact_public(row)|{'content':data['content'][:20000],'columns':data['columns'],'rows':data['rows'][:100],
-        'preview_truncated':len(data['content'])>20000 or len(data['rows'])>100}
+    content = data['content']
+    if row.format == 'pptx':
+        content = '\n\n'.join('\n'.join([f"{index}. {slide['title']}", *(f"• {point}" for point in slide['bullets'])])
+            for index, slide in enumerate(data['slides'], 1))
+    result = service.artifact_public(row) | {'content': content[:20000], 'columns': data['columns'], 'rows': data['rows'][:100],
+        'preview_truncated': len(content) > 20000 or len(data['rows']) > 100}
+    if row.format == 'html':
+        result.update(html_preview=document_formats.html_preview(row.data), preview_truncated=False, content='')
+    return result
 
 
 @router.get('/artifacts/{artifact_id}/download')

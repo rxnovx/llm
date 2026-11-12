@@ -52,6 +52,25 @@ IMAGE_QUEUE_WAIT_SECONDS=120
 
 생성·편집·시험 요청은 같은 DB 대기열을 공유합니다. 앱이 이미지 서버에 보내는 동시 요청은 기본 전체 1건, 계정당 1건입니다. 대기 중 순서와 취소 버튼이 표시되며 대화를 다시 열어도 확인할 수 있습니다. 이미지 작업 중에도 다른 대화에서 채팅 모델을 사용할 수 있습니다. `IMAGE_GENERATION_TIMEOUT_SECONDS`는 서버 호출에, `IMAGE_QUEUE_WAIT_SECONDS`는 대기에 적용됩니다. 자동 판단을 거치는 요청은 `TERMINAL_AGENT_TIMEOUT_SECONDS` 안에 마쳐야 합니다. 설정을 늘리면 프론트엔드 `LLM_REQUEST_TIMEOUT_MS`도 전체 요청 시간에 맞춥니다. 취소 시 앱은 서버 연결을 닫으며, GPU 작업의 종료는 이미지 서버의 취소 동작에 따릅니다.
 
+## 오디오 생성 서버 연결
+
+낭독·더빙에는 음성 합성 서버를, 음악·효과음에는 오디오 생성 서버를 연결합니다. Compose는 루트 `.env`, 개별 실행은 `backend/.env`에 FastAPI가 접속할 수 있는 전체 API 주소를 입력합니다. 필요한 URL만 설정하고 API를 다시 시작하세요.
+
+```dotenv
+AUDIO_SPEECH_URL=http://192.168.0.20:8093/v1/audio/speech
+AUDIO_SPEECH_MODEL=
+AUDIO_SPEECH_VOICE=
+AUDIO_SPEECH_API_KEY=
+AUDIO_GENERATION_URL=http://192.168.0.20:8094/v1/audio/generate
+AUDIO_GENERATION_MODEL=
+AUDIO_GENERATION_API_KEY=
+AUDIO_GENERATION_TIMEOUT_SECONDS=180
+```
+
+서버 기본 모델과 목소리를 쓰면 모델·목소리 항목을 비워 둡니다. 두 서버는 `input`과 `response_format: "wav"`를 받는 POST API에서 비압축 PCM WAV 바이너리를 반환해야 합니다. 음성 서버에는 설정된 목소리를, 음악·효과음 서버에는 요청에 명시한 길이(초)를 지원하는 경우 `audio_length`로 전달합니다. [음성 합성 API](https://docs.vllm.ai/projects/vllm-omni/en/stable/serving/speech_api/) · [오디오 생성 API](https://docs.vllm.ai/projects/vllm-omni/en/stable/serving/audio_generate_api/)
+
+채팅 모델에 도구 호출을 켜고 “이 원고를 읽어서 WAV로 줘” 또는 “5초짜리 파도 효과음을 만들어 줘”라고 요청합니다. 파일은 최대 10MiB이며 원고나 생성 설명은 4,000자 이내입니다. 설정 오류나 WAV 형식 오류는 작업 기록에 표시됩니다. 오디오 생성과 후속 답변 작성은 `TERMINAL_AGENT_TIMEOUT_SECONDS`와 프론트엔드 `LLM_REQUEST_TIMEOUT_MS` 안에 완료되어야 합니다.
+
 ## 첨부 이미지 분석
 
 운영 화면 **모델 관리**에서 이미지 입력을 지원하는 연결 또는 모델의 **이미지 입력 사용**을 켭니다. 환경설정에서는 연결 또는 개별 `models` 항목에 `"supports_vision": true`를 지정합니다. 채팅에 PNG·JPEG·WebP를 첨부하고 “이 사진에서 어떤 오류가 보여?”처럼 질문합니다. 한 번에 네 장, 전체 10MiB까지 지원합니다. 대화 첨부는 24시간 동안 분석과 편집에서 다시 사용할 수 있습니다. 모델이 처리 방식을 판단하지 못하면 원본 이미지를 분석할 수 있는 연결에서 읽기 전용으로 답변합니다.

@@ -49,7 +49,11 @@ const automaticRouteLabels: Record<string, string> = {
   image_edit: "이미지 편집",
   vision: "이미지 분석",
 };
-const imageActivityLabels: Record<string, string> = { generate_image: "이미지 생성", edit_image: "이미지 편집", image_edit: "이미지 편집", analyze_image: "이미지 분석", vision: "이미지 분석" };
+const activityLabels: Record<string, string> = {
+  generate_image: "이미지 생성", edit_image: "이미지 편집", image_edit: "이미지 편집",
+  analyze_image: "이미지 분석", vision: "이미지 분석",
+  create_document: "결과 파일 생성", create_audio: "오디오 생성", create_archive: "ZIP 압축",
+};
 type ImageReference = { id: string; name: string };
 type ImageDraft = { artifact: ImageReference | null; attachments: ImageReference[] };
 const emptyImageDraft = (): ImageDraft => ({ artifact: null, attachments: [] });
@@ -1001,7 +1005,7 @@ function Workspace({ user, ready, initialDraft, onGuestDraft }: { user: AuthUser
               <GitlabPublication tools={message.tools} />
               {(message.routing?.automatic || message.routing?.status === 'unverified' || ['image', 'image_edit', 'vision'].includes(message.routing?.route ?? '')) &&
                 <p className="cw-message-app">{message.routing?.status === 'unverified' ? '근거 확인 보류' : automaticRouteLabels[message.routing?.route ?? ''] ?? '질문 자동 처리'}</p>}
-              {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {imageActivityLabels[tool.name] ?? tool.name} · {tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}
+              {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {activityLabels[tool.name] ?? tool.name} · {tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}
               {message.content ? <MessageContent content={message.content} /> : message.status === "pending" ? toolStatus && !message.apps?.[0]?.merge_request ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
               <MessageSources sources={message.sources ?? []} />
               {message.status === "error" && <p className="cw-message-error" role="alert">{message.error || "응답이 중단되었습니다. 다시 시도해 주세요."}</p>}

@@ -100,6 +100,9 @@ async def decide(connection,model,question,available,settings):
         instruction += (' Use gitlab for source analysis with an exact namespace/project from the request or recent_projects. '
             'Use knowledge for private/document facts or uncertain answers if retrieval is allowed and knowledge_ready. '
             'Use mcp only with listed read-only app IDs. Set needs_review for factual answers, and uncertain if unsure.')
+        if available.get('file_request'):
+            instruction += (' Use direct for creating downloadable documents, slide decks, ZIPs or audio unless sources or an app are needed. '
+                'An HTML presentation or audio narration is not an image request.')
     if 'image_source' in available:
         instruction += (' Use vision to read, describe or answer questions about an image. '
             'Use image_edit for an explicit change to an existing image, or image for explicit creation of a new image. '

@@ -24,6 +24,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
     options=dict(options or {})
     deadline=int(time.time())+settings.terminal_agent_timeout_seconds+15
     model=turn.start['conversation']['model'];question=turn.history[-1]['content']
+    file_request = bool(artifacts.requested_tools(question))
     image_mode = options.get('image_mode', 'auto')
     enabled=settings.assistant_automatic_enabled and options.get('automatic',True)
     manual_knowledge=bool(options.get('base_ids') or options.get('document_ids'))
@@ -199,7 +200,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
     auto_knowledge=enabled and available['retrieval_allowed'] and available['knowledge_ready']
     if auto_tools or (can_route_media and (source or available.get('image_generation'))):
         decision['automatic'] = True
-        planner_input = available
+        planner_input = available | {'file_request': file_request}
         if media_only:
             planner_input = {key: value for key, value in available.items() if key.startswith('image_')}
             planner_input['media_only'] = True
@@ -224,7 +225,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             else:
                 detail = '자동 판단을 완료하지 못해 채팅으로 이어갑니다.'
             yield 'activity', record('route_decision', 'error', detail)
-            if not (current_image or manual_knowledge):
+            if not (current_image or manual_knowledge or file_request):
                 decision.update(route='direct', status='running');save()
                 await acquire()
                 try:

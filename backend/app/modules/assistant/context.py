@@ -82,8 +82,8 @@ def active(db,user_id,selection,*,question='',conversation_id='',connection=None
     row=db.get(Preference,user_id)
     if image_inputs.reference(selection) or selection.get('base_ids') or selection.get('document_ids') or selection.get('mcp_ids') or selection.get('parallel_agents') or row and (row.instructions or row.memory_enabled):
         return True
-    from app.modules.workflows.artifacts import hint
-    if hint(question):return True
+    from app.modules.workflows.artifacts import requested_tools
+    if requested_tools(question):return True
     settings = get_settings()
     if not settings.assistant_automatic_enabled or not selection.get('automatic',True):return False
     if connection and connection.provider != 'test':

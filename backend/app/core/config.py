@@ -74,6 +74,14 @@ class Settings(BaseSettings):
     assistant_max_retrieval_rounds: int = Field(2, ge=1, le=3)
 
     artifact_pdf_font_path: str = ''
+    audio_speech_url: str = ''
+    audio_speech_model: str = Field('', max_length=200)
+    audio_speech_voice: str = Field('', max_length=200)
+    audio_speech_api_key: SecretStr = SecretStr('')
+    audio_generation_url: str = ''
+    audio_generation_model: str = Field('', max_length=200)
+    audio_generation_api_key: SecretStr = SecretStr('')
+    audio_generation_timeout_seconds: int = Field(180, ge=5, le=600)
     image_generation_url: str = ''
     image_generation_model: str = Field('', max_length=200)
     image_generation_api_key: SecretStr = SecretStr('')

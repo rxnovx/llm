@@ -6,7 +6,7 @@ import json
 import math
 from pathlib import Path
 import re
-from typing import Literal
+from typing import Annotated, Literal
 from xml.sax.saxutils import escape
 from fastapi import HTTPException
 from pydantic import BaseModel,ConfigDict,Field,model_validator
@@ -15,24 +15,48 @@ from sqlalchemy.orm import Session
 from app.modules.chat.scheduler import lock
 from .models import Artifact
 from .conversations import artifact_public,message_owned
+from . import document_formats
 
 MIME={'md':'text/markdown; charset=utf-8','txt':'text/plain; charset=utf-8','csv':'text/csv; charset=utf-8',
     'xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','pdf':'application/pdf',
+    'html':'text/html; charset=utf-8',
+    'docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'pptx':'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'zip':'application/zip','wav':'audio/wav',
     'png':'image/png','jpg':'image/jpeg','webp':'image/webp'}
 MAX_RESULT_BYTES = 10 * 1024 * 1024
+MAX_FILES_PER_RUN = 3
+DOCUMENT_TOOL = 'create_document'
+AUDIO_TOOL = 'create_audio'
+ARCHIVE_TOOL = 'create_archive'
+FILE_TOOLS = {DOCUMENT_TOOL, AUDIO_TOOL, ARCHIVE_TOOL}
+ExportFormat = Literal['md', 'txt', 'csv', 'xlsx', 'pdf', 'html', 'docx']
+DocumentFormat = Literal['md', 'txt', 'csv', 'xlsx', 'pdf', 'html', 'docx', 'pptx']
+
+
+class SlideInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    title: str = Field(min_length=1, max_length=90)
+    bullets: list[Annotated[str, Field(min_length=1, max_length=160)]] = Field(default_factory=list, max_length=5)
+    notes: str = Field('', max_length=1800)
 
 
 class DocumentInput(BaseModel):
     model_config=ConfigDict(extra='forbid')
     name: str=Field(min_length=1,max_length=150)
-    format: Literal['md','txt','csv','xlsx','pdf']
-    content: str=Field('',max_length=200000)
+    format: DocumentFormat
+    content: str=Field('',max_length=200000, description='Full text, or a standalone HTML document with inline assets for html.')
     columns: list[str]=Field(default_factory=list,max_length=30)
     rows: list[list[str|int|float|bool|None]]=Field(default_factory=list,max_length=500)
+    slides: list[SlideInput] = Field(default_factory=list, max_length=24, description='Ordered slides for pptx only.')
 
     @model_validator(mode='after')
     def bounded(self):
-        if not self.content.strip() and not self.rows:raise ValueError('문서 내용 또는 표가 필요합니다.')
+        if self.format == 'pptx':
+            if not self.slides or self.content.strip() or self.columns or self.rows:
+                raise ValueError('PPTX에는 슬라이드 목록을 지정하세요.')
+        elif self.slides or not (self.content.strip() or self.rows):
+            raise ValueError('문서 내용 또는 표가 필요합니다.')
         if self.rows and (not self.columns or any(len(r)!=len(self.columns) for r in self.rows)):raise ValueError('표의 열과 행 길이를 맞추세요.')
         if any(isinstance(v,float) and not math.isfinite(v) for r in self.rows for v in r):raise ValueError('표의 숫자는 유한한 값이어야 합니다.')
         if any(len(str(v))>4000 for r in [self.columns,*self.rows] for v in r):raise ValueError('표 셀은 최대 4,000자입니다.')
@@ -40,15 +64,35 @@ class DocumentInput(BaseModel):
         return self
 
 
-def hint(question):
-    return bool(re.search(r'엑셀|xlsx|csv|pdf|다운로드|(?:문서|보고서|파일).{0,15}(?:만들|생성|정리|내보)|export|spreadsheet',question,re.I))
+def requested_tools(question: str) -> set[str]:
+    requested = set()
+    creating = re.search(r'만들|생성|제작|작성|저장|변환|내보|읽어|낭독|압축|묶어|다운로드|(?:로|으로)\s*(?:줘|주세요|부탁)|'
+                         r'\b(?:make|generate|create|write|build|save|export|convert|download|narrate|package|bundle|zip up)\b',
+                         question, re.I)
+    if creating:
+        if re.search(r'(?<![a-z0-9])(?:wav|tts|audio|speech)(?![a-z0-9])|오디오|음성|낭독|더빙|음악|효과음|배경음|읽어\s*주는', question, re.I):
+            requested.add(AUDIO_TOOL)
+        if re.search(r'(?<![a-z0-9])zip(?![a-z0-9])|압축\s*파일|압축해|압축으로', question, re.I):
+            requested.add(ARCHIVE_TOOL)
+        if re.search(r'(?<![a-z0-9])(?:html|docx|pptx?|md|txt|markdown|powerpoint|slides?)(?![a-z0-9])|'
+                     r'프레젠테이션|파워포인트|발표\s*(?:자료|슬라이드)|워드\s*문서|word document|마크다운', question, re.I):
+            requested.add(DOCUMENT_TOOL)
+    if re.search(r'엑셀|xlsx|csv|pdf|(?:문서|보고서|대본|원고).{0,15}(?:만들|생성|정리|내보)|spreadsheet', question, re.I):
+        requested.add(DOCUMENT_TOOL)
+    if not requested and re.search(r'다운로드|파일.{0,15}(?:만들|생성|정리|내보)|export', question, re.I):
+        requested.add(DOCUMENT_TOOL)
+    return requested
 
 
 def formats():
-    result=['md','txt','csv']
+    result=['md','txt','csv','html']
     try:import openpyxl;result.append('xlsx')
     except ImportError:pass
     try:import reportlab;result.append('pdf')
+    except ImportError:pass
+    try:import docx;result.append('docx')
+    except ImportError:pass
+    try:import pptx;result.append('pptx')
     except ImportError:pass
     return result
 
@@ -60,6 +104,12 @@ def safe_cell(value):
 
 def build(data):
     table=[data.columns,*data.rows] if data.rows else []
+    if data.format == 'html':
+        return document_formats.build_html(data.name, data.content, table)
+    if data.format == 'docx':
+        return document_formats.build_docx(data.name, data.content, table)
+    if data.format == 'pptx':
+        return document_formats.build_pptx(data.slides)
     if data.format in {'md','txt'}:
         content=data.content
         if table:
@@ -122,10 +172,13 @@ def create(bind,user_id,message_id,run_id,args,*,ready=False,expected_content_ha
     try:raw=build(data)
     except ImportError:raise HTTPException(503,'문서 생성 의존성을 확인하세요.') from None
     except (ValueError,KeyError):raise HTTPException(422,'문서를 생성하지 못했습니다. 내용·표·글꼴을 확인하세요.') from None
-    name=re.sub(r'[\\/\x00-\x1f:*?"<>|]','_',data.name).strip('. ')[:140] or '결과'
-    name=str(Path(name).with_suffix('.'+data.format))
-    return store(bind, user_id, message_id, run_id, name=name, file_format=data.format, raw=raw,
+    return store(bind, user_id, message_id, run_id, name=file_name(data.name, data.format), file_format=data.format, raw=raw,
                  payload_json=data.model_dump_json(), ready=ready, expected_content_hash=expected_content_hash)
+
+
+def file_name(name: str, file_format: str) -> str:
+    stem = re.sub(r'[\\/\x00-\x1f:*?"<>|]', '_', name).strip('. ')[:140].rstrip('. ') or '결과'
+    return str(Path(stem).with_suffix('.' + file_format))
 
 
 def store(bind, user_id, message_id, run_id, *, name, file_format, raw, payload_json,
@@ -138,7 +191,7 @@ def store(bind, user_id, message_id, run_id, *, name, file_format, raw, payload_
         if not ready and (message.status!='pending' or conversation.generation_id!=str(run_id) or conversation.cancel_requested):raise HTTPException(409,'취소되었거나 완료된 요청의 파일은 저장하지 않습니다.')
         count,size=db.execute(select(func.count(Artifact.id),func.coalesce(func.sum(Artifact.size),0)).where(Artifact.owner_id==user_id)).one()
         if count>=200 or size+len(raw)>100*1024*1024:raise HTTPException(422,'결과 파일 저장 한도입니다. 필요 없는 파일을 삭제하세요.')
-        if db.scalar(select(func.count()).select_from(Artifact).where(Artifact.run_id==str(run_id)))>=3:raise HTTPException(422,'한 번에 결과 파일은 3개까지 만들 수 있습니다.')
+        if db.scalar(select(func.count()).select_from(Artifact).where(Artifact.run_id==str(run_id)))>=MAX_FILES_PER_RUN:raise HTTPException(422,'한 번에 결과 파일은 3개까지 만들 수 있습니다.')
         row=Artifact(owner_id=user_id,message_id=message.id,run_id=str(run_id),name=name,format=file_format,status='ready' if ready else 'draft',
             data=raw,size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),payload_json=payload_json)
         db.add(row);db.commit();return artifact_public(row)
@@ -169,5 +222,10 @@ def export_input(name,format,content):
 
 
 def tool():
-    return {'type':'function','function':{'name':'create_document','description':'Create a real downloadable md/txt/csv/xlsx/pdf from supplied text or table data. No code execution. Never invent file links.',
-        'parameters':DocumentInput.model_json_schema()}}
+    available = formats()
+    schema = DocumentInput.model_json_schema()
+    schema['properties']['format']['enum'] = available
+    return {'type':'function','function':{'name':DOCUMENT_TOOL,
+        'description':'Create a downloadable document. '
+        'Use full standalone HTML with inline CSS/JS for HTML and ordered slides with short bullets and optional speaker notes for PPTX.',
+        'parameters':schema}}
