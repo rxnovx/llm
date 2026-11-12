@@ -3,6 +3,7 @@
 내부 모델 서버에 연결해 대화하는 Next.js·FastAPI 앱입니다. `rxnovx/my-note-app`에서 이관한 계정 기능 위에 대화 워크스페이스를 구성했습니다. vLLM·Ollama 연결과 서버 없는 랜덤 테스트 대화를 지원합니다. 원본의 노트·메신저·캘린더·블로그·협업 서버는 포함하지 않습니다.
 
 사용자 기능·설치·한도는 [USER_WORKFLOWS.md](USER_WORKFLOWS.md)에 정리했습니다.
+사내 서버에 모델을 반입하고 Docker로 실행하려면 [폐쇄망 Docker 모델 설치 매뉴얼](docs/offline-models/README.md)을 참고하세요.
 
 ## 포함 기능
 
