@@ -117,7 +117,11 @@ python main.py
 
 Python 3.13에서 `cannot locate symbol "PyType_Type"` 오류가 나오면 `$PREFIX/lib/libpython3.13.so`가 있는지 확인한 뒤, 같은 세션에서 아래처럼 실행합니다. 다른 Python 버전은 [현재 버전에 맞는 실행 방법](TERMUX.md#cryptography의-pytype_type-심볼-오류)을 참고하세요.
 
+<<<<<<< HEAD
 # 러스트 컴파일러, lxml 설치해준다.
+=======
+먼저 러스트 컴파일러를 설치해준다.
+>>>>>>> f9d54596ffc17a8c157430ac7c8b63fbe1bb9f9a
 ``` bash
 pkg install -y rust clang make pkg-config openssl libffi
 
@@ -132,6 +136,7 @@ export CARGO_BUILD_TARGET="aarch64-linux-android"
 
 # cryptography 설치
 python -m pip install 'cryptography>=46.0.7,<51'
+<<<<<<< HEAD
 
 # Termux 패키지 업데이트
 pkg update && pkg upgrade -y
@@ -161,6 +166,8 @@ python -m pip install --no-build-isolation lxml
 
 # 전체 requirements 설치
 python -m pip install -r requirements.txt
+=======
+>>>>>>> f9d54596ffc17a8c157430ac7c8b63fbe1bb9f9a
 ```
 
 ```bash
