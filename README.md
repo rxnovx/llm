@@ -117,9 +117,26 @@ python main.py
 
 Python 3.13에서 `cannot locate symbol "PyType_Type"` 오류가 나오면 `$PREFIX/lib/libpython3.13.so`가 있는지 확인한 뒤, 같은 세션에서 아래처럼 실행합니다. 다른 Python 버전은 [현재 버전에 맞는 실행 방법](TERMUX.md#cryptography의-pytype_type-심볼-오류)을 참고하세요.
 
+먼저 러스트 컴파일러를 설치해준다.
+``` bash
+pkg install -y rust clang make pkg-config openssl libffi
+
+# Rust 설치 확인
+rustc --version
+cargo --version
+
+# 빌드 환경 설정
+export OPENSSL_DIR="$PREFIX"
+export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
+export CARGO_BUILD_TARGET="aarch64-linux-android"
+
+# cryptography 설치
+python -m pip install 'cryptography>=46.0.7,<51'
+```
+
 ```bash
 LD_PRELOAD="$PREFIX/lib/libpython3.13.so${LD_PRELOAD:+:$LD_PRELOAD}" \
-  python main.py
+python main.py
 ```
 
 #### 3. 프론트엔드 실행
