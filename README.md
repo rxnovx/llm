@@ -117,9 +117,55 @@ python main.py
 
 Python 3.13에서 `cannot locate symbol "PyType_Type"` 오류가 나오면 `$PREFIX/lib/libpython3.13.so`가 있는지 확인한 뒤, 같은 세션에서 아래처럼 실행합니다. 다른 Python 버전은 [현재 버전에 맞는 실행 방법](TERMUX.md#cryptography의-pytype_type-심볼-오류)을 참고하세요.
 
+# 러스트 컴파일러, lxml 설치해준다.
+``` bash
+pkg install -y rust clang make pkg-config openssl libffi
+
+# Rust 설치 확인
+rustc --version
+cargo --version
+
+# 빌드 환경 설정
+export OPENSSL_DIR="$PREFIX"
+export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
+export CARGO_BUILD_TARGET="aarch64-linux-android"
+
+# cryptography 설치
+python -m pip install 'cryptography>=46.0.7,<51'
+
+# Termux 패키지 업데이트
+pkg update && pkg upgrade -y
+
+# lxml 컴파일에 필요한 라이브러리 설치
+pkg install -y \
+  python \
+  clang \
+  make \
+  pkg-config \
+  libxml2 \
+  libxslt
+
+# 가상환경 활성화 (사용 중인 경우)
+source .venv/bin/activate
+
+# Python 빌드 도구 업데이트
+python -m pip install -U setuptools wheel
+
+# Termux의 시스템 라이브러리를 참조하도록 설정
+export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
+export CFLAGS="-I$PREFIX/include"
+export LDFLAGS="-L$PREFIX/lib"
+
+# lxml 설치
+python -m pip install --no-build-isolation lxml
+
+# 전체 requirements 설치
+python -m pip install -r requirements.txt
+```
+
 ```bash
 LD_PRELOAD="$PREFIX/lib/libpython3.13.so${LD_PRELOAD:+:$LD_PRELOAD}" \
-  python main.py
+python main.py
 ```
 
 #### 3. 프론트엔드 실행
