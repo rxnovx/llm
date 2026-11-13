@@ -276,9 +276,10 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
       return '선택한 자료를 포함해 문서는 한 번에 10개까지 첨부할 수 있습니다.';
     return '';
   })();
+  const hasDocumentInput = documentFiles.length > 0 || assistantSelection.document_ids.length > 0;
   const attachmentOnlyText = hasImageInput
-    ? documentFiles.length ? '첨부한 이미지와 문서의 내용을 함께 정리해 줘.' : '첨부한 이미지를 설명해 줘.'
-    : documentFiles.length ? '첨부한 자료의 내용을 알려줘.' : '';
+    ? hasDocumentInput ? '첨부한 이미지와 문서의 내용을 함께 정리해 줘.' : '첨부한 이미지를 설명해 줘.'
+    : hasDocumentInput ? '첨부한 자료의 내용을 알려줘.' : '';
   const composerControlsDisabled = busy || loading || starting || initializing || uploading || routePending;
   const changeComposerDropdown = (dropdown: "tools" | "models", open: boolean) => {
     setMention(null);
@@ -561,6 +562,10 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     });
     setExistingImagesOpen(false);
     restoreComposerFocus();
+  };
+  const removeAssistantAttachment = (id: string) => {
+    setAssistantSelection(current => ({ ...current, document_ids: current.document_ids.filter(item => item !== id) }));
+    setImageDraft(current => ({ ...current, attachments: current.attachments.filter(file => file.id !== id) }));
   };
   const detach = () => {
     const stream = controller.current;
@@ -1163,6 +1168,10 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     {workspaceOpen&&active&&<WorkspaceDialog conversationId={active.id} onClose={()=>setWorkspaceOpen(false)}/>}
     {assistantTab && active && <AssistantDialog key={active.id} conversationId={active.id} initialTab={assistantTab}
       admin={!!user?.is_global_admin} value={assistantSelection}
+      onAttachmentReady={id => setAssistantSelection(current => ({
+        ...current, document_ids: [...new Set([...current.document_ids, id])].slice(0, maxDocuments),
+      }))}
+      onAttachmentRemoved={removeAssistantAttachment}
       onClose={() => { setAssistantTab(null); restoreComposerFocus(); }}
       onSelect={value => { setAssistantSelection(value); setAssistantTab(null); restoreComposerFocus(); }} />}
     {contextOpen && active && <ContextDialog key={active.id} conversationId={active.id} connectionId={selected} model={model} content={draft}

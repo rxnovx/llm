@@ -46,6 +46,7 @@ test('붙여넣거나 놓은 파일을 미리 보고 전송할 때 첨부한다'
   for(const [label,value] of [['표시 이름','첨부 사용자'],['사용자명',username],['이메일',`${username}@example.com`],['비밀번호','WorkflowsBrowserPass123!'],['비밀번호 확인','WorkflowsBrowserPass123!']])await page.getByLabel(label,{exact:true}).fill(value);
   await page.getByRole('checkbox').check();await page.getByRole('button',{name:'회원가입',exact:true}).click();
   await expect(page.getByRole('heading',{name:'무엇을 함께 해볼까요?'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'모델 선택 · 테스트 모드',exact:true})).toBeEnabled();
   const requests: string[] = [];
   let sending = false;
   page.on('request', request => {
@@ -92,7 +93,6 @@ test('붙여넣거나 놓은 파일을 미리 보고 전송할 때 첨부한다'
   await expect(previews.getByRole('listitem')).toHaveCount(2);
   await expect(previews).toContainText('one.md');
   await expect(previews).toContainText('two.md');
-  await editor.fill('본문에서 찾을 고유 문구');
   expect(requests).toEqual([]);
   expect(new URL(page.url()).searchParams.has('chat')).toBe(false);
 
@@ -102,10 +102,13 @@ test('붙여넣거나 놓은 파일을 미리 보고 전송할 때 첨부한다'
   await page.getByRole('button',{name:'메시지 전송',exact:true}).click();
   const payload = (await turn).postDataJSON();
   expect(payload.assistant.document_ids).toHaveLength(2);
+  expect(payload.content).toBe('첨부한 자료의 내용을 알려줘.');
   await expect(page.getByRole('button',{name:'답변 복사',exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:/\[KS\d+\] one\.md/})).toBeVisible();
+  await expect(page.getByRole('button',{name:/\[KS\d+\] two\.md/})).toBeVisible();
   await expect(previews).toHaveCount(0);
   const sidebar = page.getByRole('button', {name:'사이드바 열기'});
   if (await sidebar.isVisible()) await sidebar.click();
-  await page.getByRole('button',{name:'대화 찾기'}).click();await page.getByLabel('대화 제목·본문 검색').fill('고유 문구');
-  await expect(page.locator('.cw-search-excerpt')).toContainText('고유 문구');
+  await page.getByRole('button',{name:'대화 찾기'}).click();await page.getByLabel('대화 제목·본문 검색').fill('첨부한 자료');
+  await expect(page.locator('.cw-search-excerpt')).toContainText('첨부한 자료');
 });

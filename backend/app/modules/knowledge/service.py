@@ -1,6 +1,6 @@
 import asyncio
 import base64
-from collections import Counter
+from collections import Counter, defaultdict
 import hashlib
 import json
 import math
@@ -183,7 +183,31 @@ def dense_ranks(chunks,vector):
         values.append((c.id,sum(a*b for a,b in zip(v,vector))))
     return [i for i,_ in sorted(values,key=lambda p:p[1],reverse=True)[:30]]
 
-async def search(bind,user_id,selection,conversation_id,query,limit=8):
+def include_attachment_chunks(chunks, ranked, document_ids, limit):
+    """Prioritize one excerpt per attachment, with document-order fallback."""
+    requested = set(document_ids)
+    by_document = defaultdict(list)
+    for chunk in chunks:
+        if chunk.document_id in requested:
+            by_document[chunk.document_id].append(chunk)
+    for values in by_document.values():
+        values.sort(key=lambda chunk: (chunk.ordinal, chunk.id))
+    preferred = {chunk.document_id: chunk for chunk in reversed(ranked)}
+    first = [preferred.get(doc_id, by_document[doc_id][0]) for doc_id in document_ids if by_document[doc_id]]
+    # Overview requests can have no search terms in common with the text.
+    if requested.isdisjoint(preferred):
+        for offset in (-1, 1, -2, 2):
+            for doc_id in document_ids:
+                if len(first) >= limit:
+                    return first
+                values = by_document[doc_id]
+                if -len(values) <= offset < len(values) and values[offset] not in first:
+                    first.append(values[offset])
+    selected = {chunk.id for chunk in first}
+    return first + [chunk for chunk in ranked if chunk.id not in selected]
+
+
+async def search(bind,user_id,selection,conversation_id,query,limit=8,*,include_attachments=False):
     if not get_settings().knowledge_enabled:raise HTTPException(503,'지식 검색이 비활성화되어 있습니다.')
     if not isinstance(query,str) or not query.strip() or len(query)>2000:raise HTTPException(422,'검색어를 확인하세요.')
     with Session(bind,expire_on_commit=False) as db:
@@ -192,6 +216,7 @@ async def search(bind,user_id,selection,conversation_id,query,limit=8):
         chunks=list(db.scalars(select(Chunk).where(Chunk.document_id.in_(documents)).limit(15001))) if documents else []
     if len(chunks)>15000:raise HTTPException(422,'검색 범위가 큽니다. 자료를 나눠 선택하세요.')
     if not chunks:return {'matches':[],'mode':'lexical','notice':'검색할 자료가 없습니다.'}
+    limit = max(1, min(10, limit))
     lexical=await asyncio.to_thread(lexical_ranks,chunks,query)
     dense=[];s=get_settings()
     if s.knowledge_embedding_provider!='disabled':
@@ -202,18 +227,24 @@ async def search(bind,user_id,selection,conversation_id,query,limit=8):
     fused={}
     for ranked in [lexical,dense]:
         for rank,cid in enumerate(ranked):fused[cid]=fused.get(cid,0)+1/(60+rank+1)
-    by_id={c.id:c for c in chunks};candidates=[]
-    for cid in sorted(fused,key=fused.get,reverse=True)[:30]:
-        if cid not in by_id:continue  # Always intersect vector results with current SQL ACL/revision.
-        c=by_id[cid];d=documents[c.document_id]
-        candidates.append({'chunk_id':c.id,'document_id':d.id,'filename':d.filename,'location':c.location,
-            'content':c.content,'sha256':d.sha256,'revision':d.revision})
-    candidates=await providers.rerank(query,candidates)
+    by_id={c.id:c for c in chunks}
+    def match(chunk):
+        doc = documents[chunk.document_id]
+        return {'chunk_id':chunk.id,'document_id':doc.id,'filename':doc.filename,'location':chunk.location,
+            'content':chunk.content,'sha256':doc.sha256,'revision':doc.revision}
+
+    ranked = sorted(fused, key=fused.get, reverse=True)[:30]
+    # Intersect vector results with current SQL ACL/revision before reranking.
+    candidates = await providers.rerank(query, [match(by_id[cid]) for cid in ranked if cid in by_id])
+    attachment_ids = list(dict.fromkeys(selection.get('document_ids', []))) if include_attachments else []
+    if attachment_ids:
+        excerpts = include_attachment_chunks(chunks, [by_id[item['chunk_id']] for item in candidates], attachment_ids, limit)
+        candidates = [match(chunk) for chunk in excerpts]
     # Membership/deletion may change while external embedding/reranking is in flight.
     with Session(bind) as db:
         current={d.id:(d.revision,d.sha256) for d in selected_documents(db,user_id,selection,conversation_id)}
     candidates=[c for c in candidates if current.get(c['document_id'])==(c['revision'],c['sha256'])]
-    return {'matches':candidates[:max(1,min(10,limit))],'mode':'hybrid' if dense else 'lexical','reranked':bool(s.knowledge_rerank_url)}
+    return {'matches':candidates[:limit],'mode':'hybrid' if dense else 'lexical','reranked':bool(s.knowledge_rerank_url)}
 
 def automatic_query(user_id,conversation_id):
     shared=select(KnowledgeMember.base_id).where(KnowledgeMember.user_id==user_id)

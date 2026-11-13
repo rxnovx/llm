@@ -97,6 +97,75 @@ def test_rag_also_works_with_non_tool_model_and_enforces_input_budget(client,acc
     assert events(response)[-1][0]=='done',response.text[-1500:]
     assert '15일' in payloads[0][-1]['content'] and 'Retrieved evidence' in payloads[0][-1]['content']
 
+
+@pytest.mark.parametrize('query', ['첨부한 자료의 내용을 알려줘.', '정산 마감일을 알려줘'])
+def test_document_attachments_reach_text_model_without_manual_search(client, account, monkeypatch, query):
+    monkeypatch.setenv('LLM_CONNECTIONS_JSON', json.dumps([{
+        'id': 'plain', 'name': 'Plain', 'provider': 'vllm', 'base_url': 'http://local/v1', 'model': 'plain',
+    }]))
+    get_settings.cache_clear()
+    owner = auth(account())
+    conversation = create(client, owner)
+    another = create(client, owner)
+    first = upload(client, owner, conversation=conversation, filename='회계.md', text='정산 마감일은 3월 27일.')
+    index(client)
+    second = upload(client, owner, conversation=conversation, filename='목록.md', text='사과 · 포도 · 블루베리')
+    index(client)
+    private = upload(client, owner, conversation=another, filename='비공개.md', text='비공개 첨부의 내용')
+    index(client)
+    messages = []
+
+    async def stream(connection, model, history, settings):
+        messages.extend(history)
+        yield '첫 파일은 정산 일정 [KS1], 두 번째 파일은 과일 목록 [KS2]입니다.'
+
+    monkeypatch.setattr(chat_providers, 'stream_reply', stream)
+    response = send(client, owner, conversation, query, connection_id='plain',
+        assistant={'document_ids': [first['id'], second['id']], 'automatic': False})
+    status, result = events(response)[-1]
+    assert status == 'done', response.text[-2000:]
+    assert [source['document_id'] for source in result['message']['sources']] == [first['id'], second['id']]
+    content = messages[-1]['content']
+    assert '3월 27일' in content and '블루베리' in content and '비공개 첨부' not in content
+    denied = send(client, owner, conversation, query, connection_id='plain',
+        assistant={'document_ids': [private['id']], 'automatic': False})
+    assert denied.status_code == 404
+
+
+def test_review_receives_more_than_six_cited_attachments(client, account, monkeypatch):
+    from app.modules.assistant import routing
+
+    monkeypatch.setenv('LLM_CONNECTIONS_JSON', json.dumps([{
+        'id': 'plain', 'name': 'Plain', 'provider': 'vllm', 'base_url': 'http://local/v1', 'model': 'plain',
+        'context_window': 16384, 'max_output_tokens': 1024,
+    }]))
+    get_settings.cache_clear()
+    owner = auth(account())
+    conversation = create(client, owner)
+    document_ids = []
+    for index_number in range(7):
+        doc = upload(client, owner, conversation=conversation, filename=f'자료-{index_number}.txt', text=f'고유 본문 {index_number}')
+        document_ids.append(doc['id'])
+        index(client)
+    expected = [f'KS{number}' for number in range(1, 8)]
+
+    async def stream(connection, model, history, settings):
+        assert all(f'[{name}]' in history[-1]['content'] for name in expected)
+        yield ' '.join(f'[{name}]' for name in expected)
+
+    async def assess(connection, model, question, draft, excerpts, settings):
+        assert [item['id'] for item in excerpts] == expected
+        return routing.Review(verdict='supported')
+
+    monkeypatch.setattr(chat_providers, 'stream_reply', stream)
+    monkeypatch.setattr(routing, 'assess', assess)
+    response = send(client, owner, conversation, '첨부한 자료의 내용을 알려줘.', connection_id='plain',
+        assistant={'document_ids': document_ids})
+    status, result = events(response)[-1]
+    assert status == 'done', response.text[-2000:]
+    assert [source['id'] for source in result['message']['sources']] == expected
+    assert result['message']['routing']['grounding']['verdict'] == 'supported'
+
 @pytest.mark.parametrize('suffix',['.txt','.md','.csv','.json','.html','.docx','.xlsx','.pdf'])
 def test_extractors_preserve_document_text_and_source_location(suffix):
     text='Vacation allowance is 15 days.'

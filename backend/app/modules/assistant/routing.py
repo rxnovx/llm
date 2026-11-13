@@ -166,7 +166,9 @@ async def evidence(bind,user_id,conversation_id,selection,sources,draft=''):
     cited=set(re.findall(r'\[((?:KS|GL|MS)\d+)\]',draft))
     sources=sorted(sources,key=lambda s:s['id'] not in cited)
     snippets=[]
-    for source in sources[:6]:
+    # A multi-file reply can cite more than the usual six excerpts.
+    # Include cited sources first and let the review enforce its own context budget.
+    for source in sources[:max(6, len(cited))]:
         if source.get('app')=='knowledge':
             with Session(bind) as db:
                 chunk=db.get(Chunk,source['chunk_id'])
