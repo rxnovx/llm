@@ -13,6 +13,7 @@ type Preview = ResultFile & {
   rows: (string | number | boolean | null)[][];
   preview_truncated: boolean;
   html_preview?: string;
+  kind?: 'table_analysis';
 };
 
 type Props = {
@@ -111,7 +112,7 @@ export function AnswerFiles({ messageId, files = [], onChange, onReferenceImage,
           {preview.html_preview && <>
             <iframe className="cw-result-html" title={`${preview.name} 미리보기`}
               sandbox="" referrerPolicy="no-referrer" srcDoc={preview.html_preview} />
-            <p className="cw-result-note">슬라이드의 스크립트 동작은 다운로드한 파일에서 사용할 수 있습니다.</p>
+            {preview.kind !== 'table_analysis' && <p className="cw-result-note">슬라이드의 스크립트 동작은 다운로드한 파일에서 사용할 수 있습니다.</p>}
           </>}
           {preview.format === 'wav' && <AnswerAudio key={preview.id} file={preview} />}
           {preview.content && (preview.format === 'md' ? <MessageContent content={preview.content} /> : <pre>{preview.content}</pre>)}

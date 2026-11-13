@@ -56,16 +56,20 @@ def create(bind, user_id, message_id, run_id, args):
     except ValueError:
         raise HTTPException(422, '압축할 파일 이름, 경로와 용량을 확인하세요.') from None
     entries = [(entry.path, entry.content.encode()) for entry in data.entries]
+    sources = {}
     if data.file_ids:
         with Session(bind) as db:
             for file_id in data.file_ids:
                 file = db.scalar(select(Artifact).where(
                     Artifact.id == str(file_id), Artifact.owner_id == user_id,
-                    Artifact.message_id == message_id, Artifact.run_id == str(run_id), Artifact.status == 'draft',
+                    Artifact.message_id == message_id, Artifact.run_id == str(run_id),
+                    Artifact.status.in_(artifacts.DRAFT_STATUSES),
                 ))
                 if file is None:
                     raise HTTPException(422, '이번 요청에서 생성된 파일만 압축할 수 있습니다.')
                 entries.append((file.name, file.data))
+                if file.status == artifacts.REVISION_DRAFT:
+                    sources.update((source['id'], source) for source in json.loads(file.payload_json)['revision_sources'])
     checked_paths([path for path, _ in entries])
     if sum(len(raw) for _, raw in entries) > artifacts.MAX_RESULT_BYTES:
         raise HTTPException(413, '압축 대상의 합계는 10MiB 이하여야 합니다.')
@@ -76,7 +80,8 @@ def create(bind, user_id, message_id, run_id, args):
     payload = {'content': '\n\n'.join(f'{entry.path}\n{entry.content}' for entry in data.entries),
                'columns': ['파일', '크기 (바이트)'], 'rows': [[path, len(raw)] for path, raw in entries]}
     return artifacts.store(bind, user_id, message_id, run_id, name=artifacts.file_name(data.name, 'zip'),
-        file_format='zip', raw=output.getvalue(), payload_json=json.dumps(payload, ensure_ascii=False))
+        file_format='zip', raw=output.getvalue(), payload_json=json.dumps(payload, ensure_ascii=False),
+        revision_sources=list(sources.values()))
 
 
 def tool():

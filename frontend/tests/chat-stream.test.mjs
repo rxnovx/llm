@@ -111,6 +111,22 @@ test('knowledge sources preserve document version and location without an extern
   await readChatStream(stream,event=>events.push(event));assert.deepEqual(events[0].data.sources,[source]);
 });
 
+test('web, earlier conversation and calculated evidence survive streamed answers', async () => {
+  const web = { id: 'WS1', app: 'web', title: '공식 문서', url: 'https://docs.example/guide', excerpt: '검색 결과' };
+  const chat = { id: 'CH1', app: 'chat_history', title: '이전 질문', conversation_id: 'conversation', message_id: 'message', excerpt: '이전 결정' };
+  const document = { document_id: 'file', filename: 'sales.xlsx', sha256: 'hash', revision: 2, sheet: '매출' };
+  const table = { id: 'TA1', app: 'table_analysis', title: '표 계산', documents: [document], excerpt: '1월 합계 125' };
+  const encoded = sources => encoder.encode(`event: sources\ndata: ${JSON.stringify({ sources })}\n\n${events}`);
+  const received = [];
+  await readChatStream(stream(encoded([web, chat, table]), 1), event => received.push(event));
+  assert.deepEqual(received[0].data.sources, [web, chat, table]);
+
+  for (const invalid of [{ ...web, url: 'https://user:password@docs.example/guide' }, { ...web, url: 'javascript:alert(1)' },
+    { ...chat, message_id: null }, { ...table, documents: [{ ...document, revision: '2' }] }, { ...table, documents: [null] }]) {
+    await assert.rejects(() => readChatStream(stream(encoded([invalid])), () => {}), /출처/);
+  }
+});
+
 test('automatic workspace selection and final routing survive split SSE data',async()=>{
   const selection={app:'gitlab',connection_id:'account',project_id:7,ref:'main',paths:[],mode:'workspace',workspace_id:'workspace'};
   const value='event: workspace\ndata: '+JSON.stringify({id:'workspace',status:'ready',automatic:true,selection})+'\n\n'

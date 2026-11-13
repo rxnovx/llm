@@ -1,0 +1,35 @@
+const activityLabels: Record<string, string> = {
+  queued: "모델 대기",
+  image_queue: "이미지 대기",
+  model: "답변 작성",
+  gitlab_resolve: "프로젝트 접근 확인",
+  gitlab_checkout: "소스 내려받기",
+  gitlab_read: "GitLab 파일 읽기",
+  repository_index: "소스 색인",
+  knowledge_search: "문서 검색",
+  evidence_review: "근거 점검",
+  mcp_discovery: "앱 연결 확인",
+  create_document: "결과 파일 생성",
+  create_audio: "오디오 생성",
+  create_archive: "ZIP 압축",
+  generate_image: "이미지 생성",
+  edit_image: "이미지 편집",
+  image_edit: "이미지 편집",
+  analyze_image: "이미지 분석",
+  vision: "이미지 분석",
+  terminal_exec: "명령 실행",
+  auto_summary: "대화 요약",
+  analyze_table: "첨부 데이터 분석",
+  read_result_file: "기존 결과 파일 확인",
+  revise_result_file: "결과 파일 수정",
+  search_web: "웹 검색",
+  search_chat_history: "이전 대화 검색",
+  manage_schedule: "예약 작업 관리",
+  parallel_analyze: "병렬 분석",
+  memory: "기억 관리",
+  memory_change: "기억 관리",
+};
+
+export function activityLabel(name: string, fallback = name) {
+  return activityLabels[name] ?? (name.startsWith("mcp_") ? "연결된 앱 조회" : fallback);
+}

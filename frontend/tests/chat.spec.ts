@@ -278,3 +278,186 @@ test("캔버스 요청을 채팅에서 읽어 자동으로 열고 카드를 복�
   await expect(card).toHaveCount(1);
   await expect(canvas).toHaveCount(0);
 });
+
+test("채팅 답변에서 웹·이전 대화·표 계산 출처를 확인한다", async ({ page }, info) => {
+  await signUp(page, `combined_sources_${info.project.name}_${Date.now()}`);
+  const earlier = "전에 결정한 정산 기준을 남겨 줘";
+  await sendQuestion(page, earlier);
+  const earlierUrl = new URL(page.url());
+  const conversationId = earlierUrl.pathname.split("/").at(-1)!;
+  const messageId = (await page.getByRole("article", { name: "내 메시지" }).getAttribute("id"))!.slice("message-".length);
+  const chart = { id: "697fc506-4d35-4205-bf92-c7603e773197", name: "정산 차트.html", format: "html", size: 120,
+    sha256: "e6bced00c5f0b60eb349f9fd9f1edb6eb08b2ac5573283bd6a5b1383dbbf1fd2", created_at: 1_800_000_000 };
+  await page.route(`**/api/workflows/artifacts/${chart.id}`, route => route.fulfill({ json: {
+    ...chart, kind: "table_analysis", columns: [], rows: [], content: "", preview_truncated: false,
+    html_preview: "<!doctype html><html lang='ko'><body><h1>월별 정산 차트</h1></body></html>",
+  } }));
+
+  await page.route(/\/api\/chat\/conversations\/[^/?]+\/messages$/, async route => {
+    const upstream = await route.fetch();
+    const sources = [
+      { id: "WS1", app: "web", title: "공식 정산 안내", url: "https://example.com/guide", excerpt: "기준 날짜를 확인합니다." },
+      { id: "CH1", app: "chat_history", title: earlier, conversation_id: conversationId, message_id: messageId },
+      { id: "TA1", app: "table_analysis", title: "정산 자료 계산", excerpt: "1월 합계 125", documents: [
+        { document_id: "fixture", filename: "정산.xlsx", sha256: "fixture", revision: 1, sheet: "월별" },
+      ] },
+    ];
+    const body = (await upstream.text()).replace(/event: done\ndata: ([^\n]+)\n\n/, (_event, json: string) => {
+      const final = JSON.parse(json);
+      final.message.sources = sources;
+      final.message.artifacts = [chart];
+      return `event: sources\ndata: ${JSON.stringify({ sources })}\n\nevent: artifact\ndata: ${JSON.stringify(chart)}\n\nevent: done\ndata: ${JSON.stringify(final)}\n\n`;
+    });
+    await route.fulfill({ response: upstream, body });
+  });
+  const sidebar = page.getByRole("button", { name: "사이드바 열기" });
+  if (await sidebar.isVisible()) await sidebar.click();
+  await page.getByRole("button", { name: "새 대화 ↗", exact: true }).click();
+  await sendQuestion(page, "이전 정산 기준과 자료를 확인해 줘");
+
+  const sources = page.getByRole("complementary", { name: "답변 출처" });
+  const web = sources.getByRole("link", { name: /WS1.*공식 정산 안내/ });
+  await expect(web).toHaveAttribute("href", "https://example.com/guide");
+  await expect(web).toHaveAttribute("rel", "noopener noreferrer");
+  await sources.getByRole("button", { name: /TA1.*정산 자료 계산/ }).click();
+  const evidence = page.getByRole("dialog", { name: "첨부 데이터 분석 근거" });
+  await expect(evidence).toContainText("정산.xlsx · 월별 · 버전 1");
+  await expect(evidence).toContainText("1월 합계 125");
+  await evidence.getByRole("button", { name: "닫기", exact: true }).click();
+  await page.getByRole("button", { name: /정산 차트\.html.*미리보기/ }).click();
+  const preview = page.getByRole("dialog", { name: "결과 파일 미리보기" });
+  await expect(preview.frameLocator("iframe").getByRole("heading", { name: "월별 정산 차트" })).toBeVisible();
+  await expect(preview.getByText(/슬라이드의 스크립트/)).toHaveCount(0);
+  await preview.getByRole("button", { name: "닫기", exact: true }).click();
+
+  const around = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === `/api/chat/conversations/${conversationId}` && url.searchParams.get("around_message_id") === messageId;
+  });
+  await sources.getByRole("link", { name: /CH1.*전에 결정한 정산 기준/ }).click();
+  await around;
+  await expect(page).toHaveURL(earlierUrl.href);
+  await expect(messageText(page)).toHaveText(earlier);
+  await expect(page.getByRole("article", { name: "내 메시지" })).toBeFocused();
+});
+
+test("예약 작업을 열고 실행 대화를 확인하거나 다음 실행을 중지한다", async ({ page }, info) => {
+  await signUp(page, `schedules_${info.project.name}_${Date.now()}`);
+  const runQuestion = "정기 업무의 마지막 실행";
+  await sendQuestion(page, runQuestion);
+  const runUrl = page.url();
+  const conversationId = new URL(runUrl).pathname.split("/").at(-1)!;
+  const scheduleId = "95d1e9ac-321f-4637-88d1-0cc4abdf3b28";
+  const lastRun = { id: "c314a12a-cc40-4861-a476-104c950b5a2d", status: "complete", conversation_id: conversationId,
+    scheduled_at: 1_800_000_000, error: null };
+  const schedule = { id: scheduleId, title: "주간 정산 확인", repeat: "weekly", time_zone: "Asia/Seoul",
+    status: "active", next_run_at: 1_800_000_000 + 7 * 86_400, last_run: lastRun };
+  await page.route("**/api/workflows/schedules", route => route.fulfill({ json: { items: [schedule] } }));
+  await page.route(`**/api/workflows/schedules/${scheduleId}/runs`, route => route.fulfill({ json: { items: [lastRun] } }));
+  await page.route(`**/api/workflows/schedules/${scheduleId}`, route => {
+    expect(route.request().method()).toBe("DELETE");
+    schedule.status = "cancelled";
+    return route.fulfill({ json: { schedule: { ...schedule, next_run_at: null } } });
+  });
+
+  const sidebar = page.getByRole("button", { name: "사이드바 열기" });
+  if (await sidebar.isVisible()) await sidebar.click();
+  await page.getByRole("button", { name: "새 대화 ↗", exact: true }).click();
+  const editor = page.getByLabel("메시지", { exact: true });
+  await editor.fill("작성 중인 질문");
+  const openSchedules = async () => {
+    await page.getByRole("button", { name: "도구 추가", exact: true }).click();
+    await page.getByRole("group", { name: "채팅 도구" }).getByRole("button", { name: "예약 작업", exact: true }).click();
+  };
+  await openSchedules();
+  const dialog = page.getByRole("dialog", { name: "예약 작업", exact: true });
+  await expect(dialog.getByRole("heading", { name: schedule.title })).toBeVisible();
+  await expect(dialog).toContainText("Asia/Seoul · 다음 실행");
+  const box = (await dialog.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  expect(Math.abs(box.x + box.width / 2 - viewport.width / 2)).toBeLessThanOrEqual(1);
+  expect(Math.abs(box.y + box.height / 2 - viewport.height / 2)).toBeLessThanOrEqual(1);
+
+  await page.mouse.click(3, 3);
+  await expect(dialog).toHaveCount(0);
+  await expect(editor).toHaveValue("작성 중인 질문");
+  await openSchedules();
+  await dialog.getByRole("button", { name: "실행 기록", exact: true }).click();
+  await expect(dialog.getByRole("link", { name: "결과 대화 열기", exact: true })).toHaveAttribute("href", new URL(runUrl).pathname);
+  await dialog.getByRole("button", { name: "예약 중지", exact: true }).click();
+  await dialog.getByRole("button", { name: "중지 확인", exact: true }).click();
+  await expect(dialog.getByText("예약 중지", { exact: true })).toBeVisible();
+  await dialog.getByRole("link", { name: "결과 대화 열기", exact: true }).click();
+  await expect(page).toHaveURL(runUrl);
+  await expect(dialog).toHaveCount(0);
+  await expect(messageText(page)).toHaveText(runQuestion);
+});
+
+test("채팅 요청으로 만든 예약을 목록에서 확인하고 채팅으로 취소한다", async ({ page }, info) => {
+  await signUp(page, `chat_schedule_${info.project.name}_${Date.now()}`);
+  const question = "매주 월요일 오전 9시에 Asia/Seoul 기준으로 사내 규정 변경을 확인해 줘";
+  await sendQuestion(page, question);
+  const answers = page.getByRole("article", { name: "모델 답변" });
+  await expect(answers).toContainText("예약했습니다.");
+  const id = (await answers.locator("code").textContent())!;
+  expect(id).toMatch(/^[a-f0-9-]{36}$/);
+
+  await page.getByRole("button", { name: "도구 추가", exact: true }).click();
+  await page.getByRole("group", { name: "채팅 도구" }).getByRole("button", { name: "예약 작업", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "예약 작업", exact: true });
+  await expect(dialog.getByRole("heading", { name: question })).toBeVisible();
+  await expect(dialog).toContainText("매주 · Asia/Seoul · 다음 실행");
+  await dialog.getByRole("button", { name: "닫기", exact: true }).click();
+
+  await page.getByLabel("메시지", { exact: true }).fill(`예약 작업 ${id} 취소해 줘`);
+  await page.getByRole("button", { name: "메시지 전송", exact: true }).click();
+  await expect(answers.last()).toContainText("예약을 취소했습니다.");
+  await page.getByRole("button", { name: "도구 추가", exact: true }).click();
+  await page.getByRole("group", { name: "채팅 도구" }).getByRole("button", { name: "예약 작업", exact: true }).click();
+  await expect(dialog.getByText("예약 중지", { exact: true })).toBeVisible();
+});
+
+test("GitLab을 멘션한 메시지에 원본 이미지와 문서를 함께 전송한다", async ({ page }, info) => {
+  const profile = { name: "image-and-tools", context_window: 8192, max_output_tokens: 1024, max_concurrent: 2,
+    supports_vision: true, supports_tools: true };
+  await page.route("**/api/chat/config", async route => {
+    const response = await route.fetch();
+    const config = await response.json();
+    await route.fulfill({ json: { ...config, connections: [...config.connections,
+      { id: "vision", name: "이미지 모델", provider: "vllm", default_model: profile.name, is_test: false, models: [profile] },
+    ] } });
+  });
+  await page.route("**/api/chat/conversations", async route => {
+    if (route.request().method() !== "POST") return route.continue();
+    const body = { ...route.request().postDataJSON(), connection_id: "demo", model: "demo" };
+    const response = await route.fetch({ postData: body });
+    await route.fulfill({ response });
+  });
+  await page.route(/\/api\/chat\/conversations\/[^/?]+\/messages$/, route => route.fulfill({
+    status: 422, json: { detail: "이 브라우저 시나리오에서는 전송된 첨부까지만 확인합니다." },
+  }));
+  await signUp(page, `combined_input_${info.project.name}_${Date.now()}`);
+  await page.getByRole("button", { name: "모델 선택 · 테스트 모드", exact: true }).click();
+  await page.getByRole("group", { name: "모델 목록" }).getByRole("button", { name: profile.name, exact: true }).click();
+  const editor = page.getByLabel("메시지", { exact: true });
+  await editor.fill("@gitlab team/ui 첨부한 화면과 문서를 비교해 줘");
+  const pixels = await page.evaluate(() => {
+    const image = document.createElement("canvas");
+    image.width = image.height = 16;
+    return image.toDataURL().split(",")[1];
+  });
+  await page.locator('input[type="file"]').setInputFiles([
+    { name: "screen.png", mimeType: "image/png", buffer: Buffer.from(pixels, "base64") },
+    { name: "notes.md", mimeType: "text/markdown", buffer: Buffer.from("첨부 문서") },
+  ]);
+  await expect(page.getByRole("list", { name: "첨부 미리보기" })).toContainText("screen.png");
+  const turn = page.waitForRequest(/\/api\/chat\/conversations\/[^/?]+\/messages$/, { timeout: 30_000 });
+  const send = page.getByRole("button", { name: "메시지 전송", exact: true });
+  await expect(send).toBeEnabled();
+  await send.click();
+  const payload = (await turn).postDataJSON();
+  expect(payload.content).toContain("@gitlab team/ui");
+  expect(payload.assistant.image_document_ids).toHaveLength(1);
+  expect(payload.assistant.document_ids).toHaveLength(1);
+  expect(payload.assistant.image_document_ids[0]).not.toBe(payload.assistant.document_ids[0]);
+});

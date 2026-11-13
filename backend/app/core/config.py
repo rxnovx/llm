@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     assistant_automatic_enabled: bool = True
     assistant_grounding_review: bool = True
     assistant_max_retrieval_rounds: int = Field(2, ge=1, le=3)
+    assistant_web_search_url: str = ''
 
     artifact_pdf_font_path: str = ''
     audio_speech_url: str = ''

@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from contextlib import aclosing
 import json
 import time
@@ -30,9 +30,10 @@ from app.modules.assistant import gitlab as gitlab_prompt
 from app.modules.assistant.models import TurnContext, TurnDecision
 from app.modules.knowledge.models import Document
 from app.modules.workflows import conversations as workflows
-from app.modules.workflows import image_inputs, image_queue
+from app.modules.workflows import artifacts, image_inputs, image_queue
 from app.modules.workflows.models import AutoSummary, UploadAttempt
 from app.modules.workflows.projects import project_access, project_role
+from app.modules.schedules import service as schedules
 
 router = APIRouter(prefix='/chat', tags=['chat'])
 Database = Annotated[Session, Depends(get_db)]
@@ -292,10 +293,12 @@ class Turn:
     gitlab_request: gitlab_prompt.Prompt | None = None
     gitlab_publication: str = 'merge_request'
     gitlab_local_commit: bool = False
+    scheduled: bool = False
+    pending_artifacts: list[str] = field(default_factory=list)
 
 
 def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, connection: providers.Connection,
-            *, gitlab_request: gitlab_prompt.Prompt | None = None) -> Turn:
+            *, gitlab_request: gitlab_prompt.Prompt | None = None, scheduled: bool = False) -> Turn:
     started_clock = time.monotonic()
     scheduler.lock(db)
     item = owned(db, conversation_id, user_id)
@@ -394,10 +397,8 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     image_mode = options.get('image_mode', 'auto')
     image_source = image_inputs.reference(options)
     document_ids = set(options.get('document_ids', [])) | set(image_inputs.attachment_ids(options))
-    if (image_mode != 'auto' or image_source) and (apps or data.publish_gitlab or gitlab_request):
+    if image_mode in {'generate', 'edit'} and (apps or data.publish_gitlab or gitlab_request):
         raise HTTPException(422, '이 요청에서 이미지 작업과 GitLab 작업 중 하나를 선택하세요.')
-    if image_source and (options.get('mcp_ids') or options.get('parallel_agents')):
-        raise HTTPException(422, '이미지 원본과 선택한 앱·병렬 분석은 별도의 메시지로 보내세요.')
     settings = get_settings()
     render_only = image_mode in {'generate', 'edit'}
     try:
@@ -453,7 +454,8 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         {'conversation': conversation_data(item), 'user_message': message_data(user_message),
          'assistant_message': message_data(assistant) | {'content': ''}, **({'context': report} if report else {})},
         presentation, previous_message, previous_connection, started_clock,
-        publish_gitlab=data.publish_gitlab, gitlab_generation=gitlab_generation, gitlab_request=gitlab_request)
+        publish_gitlab=data.publish_gitlab, gitlab_generation=gitlab_generation, gitlab_request=gitlab_request,
+        scheduled=scheduled)
 
 
 def event(name: str, data: dict) -> str:
@@ -490,11 +492,14 @@ async def guarded_parts(iterator, cancelled):
 
 @router.post('/conversations/{conversation_id}/messages')
 async def send(conversation_id: UUID, data: TurnInput, request: Request, context: Authenticated, db: Database):
+    from app.modules.assistant import personal_tools
+
     user_id = context.user.id
-    explicit_image = data.assistant is not None and data.assistant.image_mode != 'auto'
-    gitlab_request = None if explicit_image or data.retry or data.publish_gitlab else gitlab_prompt.prompt(data.content)
-    image_source = data.assistant and (data.assistant.image_document_ids or data.assistant.image_artifact_id)
-    if not explicit_image and not image_source and not data.apps and not data.retry and not data.publish_gitlab and not gitlab_request:
+    explicit_render = data.assistant is not None and data.assistant.image_mode in {'generate', 'edit'}
+    account_command = (schedules.requested(data.content) or personal_tools.memory_command(data.content)
+        or schedules.pending_requested(db,user_id,conversation_id,data.content))
+    gitlab_request = None if explicit_render or data.retry or data.publish_gitlab or account_command else gitlab_prompt.prompt(data.content)
+    if not (explicit_render or account_command or data.apps or data.retry or data.publish_gitlab or gitlab_request):
         candidate = merge_requests.automatic_connection(db, user_id, gitlab_prompt.unquoted(data.content))
         if candidate:
             owned(db, conversation_id, user_id)
@@ -504,7 +509,31 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
             data.apps = [GitlabSelection.model_validate(resolved['selection'])]
     connection = connection_for(data.connection_id, db, context.user)
     turn = prepare(db, conversation_id, context.user.id, data, connection, gitlab_request=gitlab_request)
-    settings, bind = get_settings(), db.get_bind()
+    subscription = request.app.state.generation_jobs.start(turn_events(db.get_bind(), user_id, turn, data, connection))
+    return StreamingResponse(subscription.stream(), media_type='text/event-stream',
+        headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
+
+
+async def scheduled_turn(bind, user_id, conversation_id, request_id, connection_id, model, prompt):
+    from app.modules.auth.models import User
+
+    data = TurnInput(request_id=request_id, content=prompt, connection_id=connection_id, model=model)
+    with Session(bind) as db:
+        scheduler.lock(db)
+        if not schedules.start_allowed(db, user_id, conversation_id, request_id):
+            return
+        user = db.get(User, user_id)
+        if not user or not user.is_active or user.registration_status != 'approved':
+            raise HTTPException(403, '예약을 실행할 계정 권한을 확인하세요.')
+        connection = connection_for(connection_id, db, user)
+        turn = prepare(db, UUID(str(conversation_id)), user_id, data, connection, scheduled=True)
+    async with aclosing(turn_events(bind, user_id, turn, data, connection)) as events:
+        async for _ in events:
+            pass
+
+
+def turn_events(bind, user_id, turn, data, connection):
+    settings = get_settings()
     options = turn.start['assistant_message']['assistant']
     image_mode = options.get('image_mode', 'auto')
     render_only = image_mode in {'generate', 'edit'}
@@ -517,6 +546,8 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
         sources = []
         workspace_selection=None
         phase='queued';last_checkpoint=0.0
+        checked_schedule_at = 0.0
+        schedule_access_valid = True
 
         def save_routing(message, terminal_status=None):
             selection = presentation.selection
@@ -536,6 +567,9 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
 
         def checkpoint(force=False):
             nonlocal last_checkpoint
+            # Scheduled results have no live subscriber. Publish the result
+            # atomically after rechecking the original project and account.
+            if turn.scheduled:return
             if not force and time.monotonic()-last_checkpoint<.75:return
             with Session(bind) as session:
                 active=session.get(Conversation,turn.conversation_id);message=session.get(Message,turn.assistant_id)
@@ -557,9 +591,15 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                 yield event(kind, payload)
 
         def cancelled():
+            nonlocal checked_schedule_at, schedule_access_valid
             with Session(bind) as session:
                 active = session.get(Conversation, turn.conversation_id)
-                return not active or active.generation_id != turn.request_id or active.cancel_requested
+                if not active or active.generation_id != turn.request_id or active.cancel_requested:
+                    return True
+                if turn.scheduled and time.monotonic() - checked_schedule_at >= 1:
+                    schedule_access_valid = schedules.run_access_valid(session,user_id,turn.conversation_id,turn.request_id)
+                    checked_schedule_at = time.monotonic()
+                return not schedule_access_valid
         try:
             yield event('start', turn.start)
             last_queue_notice = 0.0
@@ -590,7 +630,9 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                 apps = turn.start['assistant_message']['apps']
                 workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute','merge_request'})
                 with Session(bind) as session:
-                    general_mode = image_mode != 'auto' or bool(turn.gitlab_request) or assistant_context.active(
+                    pending_schedule = not turn.scheduled and schedules.pending_requested(
+                        session,user_id,turn.conversation_id,data.content,before_message_id=turn.assistant_id)
+                    general_mode = image_mode != 'auto' or bool(turn.gitlab_request) or pending_schedule or assistant_context.active(
                         session, user_id, options, question=data.content.strip(), conversation_id=turn.conversation_id,
                         connection=admitted, model=turn.start['conversation']['model'])
                 if render_only:
@@ -673,8 +715,16 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                 item = session.scalar(select(Conversation).where(Conversation.id == turn.conversation_id,
                     Conversation.generation_id == turn.request_id))
                 message = session.get(Message, turn.assistant_id)
-                if item and item.cancel_requested and status == 'complete':
+                discard_scheduled_output = bool(turn.scheduled and item and not
+                    schedules.run_access_valid(session,user_id,turn.conversation_id,turn.request_id))
+                if discard_scheduled_output or item and item.cancel_requested and status == 'complete':
                     status, error_code = 'cancelled', 'cancelled'
+                if turn.scheduled and status == 'complete':
+                    try:
+                        with session.begin_nested():
+                            artifacts.settle_drafts(session,user_id,turn.request_id,turn.pending_artifacts)
+                    except HTTPException as caught:
+                        status,error,error_code = 'error',str(caught.detail),'context_limit'
                 if run and run.status in {'running', 'queued','tool_waiting'}:
                     run.status, run.error_code = status, error_code
                     run.finished_at = int(time.time())
@@ -682,10 +732,10 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                     run.first_token_ms, run.output_chars = first_token_ms, presentation.length
                 scheduler.finish(session, turn.request_id, status)
                 if item and message:
-                    message.content, message.status, message.error = presentation.content, status, error
+                    message.content, message.status, message.error = '' if discard_scheduled_output else presentation.content, status, error
                     workflow=workflows.state_for(session,message);workflow.error_code=error_code;workflow.phase=phase
                     if message.source_record:
-                        message.source_record.sources_json = json.dumps(sources,ensure_ascii=False)
+                        message.source_record.sources_json = json.dumps([] if discard_scheduled_output else sources,ensure_ascii=False)
                         if workspace_selection and workspace_selection.workspace_id:
                             updated=json.loads(message.source_record.apps_json)
                             updated[0]['workspace_id']=str(workspace_selection.workspace_id)
@@ -729,6 +779,4 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
         finally:
             usage.scope.reset(token)
 
-    subscription = request.app.state.generation_jobs.start(metered_events())
-    return StreamingResponse(subscription.stream(), media_type='text/event-stream',
-        headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
+    return metered_events()

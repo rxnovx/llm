@@ -333,6 +333,8 @@ def preview(artifact_id: UUID,context: Authenticated,db: Database):
             for index, slide in enumerate(data['slides'], 1))
     result = service.artifact_public(row) | {'content': content[:20000], 'columns': data['columns'], 'rows': data['rows'][:100],
         'preview_truncated': len(content) > 20000 or len(data['rows']) > 100}
+    if 'analysis' in data:
+        result['kind'] = 'table_analysis'
     if row.format == 'html':
         result.update(html_preview=document_formats.html_preview(row.data), preview_truncated=False, content='')
     return result

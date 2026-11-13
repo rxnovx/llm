@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.modules.assistant.models import TurnContext
@@ -15,46 +15,22 @@ from app.modules.auth.models import User
 from app.modules.chat.models import Conversation, Message
 from app.modules.knowledge import service as knowledge
 from . import images
-from .artifacts import MAX_RESULT_BYTES
-from .models import Artifact, ArtifactScope, MessageState
+from .artifacts import MAX_RESULT_BYTES, before_position, visible_results
+from .models import Artifact
 
 RASTER_SUFFIXES = frozenset({'.png', '.jpg', '.jpeg', '.webp'})
 MAX_INPUT_BYTES = MAX_RESULT_BYTES
 MAX_VISION_IMAGES = 4
 
 
-def _before_position(conversation_id, message_id):
-    return select(Message.position).where(
-        Message.id == str(message_id), Message.conversation_id == str(conversation_id),
-    ).correlate(None).scalar_subquery()
-
-
 def _visible_artifact(db, user_id, conversation_id, before_message_id, artifact_id=None):
-    scoped = select(ArtifactScope.artifact_id).where(
-        ArtifactScope.artifact_id == Artifact.id, ArtifactScope.message_id == Message.id,
-    ).exists()
-    candidates = (
-        select(Artifact.id, Message.position, MessageState.artifact_ids_json)
-        .select_from(Message)
-        .join(Conversation, Conversation.id == Message.conversation_id)
-        .join(MessageState, MessageState.message_id == Message.id)
-        .join(Artifact, or_(Artifact.message_id == Message.id, scoped))
-        .where(
-            Conversation.id == str(conversation_id), Conversation.user_id == user_id,
-            Message.role == 'assistant', Message.status == 'complete',
-            Artifact.owner_id == user_id, Artifact.status == 'ready',
-            Artifact.format.in_(images.FORMATS.values()),
-        )
+    visible = visible_results(
+        db, user_id, conversation_id, images.FORMATS.values(), before_message_id=before_message_id,
+        artifact_id=artifact_id,
     )
-    if before_message_id is not None:
-        candidates = candidates.where(Message.position < _before_position(conversation_id, before_message_id))
-    if artifact_id is not None:
-        candidates = candidates.where(Artifact.id == str(artifact_id))
-    for candidate_id, position, active_ids in db.execute(candidates.order_by(
-        Message.position.desc(), Artifact.created_at.desc(), Artifact.id.desc(),
-    )):
-        if candidate_id in json.loads(active_ids or '[]'):
-            return candidate_id, position
+    if visible:
+        artifact, position = visible[0]
+        return artifact.id, position
     return None
 
 
@@ -102,7 +78,7 @@ def latest_reference(db, user_id, conversation_id, before_message_id=None):
         Message.role == 'assistant', Message.status == 'complete',
     )
     if before_message_id is not None:
-        candidates = candidates.where(Message.position < _before_position(conversation_id, before_message_id))
+        candidates = candidates.where(Message.position < before_position(conversation_id, before_message_id))
     if artifact:
         candidates = candidates.where(Message.position > artifact[1])
     # Read recent turn references first and check access without loading image bytes.

@@ -18,6 +18,8 @@ const rules:[RegExp,string[]][]=[
   [/^uploads$/,['POST']],[new RegExp(`^uploads/${id}/cancel$`),['POST']],
   [/^feedback$/,['GET']],[new RegExp(`^feedback/${id}$`),['PATCH']],
   [new RegExp(`^evidence/${id}$`),['GET']],
+  [/^schedules$/,['GET']],[new RegExp(`^schedules/${id}$`),['DELETE']],
+  [new RegExp(`^schedules/${id}/runs$`),['GET']],
 ];
 async function handle(request:NextRequest,context:{params:Promise<{path?:string[]}>}){
   const path=(await context.params).path?.join('/')??'';

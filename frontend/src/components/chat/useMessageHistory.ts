@@ -62,8 +62,10 @@ export function useMessageHistory() {
     target.current = null;
     const anchor = scroll && document.getElementById(scroll.id);
     if (scroll && anchor) {
-      if (scroll.offset === undefined) anchor.scrollIntoView({ block: 'center' });
-      else element.scrollTop += anchor.getBoundingClientRect().top - element.getBoundingClientRect().top - scroll.offset;
+      if (scroll.offset === undefined) {
+        anchor.focus({ preventScroll: true });
+        anchor.scrollIntoView({ block: 'center' });
+      } else element.scrollTop += anchor.getBoundingClientRect().top - element.getBoundingClientRect().top - scroll.offset;
     } else if (pinnedRef.current && view.page.newer_after === null) {
       element.scrollTop = element.scrollHeight;
     }

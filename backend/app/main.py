@@ -25,6 +25,8 @@ from app.modules.knowledge.router import router as knowledge_router
 from app.modules.assistant.router import router as assistant_router
 from app.modules.workflows.router import router as workflows_router
 from app.modules.knowledge.service import worker as knowledge_worker
+from app.modules.schedules.router import router as schedules_router
+from app.modules.schedules.worker import worker as schedule_worker
 from app.modules.chat.models import SchedulerLock
 from app.modules.chat.jobs import GenerationJobs
 from app.modules.chat.gateway import router as gateway_router, error_data
@@ -48,13 +50,18 @@ async def lifespan(app: FastAPI):
     settings.avatar_upload_path.mkdir(parents=True, exist_ok=True)
     app.state.generation_jobs = GenerationJobs()
     stop=asyncio.Event()
-    task=asyncio.create_task(knowledge_worker(engine,stop)) if settings.knowledge_enabled and settings.knowledge_worker_enabled else None
+    from app.modules.chat.router import scheduled_turn
+
+    tasks = [asyncio.create_task(schedule_worker(engine, stop, scheduled_turn))]
+    if settings.knowledge_enabled and settings.knowledge_worker_enabled:
+        tasks.append(asyncio.create_task(knowledge_worker(engine, stop)))
     try:yield
     finally:
-        await app.state.generation_jobs.close()
         stop.set()
-        if task:
-            task.cancel();await asyncio.gather(task,return_exceptions=True)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await app.state.generation_jobs.close()
         engine.dispose()
 
 
@@ -107,5 +114,6 @@ app.include_router(knowledge_router)
 app.include_router(assistant_router)
 
 app.include_router(workflows_router)
+app.include_router(schedules_router)
 
 app.include_router(gateway_router)
