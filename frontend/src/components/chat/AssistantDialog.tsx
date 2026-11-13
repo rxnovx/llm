@@ -8,9 +8,9 @@ import { McpManager } from './McpManager';
 type Preferences={instructions:string;memory_enabled:boolean;revision:number};
 const failure=(e:unknown)=>e instanceof Error?e.message:'요청을 완료하지 못했습니다.';
 const toggle=(items:string[],id:string)=>items.includes(id)?items.filter(v=>v!==id):[...items,id];
-export function AssistantDialog({conversationId,value,onSelect,onClose,admin}:{conversationId:string;value:AssistantSelection;onSelect:(value:AssistantSelection)=>void;onClose:()=>void;admin:boolean}) {
+export function AssistantDialog({conversationId,value,onSelect,onClose,admin,initialTab='knowledge'}:{conversationId:string;value:AssistantSelection;onSelect:(value:AssistantSelection)=>void;onClose:()=>void;admin:boolean;initialTab?:'knowledge'|'apps'}) {
   const ref=useRef<HTMLDialogElement>(null);
-  const [tab,setTab]=useState('knowledge'),[selection,setSelection]=useState(value);
+  const [tab,setTab]=useState<string>(initialTab),[selection,setSelection]=useState(value);
   const [bases,setBases]=useState<KnowledgeBase[]>([]),[base,setBase]=useState(''),[documents,setDocuments]=useState<KnowledgeDocument[]>([]);
   const [servers,setServers]=useState<McpServer[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(false),[uploading,setUploading]=useState(false),[reload,setReload]=useState(0);
   const dismiss = useDialogDismiss(onClose, !uploading);

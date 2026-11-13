@@ -14,7 +14,7 @@ async function signUp(page: Page, username: string) {
   await page.getByRole("checkbox").check();
   await page.getByRole("button", { name: "회원가입", exact: true }).click();
   await expect(page.getByRole("heading", { name: "무엇을 함께 해볼까요?" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /테스트 모드/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "모델 선택 · 테스트 모드", exact: true })).toBeEnabled();
 }
 
 async function sendQuestion(page: Page, question: string) {
@@ -49,20 +49,77 @@ test("테스트 대화·이전 링크·새로고침·이름 변경·연결 해�
   if (await page.getByRole("button", { name: "사이드바 열기" }).isVisible()) await page.getByRole("button", { name: "사이드바 열기" }).click();
   await expect(page.getByRole("button", { name: "다시 이어갈 대화", exact: true })).toBeVisible();
   if (await page.getByRole("button", { name: "사이드바 접기" }).isVisible()) await page.getByRole("button", { name: "사이드바 접기" }).click();
-  await page.getByRole("button", { name: /테스트 모드/ }).click();
-  const settings = page.getByRole("dialog", { name: "모델 연결", exact: true });
-  await expect(settings).toBeVisible();
-  await settings.getByRole("button", { name: "연결 해제", exact: true }).click();
-  await settings.getByRole("button", { name: "연결 설정 닫기" }).click();
+  await page.getByRole("button", { name: "모델 선택 · 테스트 모드", exact: true }).click();
+  const models = page.getByRole("group", { name: "모델 목록", exact: true });
+  await expect(models).toBeVisible();
+  await models.getByRole("button", { name: "연결 해제", exact: true }).click();
+  await expect(models).toHaveCount(0);
   await page.getByLabel("메시지", { exact: true }).fill("연결 없이 보내지 않기");
   await expect(page.getByRole("button", { name: "메시지 전송", exact: true })).toBeDisabled();
-  await page.getByRole("button", { name: /연결 선택/ }).click();
-  await settings.getByRole("button", { name: "선택", exact: true }).click();
-  await settings.getByRole("button", { name: "연결 설정 닫기" }).click();
+  await page.getByRole("button", { name: "모델 선택", exact: true }).click();
+  await models.getByRole("button", { name: "테스트 모드", exact: true }).click();
+  await expect(models).toHaveCount(0);
   await expect(page.getByRole("button", { name: "메시지 전송", exact: true })).toBeEnabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: info.outputPath("chat-workspace.png"), fullPage: true });
   expect(failures).toEqual([]);
+});
+
+test("입력창 오른쪽의 드롭다운에서 등록 모델과 조회한 모델을 선택한다", async ({ page }, info) => {
+  const profile = { name: "gemma-4-31b-it", context_window: 8192, max_output_tokens: 1024, max_concurrent: 2 };
+  await page.route("**/api/chat/config", async route => {
+    const response = await route.fetch();
+    const config = await response.json();
+    await route.fulfill({ json: { ...config, connections: [
+      ...config.connections,
+      { id: "office", name: "사내 vLLM", provider: "vllm", default_model: profile.name, is_test: false,
+        models: [profile, { ...profile, name: "gpt-oss-120b" }] },
+      { id: "ollama", name: "Ollama", provider: "ollama", default_model: "", is_test: false, models: [] },
+    ] } });
+  });
+  await page.route("**/api/chat/connections/ollama/check", route => route.fulfill({ json: { models: ["gemma4:31b"] } }));
+  await signUp(page, `picker_${info.project.name}_${Date.now()}`);
+  const editor = page.getByLabel("메시지", { exact: true });
+  await editor.fill("모델을 바꾸는 동안 유지할 질문");
+  const trigger = page.getByRole("button", { name: /^모델 선택 · / });
+  const add = page.getByRole("button", { name: "도구 추가", exact: true });
+  const send = page.getByRole("button", { name: "메시지 전송", exact: true });
+  const [toolBox, modelBox, sendBox] = await Promise.all([add.boundingBox(), trigger.boundingBox(), send.boundingBox()]);
+  expect(toolBox!.x).toBeLessThan(modelBox!.x);
+  expect(sendBox!.x - modelBox!.x - modelBox!.width).toBeLessThanOrEqual(8);
+  expect(Math.abs(modelBox!.y + modelBox!.height / 2 - sendBox!.y - sendBox!.height / 2)).toBeLessThanOrEqual(1);
+
+  await add.click();
+  await expect(page.getByRole("group", { name: "채팅 도구" })).toBeVisible();
+  await trigger.click();
+  const dropdown = page.getByRole("group", { name: "모델 목록" });
+  await expect(dropdown).toBeVisible();
+  await expect(page.getByRole("group", { name: "채팅 도구" })).toHaveCount(0);
+  await expect(page.locator("dialog:modal")).toHaveCount(0);
+  const box = (await dropdown.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+  await dropdown.getByRole("button", { name: "gpt-oss-120b", exact: true }).click();
+  await expect(trigger).toHaveAccessibleName("모델 선택 · gpt-oss-120b");
+  await expect(trigger).toBeFocused();
+
+  await trigger.click();
+  const ollama = dropdown.getByRole("region", { name: "Ollama" });
+  await ollama.getByRole("button", { name: "연결 확인", exact: true }).click();
+  await expect(ollama.getByRole("status")).toHaveText("모델 1개 확인됨");
+  await ollama.getByRole("button", { name: "gemma4:31b", exact: true }).click();
+  await expect(trigger).toHaveAccessibleName("모델 선택 · gemma4:31b");
+  await trigger.click();
+  await ollama.getByRole("button", { name: "모델 ID 직접 입력" }).click();
+  const custom = ollama.getByRole("textbox", { name: "모델 ID" });
+  await custom.fill("gemma4:custom");
+  await custom.press("Enter");
+  await expect(trigger).toHaveAccessibleName("모델 선택 · gemma4:custom");
+  await expect(dropdown).toHaveCount(0);
+  await expect(editor).toHaveValue("모델을 바꾸는 동안 유지할 질문");
 });
 
 test("대화 주소를 뒤로·앞으로 이동하고 로그인 후 복귀할 수 있다", async ({ page, browser, baseURL }, info) => {
@@ -132,12 +189,10 @@ test("대화 주소를 뒤로·앞으로 이동하고 로그인 후 복귀할 �
   }
 });
 
-test("다음 답변이 캔버스에 표시되고 Markdown 원문을 편집·복사·저장할 수 있다", async ({ page, context }, info) => {
+test("프롬프트로 캔버스를 열어 Markdown 원문을 편집·복사·저장한다", async ({ page, context }, info) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await signUp(page, `canvas_${info.project.name}_${Date.now()}`);
-  const toggle = page.getByRole("button", { name: "다음 답변 캔버스로 받기" });
-  await toggle.click();
-  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "다음 답변 캔버스로 받기" })).toHaveCount(0);
   await page.evaluate(() => {
     const observer = new MutationObserver(() => {
       if (document.querySelector(".cw-canvas [role=status]")?.textContent === "답변 작성 중…") {
@@ -147,7 +202,7 @@ test("다음 답변이 캔버스에 표시되고 Markdown 원문을 편집·복�
     });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   });
-  await page.getByLabel("메시지", { exact: true }).fill("캔버스에 표시할 답변");
+  await page.getByLabel("메시지", { exact: true }).fill("이 초안을 캔버스로 작성해 줘");
   await page.getByRole("button", { name: "메시지 전송", exact: true }).click();
 
   const canvas = page.getByRole("complementary", { name: "캔버스", exact: true });
@@ -196,13 +251,10 @@ test("다음 답변이 캔버스에 표시되고 Markdown 원문을 편집·복�
   });
   await page.getByRole("button", { name: "답변 복사", exact: true }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(original);
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
 });
 
 test("캔버스 요청을 채팅에서 읽어 자동으로 열고 카드를 복원한다", async ({ page }, info) => {
   await signUp(page, `canvas_auto_${info.project.name}_${Date.now()}`);
-  const toggle = page.getByRole("button", { name: "다음 답변 캔버스로 받기" });
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
   const editor = page.getByLabel("메시지", { exact: true });
   await editor.fill("초안을 캔버스로 작성해 줘");
   await page.getByRole("button", { name: "메시지 전송", exact: true }).click();

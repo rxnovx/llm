@@ -11,7 +11,8 @@ test('문서 첨부와 지식 선택이 질문 초안을 유지하고 답변에 
   await page.getByRole('checkbox').check();await page.getByRole('button',{name:'회원가입',exact:true}).click();
   await expect(page.getByRole('heading',{name:'무엇을 함께 해볼까요?'})).toBeVisible();
   await page.getByLabel('메시지',{exact:true}).fill('연차 휴가 규정을 알려줘');
-  await page.getByRole('button',{name:'파일·지식',exact:true}).click();
+  await page.getByRole('button',{name:'도구 추가',exact:true}).click();
+  await page.getByRole('group',{name:'채팅 도구'}).getByRole('button',{name:'파일·지식',exact:true}).click();
   const modal=page.getByRole('dialog',{name:'자료·앱·개인 설정'});
   await modal.locator('input[type=file]').setInputFiles({name:'manual.md',mimeType:'text/markdown',buffer:Buffer.from('연차 휴가 규정: 연간 15일을 사용할 수 있습니다.')});
   await expect(modal.locator('.cw-knowledge-documents').getByText(/검색 준비됨/)).toBeVisible({timeout:30000});
@@ -25,7 +26,9 @@ test('문서 첨부와 지식 선택이 질문 초안을 유지하고 답변에 
   await expect(source).toContainText('15일');
   await source.getByRole('button',{name:'닫기',exact:true}).click();
   await page.getByLabel('메시지',{exact:true}).fill('다음 질문');
-  await page.getByRole('button',{name:'파일·지식',exact:true}).click();
+  await page.getByRole('button',{name:'도구 추가',exact:true}).click();
+  await page.getByRole('group',{name:'채팅 도구'}).getByRole('button',{name:'연결된 앱',exact:true}).click();
+  await expect(modal.getByRole('button',{name:'앱',exact:true})).toHaveAttribute('aria-pressed','true');
   await modal.getByRole('button',{name:'맞춤 설정',exact:true}).click();
   await modal.getByLabel('답변 방식과 내 정보').fill('한국어로 간결하게 답변해줘');
   await modal.getByRole('button',{name:'맞춤 설정 저장',exact:true}).click();

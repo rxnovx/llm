@@ -10,10 +10,12 @@ test('질문 분기·답변 버전 비교·실제 파일 다운로드와 프로�
   await page.getByLabel('비밀번호 확인',{exact:true}).fill('WorkflowsBrowserPass123!');
   await page.getByRole('checkbox').check();await page.getByRole('button',{name:'회원가입',exact:true}).click();
   await expect(page.getByRole('heading',{name:'무엇을 함께 해볼까요?'})).toBeVisible();
+  const sidebar = page.getByRole('button',{name:'사이드바 열기',exact:true});
+  if (await sidebar.isVisible()) await sidebar.click();
   await page.getByRole('button',{name:'프로젝트 관리',exact:true}).click();
-  const project=page.getByRole('dialog',{name:'대화·자료·지침을 한곳에'});
+  const project=page.getByRole('dialog',{name:'프로젝트',exact:true});
   await project.getByLabel('프로젝트 이름',{exact:true}).fill('검증 프로젝트');
-  await project.getByLabel('이 프로젝트의 응답 지침').fill('한국어로 답변');
+  await project.getByLabel('응답 지침',{exact:true}).fill('한국어로 답변');
   await project.getByRole('button',{name:'프로젝트 만들기',exact:true}).click();
   await project.getByRole('button',{name:'프로젝트 대화 보기',exact:true}).click();
   await page.getByLabel('메시지',{exact:true}).fill('검증 대화의 첫 질문');
@@ -29,7 +31,7 @@ test('질문 분기·답변 버전 비교·실제 파일 다운로드와 프로�
   await page.getByLabel('저장 형식',{exact:true}).selectOption('pdf');
   await page.getByRole('button',{name:'파일 만들기',exact:true}).click();
   const file=page.locator('.cw-result-files li');await expect(file).toContainText('대화 결과.pdf');
-  await file.getByRole('button',{name:/대화 결과.pdf/}).click();
+  await file.getByRole('button',{name:/^대화 결과\.pdf .*미리보기$/}).click();
   const preview=page.getByRole('dialog',{name:'결과 파일 미리보기'});await expect(preview).toContainText('대화 결과.pdf');
   const downloading=page.waitForEvent('download');await preview.getByRole('button',{name:'다운로드',exact:true}).click();expect((await downloading).suggestedFilename()).toBe('대화 결과.pdf');
   await preview.getByRole('button',{name:'닫기',exact:true}).click();
@@ -74,7 +76,8 @@ test('붙여넣거나 놓은 파일을 미리 보고 전송할 때 첨부한다'
   await expect(previews).toHaveCount(0);
 
   const chooser = page.waitForEvent('filechooser');
-  await page.getByRole('button',{name:'첨부',exact:true}).click();
+  await page.getByRole('button',{name:'도구 추가',exact:true}).click();
+  await page.getByRole('group',{name:'채팅 도구'}).getByRole('button',{name:'첨부',exact:true}).click();
   await (await chooser).setFiles({name:'one.md',mimeType:'text/markdown',buffer:Buffer.from('첫 번째 문서입니다.')});
   const dropped = await page.evaluateHandle(() => {
     const transfer = new DataTransfer();

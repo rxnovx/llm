@@ -8,7 +8,6 @@ type Target = { conversationId: string; message: ChatMessage };
 
 export function useConversationCanvas(conversationId: string | null, messages: ChatMessage[]) {
   const [target, setTarget] = useState<(Target & { trigger?: HTMLElement }) | null>(null);
-  const [nextReply, setNextReply] = useState(false);
   const [unsaved, setUnsaved] = useState(false);
   const edits = useRef(new Map<string, CanvasEdit>());
   const message = target && target.conversationId === conversationId
@@ -57,7 +56,6 @@ export function useConversationCanvas(conversationId: string | null, messages: C
 
   const reset = () => {
     setTarget(null);
-    setNextReply(false);
   };
 
   const deleteEdits = (id: string) => {
@@ -67,5 +65,5 @@ export function useConversationCanvas(conversationId: string | null, messages: C
     setUnsaved(edits.current.size > 0);
   };
 
-  return { message, nextReply, setNextReply, open, openAutomatically, close, reset, readEdit, rememberEdit, deleteEdits };
+  return { message, open, openAutomatically, close, reset, readEdit, rememberEdit, deleteEdits };
 }

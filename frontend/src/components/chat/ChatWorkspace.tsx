@@ -11,7 +11,8 @@ import type { ChatConfig, ChatMessage, Connection, ContextReport, Conversation, 
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
 import { UserAvatar } from "@/components/shared/UserAvatar";
 import { useDialogDismiss } from "@/components/shared/useDialogDismiss";
-import { ConnectionsDialog } from "./ConnectionsDialog";
+import { ComposerDropdown } from "./ComposerDropdown";
+import { ModelPicker } from "./ModelPicker";
 import { ContextDialog } from "./ContextDialog";
 import { CopyButton, MessageContent } from "./MessageContent";
 import { Icon, Wordmark, type IconName } from "./Icons";
@@ -87,10 +88,10 @@ function assistantDraft(selection?: Partial<AssistantSelection>): AssistantSelec
 }
 const appOptions = [
   { id: "gitlab", title: "GitLab", description: "입력창에 @gitlab 추가", icon: "code", names: ["gitlab"] },
-  { id: "knowledge", title: "지식·연결된 앱", description: "문서 검색과 MCP 도구 선택", icon: "plus", names: ["knowledge", "apps", "지식"] },
+  { id: "knowledge", title: "지식·연결된 앱", description: "문서 검색과 MCP 도구 선택", icon: "file", names: ["knowledge", "apps", "지식"] },
   { id: "gitlab-scope", title: "GitLab 범위 직접 선택", description: "프로젝트·파일·MR 지정", icon: "settings", names: ["gitlab"] },
 ] as const;
-type AppPicker = NonNullable<ReturnType<typeof appMentionAt>> & { hasTypedMention?: boolean };
+type AppMention = NonNullable<ReturnType<typeof appMentionAt>>;
 type AppOptionId = typeof appOptions[number]["id"];
 
 function GitlabPublication({ tools }: { tools: ChatMessage["tools"] }) {
@@ -153,20 +154,22 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
   const [searching, setSearching] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [sidebar, setSidebar] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [composerDropdown, setComposerDropdown] = useState<"tools" | "models" | null>(null);
+  const modelPickerOpen = composerDropdown === "models";
   const [contextOpen, setContextOpen] = useState(false);
   const [contextReport, setContextReport] = useState<ContextReport | null>(null);
   const [queue, setQueue] = useState<QueueState | null>(null);
   const [appSelections, setAppSelections] = useState<GitlabSelection[]>([]);
   const [publishGitlab, setPublishGitlab] = useState(false);
-  const [mention, setMention] = useState<AppPicker | null>(null);
+  const [mention, setMention] = useState<AppMention | null>(null);
   const [mentionChoice,setMentionChoice]=useState(0);
   const [scopeOpen, setScopeOpen] = useState(false), [toolStatus, setToolStatus] = useState("");
   const [scopeReference, setScopeReference] = useState("");
   const [terminal,setTerminal]=useState({enabled:false,execution_enabled:false}),[workspaceOpen,setWorkspaceOpen]=useState(false);
   const [imageEditEnabled, setImageEditEnabled] = useState(false);
   const [imageDraft, setImageDraft] = useState<ImageDraft>(emptyImageDraft);
-  const [assistantOpen,setAssistantOpen]=useState(false),[assistantSelection,setAssistantSelection]=useState<AssistantSelection>(emptySelection);
+  const [assistantTab, setAssistantTab] = useState<"knowledge" | "apps" | null>(null);
+  const [assistantSelection, setAssistantSelection] = useState<AssistantSelection>(emptySelection);
   const [projects,setProjects]=useState<Project[]>([]),[projectId,setProjectId]=useState(''),[projectsOpen,setProjectsOpen]=useState(false);
   const [uploading, setUploading] = useState(false);
   const [existingImagesOpen, setExistingImagesOpen] = useState(false);
@@ -276,20 +279,30 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
   const attachmentOnlyText = hasImageInput
     ? documentFiles.length ? '첨부한 이미지와 문서의 내용을 함께 정리해 줘.' : '첨부한 이미지를 설명해 줘.'
     : documentFiles.length ? '첨부한 자료의 내용을 알려줘.' : '';
-  const openModels = () => { if (user) setSettingsOpen(true); else router.push("/login", { scroll: false }); };
+  const composerControlsDisabled = busy || loading || starting || initializing || uploading || routePending;
+  const changeComposerDropdown = (dropdown: "tools" | "models", open: boolean) => {
+    setMention(null);
+    setComposerDropdown(current => open ? dropdown : current === dropdown ? null : current);
+  };
+  const openModels = () => {
+    if (!user) router.push("/login", { scroll: false });
+    else if (!composerControlsDisabled && !readOnly) setComposerDropdown("models");
+  };
   const openGitlabScope = (reference: string) => { setScopeReference(reference); setScopeOpen(true); };
-  const openAssistant = async () => {
+  const openAssistant = async (tab: "knowledge" | "apps" = "knowledge") => {
+    setComposerDropdown(null);
     setMention(null);
     if (!user) { router.push("/login", { scroll: false }); return; }
-    if (routePending || loading || starting) return;
-    if (active) { setAssistantOpen(true); return; }
+    if (composerControlsDisabled || readOnly) return;
+    if (active) { setAssistantTab(tab); return; }
+    if (!connection) { openModels(); return; }
     loadController.current?.abort();
     const abort = new AbortController();
     loadController.current = abort;
     setLoading(true);
     try {
       await createConversation(abort.signal);
-      setAssistantOpen(true);
+      setAssistantTab(tab);
     } catch (caught) {
       if (!abort.signal.aborted) setError(errorText(caught));
     } finally {
@@ -303,39 +316,33 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
   const updateTypedMention = (field: HTMLTextAreaElement) => {
     if (composing.current) return;
     const next = field.selectionStart === field.selectionEnd ? appMentionAt(field.value, field.selectionStart) : null;
-    setMention(next && `@${next.query.toLowerCase()}` !== GITLAB_MENTION ? { ...next, hasTypedMention: true } : null);
+    setMention(next && `@${next.query.toLowerCase()}` !== GITLAB_MENTION ? next : null);
     setMentionChoice(0);
   };
-  const openAppPicker = () => {
+  const addGitlabMention = (range?: Pick<AppMention, "start" | "end">) => {
     const field = editor.current;
     const start = field?.selectionStart ?? draft.length;
     const end = field?.selectionEnd ?? start;
     const typed = start === end ? appMentionAt(draft, start) : null;
-    setMention(typed ? { ...typed, query: "" } : { start, end, query: "" });
-    setMentionChoice(0);
-    field?.focus();
+    const { value, caret } = insertGitlabMention(draft, range ?? typed ?? { start, end });
+    if (field && value.length > field.maxLength) {
+      setError("메시지는 16,000자까지 입력할 수 있습니다.");
+      return;
+    }
+    setDraft(value);
+    requestAnimationFrame(() => {
+      if (field?.value !== value) return;
+      field.focus({ preventScroll: true });
+      field.setSelectionRange(caret, caret);
+    });
   };
   const chooseApp = (id: AppOptionId) => {
     if (!mention) return;
     setMention(null);
-    if (id === "gitlab") {
-      const { value, caret } = insertGitlabMention(draft, mention);
-      const field = editor.current;
-      if (field && value.length > field.maxLength) {
-        setError("메시지는 16,000자까지 입력할 수 있습니다.");
-        return;
-      }
-      setDraft(value);
-      requestAnimationFrame(() => {
-        if (field?.value !== value) return;
-        field.focus({ preventScroll: true });
-        field.setSelectionRange(caret, caret);
-      });
-      return;
-    }
-    if (mention.hasTypedMention) setDraft(removeAppMention(draft, mention));
+    if (id === "gitlab") { addGitlabMention(mention); return; }
+    setDraft(removeAppMention(draft, mention));
     if (id === "gitlab-scope") openGitlabScope(gitlabMergeRequestLink(draft));
-    else void openAssistant();
+    else void openAssistant(mention.query.toLowerCase().startsWith("app") ? "apps" : "knowledge");
   };
 
   useEffect(() => {
@@ -382,10 +389,10 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           setImageEditEnabled(Boolean(value.images?.edit));
         } }).catch(() => {});
     };
-    if (settingsOpen) refresh();
+    if (modelPickerOpen) refresh();
     window.addEventListener("focus", refresh);
     return () => { abort.abort(); window.removeEventListener("focus", refresh); };
-  }, [busy, settingsOpen, subject]);
+  }, [busy, modelPickerOpen, subject]);
 
   useEffect(() => {
     const keyboard = (event: KeyboardEvent) => {
@@ -543,6 +550,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     setError(rejected.length ? `${rejected.slice(0, 3).join(', ')} 파일의 형식과 크기를 확인하세요.` : '');
     if (!staged.length) return;
     setDraftAttachments(items => [...items, ...staged]);
+    setComposerDropdown(null);
     setMention(null);
     restoreComposerFocus();
   };
@@ -573,7 +581,8 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     setActive(null); replaceHistory(); setDraft(""); setError(""); setSidebar(false); setMenu("");
     setRouteError(""); setContextReport(null); setContextOpen(false);
     setAppSelections([]); setPublishGitlab(false); setMention(null);
-    setAssistantSelection(emptySelection()); setAssistantOpen(false);
+    setAssistantSelection(emptySelection()); setAssistantTab(null);
+    setComposerDropdown(null);
     setWorkspaceOpen(false); setScopeOpen(false); setRetryConfirmation(null);
     resetAttachmentDraft();
     canvas.reset();
@@ -669,9 +678,9 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     if (!user) { onGuestDraft(text); router.push("/login", { scroll: false }); return; }
     const last=messages.at(-1);
     if(retry&&!confirmed&&(last?.assistant?.allow_writes||last?.apps?.some(a=>a.mode==='execute'))){setRetryConfirmation(text);return;}
-    const showInCanvas = canvas.nextReply && !retry;
     onGuestDraft("");
     cancelPage();
+    setComposerDropdown(null);
     sending.current = true; setStreaming(true); setError(""); setToolStatus(""); setMention(null); pinnedRef.current = true;
     const abort = new AbortController(); controller.current = abort;
     awaitingStart.current = true;
@@ -750,7 +759,6 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
       requestId = newRequestId(); generation.current = { id: requestId, conversation: current.id };
       const response = await chatFetch(`/conversations/${current.id}/messages`, { method: "POST", signal: abort.signal,
         body: JSON.stringify({ content: text, connection_id: selected, model, request_id: requestId, retry, confirm_write_retry:confirmed, apps: usedApps,
-          ...(showInCanvas ? { canvas: true } : {}),
           ...(!retry && publishGitlab && usedApps[0]?.mode === "execute" ? { publish_gitlab: true } : {}),
           assistant:usedAssistant }) });
       if (!response.body) throw new Error("응답 연결을 열지 못했습니다.");
@@ -768,8 +776,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           acceptDraft();
           setMessages((old) => [...old.filter((item) => item.id !== human.id && item.id !== assistant.id), human, assistant]);
           setActive(conversation); updateConversation(conversation);
-          if (showInCanvas) canvas.setNextReply(false);
-          else requestAnimationFrame(() => { if (!canvasOffered && !abort.signal.aborted) editor.current?.focus(); });
+          requestAnimationFrame(() => { if (!canvasOffered && !abort.signal.aborted) editor.current?.focus(); });
         } else if (event.event === "canvas") {
           const selection = event.data;
           setMessages(old => old.map(item => item.id === assistantId
@@ -1009,22 +1016,39 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           event.preventDefault(); void send();
         }
       }} />
-    <div className="cw-composer-bottom"><button className="cw-model-picker" type="button" disabled={busy} onClick={openModels}>
-      <Icon name={connection?.is_test ? "chat" : "server"} size={16} /><span>{connection?.is_test ? connection.name : model || connection?.name || "모델 연결"}</span><Icon name="chevron" size={14} /></button>
-      <button type="button" className="cw-context-button" aria-label="앱 추가" disabled={busy || loading || initializing}
-        onPointerDown={event => { if (event.button === 0 && !composing.current) event.preventDefault(); }} onClick={openAppPicker}>@ 앱</button>
-      <button type="button" className="cw-context-button" disabled={!canSend} onClick={chooseFiles}>첨부</button>
-      {canUseImageInput && !explicitApps && active && <button type="button" className="cw-context-button" disabled={!canSend}
-        aria-expanded={existingImagesOpen} onClick={() => setExistingImagesOpen(open => !open)}>기존 이미지</button>}
-      <button type="button" className="cw-context-button" disabled={busy||loading||initializing||uploading} onClick={()=>void openAssistant()}>파일·지식</button>
-      {user && <button className="cw-context-button cw-canvas-toggle" type="button" aria-label="다음 답변 캔버스로 받기"
-        title="다음 답변을 캔버스에 표시" aria-pressed={canvas.nextReply} disabled={busy || loading || initializing}
-        onClick={() => canvas.setNextReply(enabled => !enabled)}><Icon name="file" size={14} />캔버스</button>}
-      {active && <button className="cw-context-button" type="button" disabled={busy || !connection} onClick={() => setContextOpen(true)}>문맥</button>}
-      {active&&terminal.enabled&&<button className="cw-context-button" type="button" onClick={()=>setWorkspaceOpen(true)}>작업공간</button>}
-      <span className="cw-enter-hint">Shift + Enter 줄바꿈</span>
-      {busy ? <button type="button" onClick={stop} className="cw-send" aria-label={uploading ? "첨부 전송 취소" : queue?.status === "queued" ? (imageQueue ? "이미지 대기 취소" : "대기 취소") : imageQueue ? "이미지 작업 중지" : "응답 중지"}><span className="cw-stop-square" /></button>
-        : <button className="cw-send" disabled={!(draft.trim() || attachmentOnlyText) || !canSend || !!attachmentIssue} aria-label="메시지 전송"><Icon name="arrow" size={20} /></button>}</div>
+    <div className="cw-composer-bottom">
+      <ComposerDropdown open={composerDropdown === "tools"} disabled={loading || initializing || routePending}
+        label="도구 추가" panelLabel="채팅 도구" className="cw-composer-add" trigger={<Icon name="plus" size={20} />}
+        onOpenChange={open => changeComposerDropdown("tools", open)}>
+        <>
+          <button type="button" className="cw-composer-option" disabled={!canSend}
+            onClick={() => { setComposerDropdown(null); chooseFiles(); }}><Icon name="paperclip" size={17} />첨부</button>
+          {canUseImageInput && !explicitApps && active && <button type="button" className="cw-composer-option" disabled={!canSend}
+            onClick={() => { setComposerDropdown(null); setExistingImagesOpen(open => !open); restoreComposerFocus(); }}>
+            <Icon name="image" size={17} />{existingImagesOpen ? "기존 이미지 닫기" : "기존 이미지"}</button>}
+          <button type="button" className="cw-composer-option" disabled={composerControlsDisabled}
+            onClick={() => void openAssistant()}><Icon name="file" size={17} />파일·지식</button>
+          <button type="button" className="cw-composer-option" disabled={composerControlsDisabled}
+            onClick={() => void openAssistant("apps")}><Icon name="apps" size={17} />연결된 앱</button>
+          <button type="button" className="cw-composer-option" disabled={composerControlsDisabled}
+            onClick={() => { setComposerDropdown(null); addGitlabMention(); }}><Icon name="code" size={17} />GitLab</button>
+          {user && <button type="button" className="cw-composer-option" disabled={composerControlsDisabled}
+            onClick={() => { setComposerDropdown(null); openGitlabScope(draftMrLink); }}><Icon name="settings" size={17} />GitLab 범위 직접 선택</button>}
+          {active && <button type="button" className="cw-composer-option" disabled={composerControlsDisabled || !connection}
+            onClick={() => { setComposerDropdown(null); setContextOpen(true); }}><Icon name="chat" size={17} />문맥</button>}
+          {active && terminal.enabled && <button type="button" className="cw-composer-option"
+            onClick={() => { setComposerDropdown(null); setWorkspaceOpen(true); }}><Icon name="panel" size={17} />작업공간</button>}
+        </>
+      </ComposerDropdown>
+      <div className="cw-composer-actions">
+        {user ? <ModelPicker connections={connections} selected={selected} model={model} open={modelPickerOpen}
+          disabled={composerControlsDisabled} onOpenChange={open => changeComposerDropdown("models", open)}
+          onSelect={(id, nextModel) => { setSelected(id); setModel(nextModel); }} />
+          : <button type="button" className="cw-model-picker" onClick={openModels}>모델 선택<Icon name="chevron" size={14} /></button>}
+        {busy ? <button type="button" onClick={stop} className="cw-send" aria-label={uploading ? "첨부 전송 취소" : queue?.status === "queued" ? (imageQueue ? "이미지 대기 취소" : "대기 취소") : imageQueue ? "이미지 작업 중지" : "응답 중지"}><span className="cw-stop-square" /></button>
+          : <button className="cw-send" disabled={!(draft.trim() || attachmentOnlyText) || !canSend || !!attachmentIssue} aria-label="메시지 전송"><Icon name="arrow" size={20} /></button>}
+      </div>
+    </div>
   </form>;
 
   return <div className={`cw-workspace${sidebar ? " sidebar-open" : ""}${canvasMessage ? " has-canvas" : ""}`}>
@@ -1047,7 +1071,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           {!item.read_only && menu === item.id && <div className="cw-row-menu"><button onClick={() => rename(item)}><Icon name="edit" size={14} />이름 변경</button>
             <button className="cw-danger" onClick={() => { setAction({ type: "delete", item }); setMenu(""); setError(""); }}><Icon name="trash" size={14} />삭제</button></div>}</div>)}</nav>
         {hasMore && <button className="cw-load-more" disabled={loading} onClick={() => void loadMore()}>이전 대화 더 보기</button>}</div>
-      <footer className="cw-sidebar-footer"><button className="cw-connection-link" onClick={openModels}><Icon name="settings" size={17} />모델 연결<span>{user ? connections.length : ""}</span></button>
+      <footer className="cw-sidebar-footer">
         {user ? <div className="cw-account-wrap">{accountOpen && <div className="cw-account-menu"><Link href="/user/settings" onClick={() => { setAccountOpen(false); setSidebar(false); }}><Icon name="settings" size={15} />설정</Link>
           {user.is_global_admin && <Link href="/admin" onClick={() => { setAccountOpen(false); setSidebar(false); }}><Icon name="server" size={15} />운영 대시보드</Link>}<ThemeToggle />
           <button onClick={() => void logout()}><Icon name="logout" size={15} />로그아웃</button></div>}
@@ -1067,8 +1091,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
       {active && !readOnly ? <button className="cw-title-button" disabled={busy || loading} aria-label="대화 이름 변경" title="대화 이름 변경" onClick={() => rename(active)}>
         <span className="cw-topbar-title">{active.title}</span><Icon name="edit" size={13} /></button> : <span className="cw-topbar-title">{active?.title||'새 대화'}</span>}</div>
       {user&&<div className="cw-topbar-project"><button className="cw-text-button" disabled={starting||uploading} onClick={()=>setProjectsOpen(true)}>{active?.project_name||projects.find(p=>p.id===projectId)?.name||'프로젝트'}</button>{active&&!readOnly&&messages.length>0&&<button className="cw-text-button" disabled={busy||loading||uploading} onClick={()=>void continueConversation()}>새 대화로 이어가기</button>}</div>}
-      {user ? <button className={`cw-mode ${connection?.is_test ? "is-test" : ""}`} onClick={openModels}><span />{connection?.is_test ? "테스트 모드" : connection?.name || "연결 선택"}<Icon name="chevron" size={12} /></button>
-        : <div className="cw-guest-topbar"><ThemeToggle /><Link href="/login">로그인</Link></div>}</header>
+      {!user && <div className="cw-guest-topbar"><ThemeToggle /><Link href="/login">로그인</Link></div>}</header>
       <div className={`cw-content ${messages.length && !routePending ? "has-messages" : ""}`} ref={viewportRef}
         onScroll={() => onScroll(loading || starting || routePending ? undefined : active?.id)} aria-busy={loading || routePending && !routeError}>
         {(loading || routePending && !routeError) && <p className="cw-loading" role="status">대화를 불러오는 중…</p>}
@@ -1138,11 +1161,12 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
       onClose={() => { setScopeOpen(false); restoreComposerFocus(); }}
       onSelect={(selection, publish) => { setAppSelections([selection]); setPublishGitlab(publish); setScopeOpen(false); restoreComposerFocus(); }} />}
     {workspaceOpen&&active&&<WorkspaceDialog conversationId={active.id} onClose={()=>setWorkspaceOpen(false)}/>}
-    {assistantOpen&&active&&<AssistantDialog key={active.id} conversationId={active.id} admin={!!user?.is_global_admin} value={assistantSelection} onClose={()=>{setAssistantOpen(false);restoreComposerFocus();}} onSelect={value=>{setAssistantSelection(value);setAssistantOpen(false);restoreComposerFocus();}}/>}
+    {assistantTab && active && <AssistantDialog key={active.id} conversationId={active.id} initialTab={assistantTab}
+      admin={!!user?.is_global_admin} value={assistantSelection}
+      onClose={() => { setAssistantTab(null); restoreComposerFocus(); }}
+      onSelect={value => { setAssistantSelection(value); setAssistantTab(null); restoreComposerFocus(); }} />}
     {contextOpen && active && <ContextDialog key={active.id} conversationId={active.id} connectionId={selected} model={model} content={draft}
       onClose={() => setContextOpen(false)} onSaved={setContextReport} />}
-    <ConnectionsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} connections={connections} selected={selected} model={model} disabled={busy}
-      onSelect={(id, nextModel) => { setSelected(id); setModel(nextModel); }} />
     <dialog ref={actionDialog} className="cw-dialog cw-action-dialog" aria-labelledby="conversation-action-title" {...dismissAction} onClose={closeAction}>
       <form onSubmit={(event) => void submitAction(event)}><h2 id="conversation-action-title">{action?.type === "delete" ? "이 대화를 삭제할까요?" : "대화 이름 변경"}</h2>
         {action?.type === "delete" ? <p>대화와 메시지가 함께 삭제됩니다. 이 작업은 되돌릴 수 없습니다.</p> : <input ref={titleEditor} autoFocus aria-label="대화 이름" value={title} onChange={(event) => setTitle(event.target.value)} required maxLength={120}

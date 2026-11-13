@@ -11,8 +11,8 @@ test("GitLab 앱 선택이 입력 위치에 멘션을 추가하고 로그인 모
 
   await composer.fill("앞뒤");
   await composer.evaluate((field: HTMLTextAreaElement) => field.setSelectionRange(1, 1));
-  await page.getByRole("button", { name: "앱 추가", exact: true }).click();
-  const gitlab = page.getByRole("option", { name: "GitLab", exact: true });
+  await page.getByRole("button", { name: "도구 추가", exact: true }).click();
+  const gitlab = page.getByRole("group", { name: "채팅 도구" }).getByRole("button", { name: "GitLab", exact: true });
   if (info.project.use.hasTouch) await gitlab.tap();
   else await gitlab.click();
   await expect(composer).toHaveValue("앞 @gitlab 뒤");
@@ -47,8 +47,8 @@ test("GitLab 수동 범위·출처와 프롬프트 멘션이 같은 채팅에서
   await expect(page.getByRole("heading", { name: "무엇을 함께 해볼까요?" })).toBeVisible();
   const composer = page.getByLabel("메시지", { exact: true });
   const openScope = async () => {
-    await page.getByRole("button", { name: "앱 추가", exact: true }).click();
-    await page.getByRole("option", { name: "GitLab 범위 직접 선택", exact: true }).click();
+    await page.getByRole("button", { name: "도구 추가", exact: true }).click();
+    await page.getByRole("group", { name: "채팅 도구" }).getByRole("button", { name: "GitLab 범위 직접 선택", exact: true }).click();
   };
   await composer.fill("함수 분석");
   await openScope();
@@ -85,7 +85,7 @@ test("GitLab 수동 범위·출처와 프롬프트 멘션이 같은 채팅에서
   await composer.fill("@gitlab");
   await expect(page.getByRole("listbox", { name: "사용할 앱" })).toHaveCount(0);
   await composer.press("Enter");
-  await expect(page.getByRole("article", { name: "내 메시지" }).last()).toHaveText("@gitlab");
+  await expect(page.getByRole("article", { name: "내 메시지" }).last().locator(".cw-human-text")).toHaveText("@gitlab");
   await expect(page.getByRole("button", { name: "답변 복사", exact: true })).toHaveCount(2);
 
   await composer.fill("다음 질문 유지");

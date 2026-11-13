@@ -76,11 +76,6 @@
 .cw-canvas-error { padding:10px clamp(12px,2vw,26px) 0; }
 .cw-canvas-error p { margin:0 0 6px; font-size:12px; }
 .cw-canvas-save .cw-primary-button { margin-inline-start:auto; }
-.cw-context-button[aria-pressed="true"].cw-canvas-toggle {
-  background:var(--cw-soft);
-  border-color:var(--focus);
-  color:var(--cw-ink);
-}
 .cw-canvas-card {
   display:flex;
   align-items:center;
@@ -101,7 +96,7 @@
 @media (min-width:1120px) {
   .cw-workspace.has-canvas { grid-template-columns:216px minmax(0,1fr) minmax(350px,43%); }
   .has-canvas .cw-topbar { padding-inline:20px; gap:10px; }
-  .has-canvas .cw-topbar-workspace,.has-canvas .cw-topbar-slash,.has-canvas .cw-enter-hint { display:none; }
+  .has-canvas .cw-topbar-workspace,.has-canvas .cw-topbar-slash { display:none; }
   .has-canvas .cw-welcome,.has-canvas .cw-transcript,.has-canvas .cw-composer-dock {
     width:min(740px,calc(100% - 36px));
   }
