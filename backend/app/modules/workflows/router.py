@@ -8,6 +8,7 @@ from uuid import UUID,uuid4
 from fastapi import APIRouter,Depends,HTTPException,Query,Response
 from pydantic import BaseModel,ConfigDict,Field
 from sqlalchemy import and_,delete,func,select,update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
@@ -18,7 +19,7 @@ from app.modules.chat.scheduler import lock
 from app.modules.knowledge.models import KnowledgeBase,Document
 from app.modules.knowledge import service as knowledge
 from . import conversations as service, artifacts, document_formats
-from .models import Project,ProjectConversation,ProjectMember,MessageVersion,ConversationState,UploadAttempt,Feedback,Artifact
+from .models import Project,ProjectConversation,ProjectMember,MessageVersion,ConversationState,UploadAttempt,Feedback,Artifact,CanvasDraft
 from .projects import available_projects, project_access
 
 router=APIRouter(prefix='/workflows',tags=['workflows'])
@@ -58,6 +59,12 @@ class ExportInput(BaseModel):
     model_config=ConfigDict(extra='forbid')
     format: artifacts.ExportFormat
     name: str=Field('대화 결과',min_length=1,max_length=140)
+
+
+class CanvasInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    content: str = Field(max_length=200_000, pattern=r'^[^\x00]*$')
+    revision: int = Field(ge=0, lt=2_147_483_647)
 
 
 class UploadInput(BaseModel):
@@ -235,6 +242,43 @@ def select_version(message_id: UUID,version_id: UUID,context: Authenticated,db: 
     if auto and auto.through_position>=message.position:db.delete(auto)
     conversation.updated_at=int(time.time());db.commit()
     return detail(db,conversation,message_limit)|{'forked':False}
+
+
+def canvas_source(db: Session, user_id: str, message_id: UUID) -> Message:
+    message, _ = service.message_owned(db, user_id, message_id)
+    if message.role != 'assistant' or message.status != 'complete':
+        raise HTTPException(409, '완료된 답변에서 캔버스를 편집할 수 있습니다.')
+    return message
+
+
+@router.get('/messages/{message_id}/canvas')
+def read_canvas(message_id: UUID, context: Authenticated, db: Database):
+    message = canvas_source(db, context.user.id, message_id)
+    draft = db.get(CanvasDraft, message.id)
+    if draft is None:
+        return {'content': message.content, 'revision': 0}
+    return {'content': draft.content, 'revision': draft.revision}
+
+
+@router.put('/messages/{message_id}/canvas')
+def save_canvas(message_id: UUID, data: CanvasInput, context: Authenticated, db: Database):
+    message = canvas_source(db, context.user.id, message_id)
+    next_revision = data.revision + 1
+    conflict = '다른 창에서 저장한 변경사항이 있습니다. 저장본을 확인해 주세요.'
+    if data.revision == 0:
+        db.add(CanvasDraft(message_id=message.id, content=data.content, revision=next_revision))
+    else:
+        result = db.execute(update(CanvasDraft)
+            .where(CanvasDraft.message_id == message.id, CanvasDraft.revision == data.revision)
+            .values(content=data.content, revision=next_revision))
+        if result.rowcount != 1:
+            raise HTTPException(409, conflict)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, conflict) from None
+    return {'content': data.content, 'revision': next_revision}
 
 
 @router.get('/formats')

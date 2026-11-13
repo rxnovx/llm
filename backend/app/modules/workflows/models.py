@@ -67,6 +67,14 @@ class MessageState(Base):
     phase: Mapped[str]=mapped_column(String(100),default='')
 
 
+class CanvasDraft(Base):
+    __tablename__ = 'assistant_canvas_drafts'
+
+    message_id: Mapped[str] = mapped_column(ForeignKey('chat_messages.id', ondelete='CASCADE'), primary_key=True)
+    content: Mapped[str] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer)
+
+
 class AutoSummary(Base):
     __tablename__='assistant_auto_summaries'
     conversation_id: Mapped[str]=mapped_column(ForeignKey('chat_conversations.id',ondelete='CASCADE'),primary_key=True)

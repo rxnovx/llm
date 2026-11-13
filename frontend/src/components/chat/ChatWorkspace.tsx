@@ -29,6 +29,8 @@ import { ProjectsDialog } from './ProjectsDialog';
 import { DraftAttachments, type DraftAttachment } from './DraftAttachments';
 import { ExistingImagePicker } from './ExistingImagePicker';
 import { useMessageHistory } from './useMessageHistory';
+import { CanvasPanel } from './CanvasPanel';
+import { useConversationCanvas } from './useConversationCanvas';
 import { cancelAttachmentUpload, defaultAttachmentConfig, uploadAttachment, type AttachmentConfig } from '@/lib/attachments';
 import { newRequestId } from '@/lib/request-id';
 import { workflowJson,type Project,type ForkResult,type ResultFile } from '@/lib/workflows';
@@ -197,6 +199,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
   const generation = useRef<{ id: string; conversation: string } | null>(null);
   const { messages, page, viewportRef, pinnedRef, setMessages, replaceHistory, refreshLatest, cancelPage, loadingPage, pageError,
     loadPage, onScroll, scrollDown, scrollToBottom } = useMessageHistory();
+  const canvas = useConversationCanvas(active?.id ?? null, messages);
   const hasNewer = page.newer_after !== null;
   const sending = useRef(false);
   const awaitingStart = useRef(false);
@@ -204,6 +207,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
   const busy = streaming || !!active?.busy;
   const subject = user?.subject;
   const routePending = !!subject && conversationId !== (active?.id ?? null);
+  const canvasMessage = routePending ? null : canvas.message;
   const anyRunning = conversations.some(item => item.busy);
   useEffect(() => {
     if (!subject) return;
@@ -569,6 +573,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     setAssistantSelection(emptySelection()); setAssistantOpen(false);
     setWorkspaceOpen(false); setScopeOpen(false); setRetryConfirmation(null);
     resetAttachmentDraft();
+    canvas.reset();
   };
   const newConversation = () => {
     if (awaitingStart.current || uploading) return;
@@ -661,6 +666,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     if (!user) { onGuestDraft(text); router.push("/login", { scroll: false }); return; }
     const last=messages.at(-1);
     if(retry&&!confirmed&&(last?.assistant?.allow_writes||last?.apps?.some(a=>a.mode==='execute'))){setRetryConfirmation(text);return;}
+    const showInCanvas = canvas.nextReply && !retry;
     onGuestDraft("");
     cancelPage();
     sending.current = true; setStreaming(true); setError(""); setToolStatus(""); setMention(null); pinnedRef.current = true;
@@ -755,7 +761,10 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           acceptDraft();
           setMessages((old) => [...old.filter((item) => item.id !== human.id && item.id !== assistant.id), human, assistant]);
           setActive(conversation); updateConversation(conversation);
-          requestAnimationFrame(() => editor.current?.focus());
+          if (showInCanvas) {
+            canvas.open(conversation.id, assistant);
+            canvas.setNextReply(false);
+          } else requestAnimationFrame(() => editor.current?.focus());
         } else if (event.event === "delta") {
           setMessages((old) => old.map((item) => item.id === assistantId ? { ...item, content: item.content + event.data.content } : item));
         } else if(event.event==='artifact'){
@@ -845,6 +854,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
         setActive(current => current?.id === item.id ? item : current);
       } else {
         await chatJson(`/conversations/${action.item.id}`, { method: "DELETE" });
+        canvas.deleteEdits(action.item.id);
         setConversations((old) => old.filter((entry) => entry.id !== action.item.id));
         if (workspaceConversationId(window.location) === action.item.id) {
           viewedId.current = null;
@@ -991,6 +1001,9 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
       {canUseImageInput && !explicitApps && active && <button type="button" className="cw-context-button" disabled={!canSend}
         aria-expanded={existingImagesOpen} onClick={() => setExistingImagesOpen(open => !open)}>기존 이미지</button>}
       <button type="button" className="cw-context-button" disabled={busy||loading||initializing||uploading} onClick={()=>void openAssistant()}>파일·지식</button>
+      {user && <button className="cw-context-button cw-canvas-toggle" type="button" aria-label="다음 답변 캔버스로 받기"
+        title="다음 답변을 캔버스에 표시" aria-pressed={canvas.nextReply} disabled={busy || loading || initializing}
+        onClick={() => canvas.setNextReply(enabled => !enabled)}><Icon name="file" size={14} />캔버스</button>}
       {active && <button className="cw-context-button" type="button" disabled={busy || !connection} onClick={() => setContextOpen(true)}>문맥</button>}
       {active&&terminal.enabled&&<button className="cw-context-button" type="button" onClick={()=>setWorkspaceOpen(true)}>작업공간</button>}
       <span className="cw-enter-hint">Shift + Enter 줄바꿈</span>
@@ -998,7 +1011,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
         : <button className="cw-send" disabled={!(draft.trim() || attachmentOnlyText) || !canSend || !!attachmentIssue} aria-label="메시지 전송"><Icon name="arrow" size={20} /></button>}</div>
   </form>;
 
-  return <div className={`cw-workspace ${sidebar ? "sidebar-open" : ""}`}>
+  return <div className={`cw-workspace${sidebar ? " sidebar-open" : ""}${canvasMessage ? " has-canvas" : ""}`}>
     {sidebar && <button className="cw-sidebar-scrim" aria-label="사이드바 닫기" onClick={() => setSidebar(false)} />}
     <aside className="cw-sidebar" aria-label="대화 탐색"><header className="cw-brand"><Link href="/" onClick={(event) => { event.preventDefault(); newConversation(); }} aria-label="LLM 새 대화"><Wordmark small /><span>llm<span className="cw-brand-dot">.</span></span></Link>
       <button className="cw-icon-button cw-mobile-only" aria-label="사이드바 접기" onClick={() => setSidebar(false)}><Icon name="panel" size={17} /></button></header>
@@ -1073,6 +1086,11 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
               {message.status === "error" && <p className="cw-message-error" role="alert">{message.error || "응답이 중단되었습니다. 다시 시도해 주세요."}</p>}
               {message.status === "cancelled" && <p className="cw-stopped">응답이 중지되었습니다.</p>}
               {message.status !== "pending" && <div className="cw-message-actions">{message.content && <CopyButton text={message.content} label="답변 복사" />}
+                {active && message.content && <button className="cw-text-button" type="button"
+                  aria-expanded={canvasMessage?.id === message.id}
+                  onClick={event => canvas.open(active.id, message, event.currentTarget)}>
+                  <Icon name="file" size={14} />캔버스에서 열기
+                </button>}
                 {!readOnly && !hasNewer && index === messages.length - 1 && <button className="cw-text-button" disabled={!canSend} onClick={() => void send(messages[index - 1]?.content, true)}><Icon name="refresh" size={14} />다시 생성</button>}</div>}</>}
             {active&&!readOnly&&<MessageWorkflow message={message} conversationId={active.id} disabled={busy||loading||starting||uploading} onResult={result=>acceptWorkflow(result,active.id)} onFiles={files=>updateAnswerFiles(message,files)} onRetry={!hasNewer&&message.role==='assistant'&&index===messages.length-1?()=>void send(messages[index-1]?.content,true):undefined} onModels={openModels} onApps={()=>void openAssistant()} onReferenceImage={canUseImageInput ? referenceImage : undefined}/>}
           </article>)}{historyBoundary('newer')}</div>}
@@ -1091,6 +1109,9 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
         {composer}<p className="cw-composer-caption">{active?.busy && !streaming ? "진행 중인 요청을 불러오고 있습니다…" : connection?.is_test ? "테스트 모드 · 예시 답변이며 실제 모델을 호출하지 않습니다." : "모델의 답변은 부정확할 수 있습니다. 중요한 내용은 확인해 주세요."}</p></div>}
       {error && <div className="cw-error-toast" role="alert"><span>{error}</span><button className="cw-icon-button" aria-label="오류 알림 닫기" onClick={() => setError("")}><Icon name="close" size={16} /></button></div>}
     </main>
+    {active && canvasMessage && <CanvasPanel key={`${active.id}:${canvasMessage.id}`} editKey={`${active.id}:${canvasMessage.id}`}
+      message={canvasMessage} readOnly={readOnly} readEdit={canvas.readEdit} rememberEdit={canvas.rememberEdit}
+      onClose={canvas.close} onStop={busy ? stop : undefined} />}
     {projectsOpen&&<ProjectsDialog projects={projects} selected={active?.project_id||projectId} active={active} onProjects={setProjects} onChoose={chooseProject} onMoved={item=>{setActive(item);updateConversation(item);setProjectId(item.project_id||'');}} onClose={()=>setProjectsOpen(false)}/>}
     <dialog ref={retryDialog} className="cw-dialog cw-action-dialog" aria-label="외부 작업 재시도 확인" {...dismissRetry} onClose={closeRetry}><h2>쓰기 작업을 다시 실행할까요?</h2><p>이 요청은 명령 실행 또는 외부 서비스 변경을 허용했습니다. 이미 처리된 작업도 다시 실행될 수 있으니 작업 기록을 확인하세요.</p><div className="cw-action-buttons"><button className="cw-small-button" onClick={closeRetry}>취소</button><button className="cw-primary-button" onClick={()=>{const content=retryConfirmation;closeRetry();if(content)void send(content,true,true);}}>확인하고 재시도</button></div></dialog>
     {scopeOpen && <GitlabScopeDialog terminal={terminal} initialReference={scopeReference}

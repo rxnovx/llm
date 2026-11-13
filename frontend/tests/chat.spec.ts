@@ -131,3 +131,70 @@ test("대화 주소를 뒤로·앞으로 이동하고 로그인 후 복귀할 �
     await visitor.close();
   }
 });
+
+test("다음 답변이 캔버스에 표시되고 Markdown 원문을 편집·복사·저장할 수 있다", async ({ page, context }, info) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await signUp(page, `canvas_${info.project.name}_${Date.now()}`);
+  const toggle = page.getByRole("button", { name: "다음 답변 캔버스로 받기" });
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await page.evaluate(() => {
+    const observer = new MutationObserver(() => {
+      if (document.querySelector(".cw-canvas [role=status]")?.textContent === "답변 작성 중…") {
+        document.body.dataset.canvasStreaming = "true";
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  });
+  await page.getByLabel("메시지", { exact: true }).fill("캔버스에 표시할 답변");
+  await page.getByRole("button", { name: "메시지 전송", exact: true }).click();
+
+  const canvas = page.getByRole("complementary", { name: "캔버스", exact: true });
+  const editor = canvas.getByRole("textbox", { name: "캔버스 Markdown" });
+  await expect(canvas).toBeVisible();
+  await expect(editor).toBeEditable();
+  await expect(page.locator("body")).toHaveAttribute("data-canvas-streaming", "true");
+  const original = await editor.inputValue();
+  expect(original.trim().length).toBeGreaterThan(0);
+  const viewport = page.viewportSize()!;
+  const box = (await canvas.boundingBox())!;
+  if (viewport.width >= 1120) {
+    const chat = (await page.getByRole("main").boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(chat.x + chat.width - 1);
+  } else {
+    expect(box.width).toBe(viewport.width);
+    await expect(page.getByRole("main")).toBeHidden();
+  }
+
+  const markdown = '# 캔버스 제목\n\n**원문**  \n\n```python\nprint("안녕")\n```\n';
+  await editor.fill(markdown);
+  const sourceField = await editor.elementHandle();
+  await canvas.getByRole("button", { name: "미리보기", exact: true }).click();
+  await expect(canvas.getByRole("heading", { name: "캔버스 제목" })).toBeVisible();
+  await canvas.getByRole("button", { name: "Markdown 복사", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(markdown);
+  await canvas.getByRole("button", { name: "Markdown", exact: true }).click();
+  expect(await sourceField!.evaluate(element => element.isConnected && !element.hasAttribute("hidden"))).toBe(true);
+
+  const open = page.getByRole("button", { name: "캔버스에서 열기", exact: true });
+  await canvas.getByRole("button", { name: "캔버스 닫기" }).click();
+  await expect(open).toBeVisible();
+  await open.click();
+  await expect(editor).toHaveValue(markdown);
+  await canvas.getByRole("button", { name: "저장", exact: true }).click();
+  await expect(canvas.getByRole("status")).toHaveText("저장됨");
+  await page.reload();
+  await open.click();
+  await expect(editor).toHaveValue(markdown);
+
+  await canvas.getByRole("button", { name: "캔버스 닫기" }).click();
+  await page.evaluate(() => {
+    Object.defineProperty(navigator.clipboard, "writeText", {
+      value: () => Promise.reject(new DOMException("Unavailable", "NotAllowedError")),
+    });
+  });
+  await page.getByRole("button", { name: "답변 복사", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(original);
+  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+});

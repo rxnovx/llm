@@ -1,16 +1,24 @@
 "use client";
-import { Children, isValidElement, memo, useId, useState, type ReactNode } from "react";
+import { Children, isValidElement, memo, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import { copyText } from "@/lib/clipboard";
 import { markdownRemarkPlugins, markdownRehypePlugins, normalizeMathDelimiters } from "@/lib/markdown";
 import { Icon } from "./Icons";
 
-export function CopyButton({ text, label = "복사" }: { text: string; label?: string }) {
-  const [copied, setCopied] = useState(false);
-  const [failed, setFailed] = useState(false);
-  return <button className="cw-copy" type="button" aria-label={copied ? "복사 완료" : label} onClick={async () => {
-    try { await navigator.clipboard.writeText(text); setCopied(true); setFailed(false); setTimeout(() => setCopied(false), 1800); }
-    catch { setFailed(true); }
-  }}><Icon name={copied ? "check" : "copy"} size={14} />{copied ? "복사됨" : failed ? "복사 실패" : label}</button>;
+export function CopyButton({ text, label = "복사", disabled }: { text: string; label?: string; disabled?: boolean }) {
+  const [status, setStatus] = useState<"ready" | "copied" | "failed">("ready");
+  const reset = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(reset.current), []);
+  return <button className="cw-copy" type="button" aria-label={status === "copied" ? "복사 완료" : label} disabled={disabled}
+    onClick={async () => {
+      clearTimeout(reset.current);
+      try {
+        await copyText(text);
+        setStatus("copied");
+        reset.current = setTimeout(() => setStatus("ready"), 1800);
+      } catch { setStatus("failed"); }
+    }}><Icon name={status === "copied" ? "check" : "copy"} size={14} />
+    {status === "copied" ? "복사됨" : status === "failed" ? "복사 실패" : label}</button>;
 }
 
 export function codeText(children: ReactNode): string {
