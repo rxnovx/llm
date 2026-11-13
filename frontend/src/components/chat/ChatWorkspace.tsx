@@ -29,7 +29,7 @@ import { ProjectsDialog } from './ProjectsDialog';
 import { DraftAttachments, type DraftAttachment } from './DraftAttachments';
 import { ExistingImagePicker } from './ExistingImagePicker';
 import { useMessageHistory } from './useMessageHistory';
-import { CanvasPanel } from './CanvasPanel';
+import { CanvasAnswer, CanvasPanel } from './CanvasPanel';
 import { useConversationCanvas } from './useConversationCanvas';
 import { cancelAttachmentUpload, defaultAttachmentConfig, uploadAttachment, type AttachmentConfig } from '@/lib/attachments';
 import { newRequestId } from '@/lib/request-id';
@@ -208,6 +208,9 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
   const subject = user?.subject;
   const routePending = !!subject && conversationId !== (active?.id ?? null);
   const canvasMessage = routePending ? null : canvas.message;
+  const canvasKey = canvasMessage && active
+    ? `${active.id}:${canvasMessage.id}:${canvasMessage.active_version ?? "original"}`
+    : "";
   const anyRunning = conversations.some(item => item.busy);
   useEffect(() => {
     if (!subject) return;
@@ -691,6 +694,8 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
       setDraftAttachments(items => items.map(item => item.id === id ? { ...item, progress } : item));
     let current = active;
     let assistantId = "";
+    let pendingAnswer: ChatMessage | undefined;
+    let canvasOffered = false;
     let requestId: string | undefined;
     let restoredQueue: QueueState | null = null;
     try {
@@ -745,6 +750,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
       requestId = newRequestId(); generation.current = { id: requestId, conversation: current.id };
       const response = await chatFetch(`/conversations/${current.id}/messages`, { method: "POST", signal: abort.signal,
         body: JSON.stringify({ content: text, connection_id: selected, model, request_id: requestId, retry, confirm_write_retry:confirmed, apps: usedApps,
+          ...(showInCanvas ? { canvas: true } : {}),
           ...(!retry && publishGitlab && usedApps[0]?.mode === "execute" ? { publish_gitlab: true } : {}),
           assistant:usedAssistant }) });
       if (!response.body) throw new Error("응답 연결을 열지 못했습니다.");
@@ -754,6 +760,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           const { user_message: human, assistant_message: assistant, conversation, context } = event.data;
           if (context) setContextReport(context);
           assistantId = assistant.id;
+          pendingAnswer = assistant;
           awaitingStart.current = false;
           setStarting(false);
           setPublishGitlab(false);
@@ -761,10 +768,19 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           acceptDraft();
           setMessages((old) => [...old.filter((item) => item.id !== human.id && item.id !== assistant.id), human, assistant]);
           setActive(conversation); updateConversation(conversation);
-          if (showInCanvas) {
-            canvas.open(conversation.id, assistant);
-            canvas.setNextReply(false);
-          } else requestAnimationFrame(() => editor.current?.focus());
+          if (showInCanvas) canvas.setNextReply(false);
+          else requestAnimationFrame(() => { if (!canvasOffered && !abort.signal.aborted) editor.current?.focus(); });
+        } else if (event.event === "canvas") {
+          const selection = event.data;
+          setMessages(old => old.map(item => item.id === assistantId
+            ? { ...item, routing: { ...item.routing, canvas: selection } } : item));
+          if (!canvasOffered && pendingAnswer && current) {
+            canvasOffered = true;
+            const trigger = document.activeElement;
+            if (!document.querySelector("dialog:modal") && !(trigger instanceof HTMLElement && trigger.closest(".cw-canvas"))) {
+              canvas.openAutomatically(current.id, pendingAnswer);
+            }
+          }
         } else if (event.event === "delta") {
           setMessages((old) => old.map((item) => item.id === assistantId ? { ...item, content: item.content + event.data.content } : item));
         } else if(event.event==='artifact'){
@@ -1081,12 +1097,15 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
               {(message.routing?.automatic || message.routing?.status === 'unverified' || ['image', 'image_edit', 'vision'].includes(message.routing?.route ?? '')) &&
                 <p className="cw-message-app">{message.routing?.status === 'unverified' ? '근거 확인 보류' : automaticRouteLabels[message.routing?.route ?? ''] ?? '질문 자동 처리'}</p>}
               {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {activityLabels[tool.name] ?? tool.name} · {tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}
-              {message.content ? <MessageContent content={message.content} /> : message.status === "pending" ? toolStatus && !message.apps?.[0]?.merge_request ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
+              {active && message.routing?.canvas
+                ? <CanvasAnswer message={message} expanded={canvasMessage?.id === message.id}
+                    onOpen={trigger => canvas.open(active.id, message, trigger)} />
+                : message.content ? <MessageContent content={message.content} /> : message.status === "pending" ? toolStatus && !message.apps?.[0]?.merge_request ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
               <MessageSources sources={message.sources ?? []} />
               {message.status === "error" && <p className="cw-message-error" role="alert">{message.error || "응답이 중단되었습니다. 다시 시도해 주세요."}</p>}
               {message.status === "cancelled" && <p className="cw-stopped">응답이 중지되었습니다.</p>}
               {message.status !== "pending" && <div className="cw-message-actions">{message.content && <CopyButton text={message.content} label="답변 복사" />}
-                {active && message.content && <button className="cw-text-button" type="button"
+                {active && message.content && !message.routing?.canvas && <button className="cw-text-button" type="button"
                   aria-expanded={canvasMessage?.id === message.id}
                   onClick={event => canvas.open(active.id, message, event.currentTarget)}>
                   <Icon name="file" size={14} />캔버스에서 열기
@@ -1109,7 +1128,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
         {composer}<p className="cw-composer-caption">{active?.busy && !streaming ? "진행 중인 요청을 불러오고 있습니다…" : connection?.is_test ? "테스트 모드 · 예시 답변이며 실제 모델을 호출하지 않습니다." : "모델의 답변은 부정확할 수 있습니다. 중요한 내용은 확인해 주세요."}</p></div>}
       {error && <div className="cw-error-toast" role="alert"><span>{error}</span><button className="cw-icon-button" aria-label="오류 알림 닫기" onClick={() => setError("")}><Icon name="close" size={16} /></button></div>}
     </main>
-    {active && canvasMessage && <CanvasPanel key={`${active.id}:${canvasMessage.id}`} editKey={`${active.id}:${canvasMessage.id}`}
+    {active && canvasMessage && <CanvasPanel key={canvasKey} editKey={canvasKey}
       message={canvasMessage} readOnly={readOnly} readEdit={canvas.readEdit} rememberEdit={canvas.rememberEdit}
       onClose={canvas.close} onStop={busy ? stop : undefined} />}
     {projectsOpen&&<ProjectsDialog projects={projects} selected={active?.project_id||projectId} active={active} onProjects={setProjects} onChoose={chooseProject} onMoved={item=>{setActive(item);updateConversation(item);setProjectId(item.project_id||'');}} onClose={()=>setProjectsOpen(false)}/>}

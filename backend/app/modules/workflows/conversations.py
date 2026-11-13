@@ -104,10 +104,12 @@ def payload(item,run_id=None):
 def shared_payload(item, base_documents):
     record = item.source_record
     sources = json.loads(record.sources_json) if record else []
+    routing = json.loads(item.decision_record.data_json) if item.decision_record else {}
+    presentation = {'routing': {'canvas': routing['canvas']}} if routing.get('canvas') else {}
     return {key: getattr(item, key) for key in ('id', 'role', 'content', 'status', 'model', 'is_test', 'created_at')} | {
         'error': None,
         'sources': [source for source in sources if source.get('app') == 'knowledge' and source.get('document_id') in base_documents],
-    }
+    } | presentation
 
 
 def state_for(db,message):

@@ -6,12 +6,13 @@ import { workflowJson, type CanvasDraft } from "@/lib/workflows";
 import type { ChatMessage } from "@/types/chat";
 import { Icon } from "./Icons";
 import { CopyButton, MessageContent } from "./MessageContent";
+import { splitCanvas } from "./answer-canvas";
 import "./canvas.css";
 
 export type CanvasEdit = { content: string; saved: CanvasDraft };
 
 type Props = {
-  message: Pick<ChatMessage, "id" | "status" | "content">;
+  message: ChatMessage;
   editKey: string;
   readOnly: boolean;
   readEdit: (key: string) => CanvasEdit | undefined;
@@ -21,6 +22,24 @@ type Props = {
 };
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : "캔버스를 불러오지 못했습니다.";
+
+export function CanvasAnswer({ message, expanded, onOpen }: {
+  message: ChatMessage;
+  expanded: boolean;
+  onOpen: (trigger: HTMLButtonElement) => void;
+}) {
+  const { before, after } = splitCanvas(message);
+  return <>
+    {before.trim() && <MessageContent content={before} />}
+    <button type="button" className="cw-canvas-card" aria-expanded={expanded}
+      onClick={event => onOpen(event.currentTarget)}>
+      <Icon name="file" size={18} />
+      <span>캔버스에서 열기</span>
+      <Icon name="panel" size={16} />
+    </button>
+    {after.trim() && <MessageContent content={after} />}
+  </>;
+}
 
 export function CanvasPanel({ message, editKey, readOnly, readEdit, rememberEdit, onClose, onStop }: Props) {
   const headingId = useId();
@@ -37,16 +56,18 @@ export function CanvasPanel({ message, editKey, readOnly, readEdit, rememberEdit
   const loading = canEdit && !edit && !error;
   const editable = canEdit && !!edit && !saving;
   const dirty = canEdit && edit !== null && edit.content !== edit.saved.content;
-  const content = canEdit && edit ? edit.content : message.content;
+  const content = canEdit && edit ? edit.content : splitCanvas(message).body;
   const rendered = useDeferredValue(preview ? content : "");
   const path = `/messages/${message.id}/canvas`;
+  const versionId = message.routing?.canvas ? message.active_version : null;
+  const readPath = versionId ? `${path}?version_id=${encodeURIComponent(versionId)}` : path;
 
   useEffect(() => { heading.current?.focus({ preventScroll: true }); }, []);
 
   useEffect(() => {
     if (!canEdit) return;
     const abort = new AbortController();
-    void workflowJson<CanvasDraft>(path, { signal: abort.signal }).then(saved => {
+    void workflowJson<CanvasDraft>(readPath, { signal: abort.signal }).then(saved => {
       if (abort.signal.aborted) return;
       const cached = discardOnLoad.current ? undefined : readEdit(editKey);
       if (discardOnLoad.current) rememberEdit(editKey);
@@ -63,7 +84,7 @@ export function CanvasPanel({ message, editKey, readOnly, readEdit, rememberEdit
       setError(errorText(caught));
     });
     return () => abort.abort();
-  }, [canEdit, editKey, loadAttempt, path, readEdit, rememberEdit]);
+  }, [canEdit, editKey, loadAttempt, readPath, readEdit, rememberEdit]);
 
   const change = (nextContent: string) => {
     if (!edit || !editable) return;
@@ -79,7 +100,8 @@ export function CanvasPanel({ message, editKey, readOnly, readEdit, rememberEdit
     setError("");
     try {
       const saved = await workflowJson<CanvasDraft>(path, {
-        method: "PUT", body: JSON.stringify({ content: edit.content, revision: edit.saved.revision }),
+        method: "PUT", body: JSON.stringify({ content: edit.content, revision: edit.saved.revision,
+          ...(versionId ? { version_id: versionId } : {}) }),
       });
       if (readEdit(editKey) === edit) rememberEdit(editKey);
       setEdit({ saved, content: saved.content });

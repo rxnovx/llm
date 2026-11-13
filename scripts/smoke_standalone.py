@@ -126,6 +126,9 @@ def model_controls_smoke(client, access):
     """Actual BFF/API traffic with a local protocol double, never a real model."""
     entered, release = threading.Event(), threading.Event()
     release_background = threading.Event()
+    release_canvas = threading.Event()
+    canvas_question = '인수인계 문서 초안을 작성해 줘'
+    canvas_intro, canvas_body, canvas_outro = '📋 초안입니다.\n\n', '# 인수인계\n\n- 첫날 일정\n', '\n담당자를 확인하세요.'
     requests = []
     class ModelServer(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -141,9 +144,19 @@ def model_controls_smoke(client, access):
             self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.end_headers()
             if index == 1:
                 entered.set(); release.wait(8)
-            self.wfile.write(('data: '+json.dumps({'choices':[{'delta':{'content':'모델 응답'},'finish_reason':None}]})+'\n\n').encode())
-            self.wfile.flush()
-            if payload['messages'][-1]['content'] == '백그라운드 첫 요청':
+            def delta(text):
+                self.wfile.write(('data: '+json.dumps({'choices':[{'delta':{'content':text},'finish_reason':None}]})+'\n\n').encode())
+                self.wfile.flush()
+            question = payload['messages'][-1]['content']
+            if question == canvas_question:
+                opening, = set(re.findall(r'<llm-canvas-[0-9a-f]{12}>', payload['messages'][0]['content']))
+                delta(canvas_intro + opening[:7])
+                delta(opening[7:] + '\n' + canvas_body)
+                release_canvas.wait(10)
+                delta('</' + opening[1:] + canvas_outro)
+            else:
+                delta('모델 응답')
+            if question == '백그라운드 첫 요청':
                 release_background.wait(10)
             self.wfile.write(('data: '+json.dumps({'choices':[{'delta':{},'finish_reason':'stop'}]})+'\n\n'
                 +'data: '+json.dumps({'choices':[],'usage':{'prompt_tokens':12,'completion_tokens':4}})+'\n\ndata: [DONE]\n\n').encode())
@@ -184,9 +197,9 @@ def model_controls_smoke(client, access):
             'summary':'유지할 결정 사항','through_position':1,'revision':0}).status_code==200
         response=client.post(paths[0]+'/messages',headers=access,json=body('요약 이후 질문'))
         assert 'event: done' in response.text and len(requests)==2
-        assert requests[-1]['messages']==[
-            {'role':'system','content':'사용자가 작성한 이전 대화 요약 메모:\n유지할 결정 사항'},
-            {'role':'user','content':'요약 이후 질문'}]
+        system, question = requests[-1]['messages']
+        assert system['role'] == 'system' and system['content'].endswith('사용자가 작성한 이전 대화 요약 메모:\n유지할 결정 사항')
+        assert question == {'role':'user','content':'요약 이후 질문'}
         assert requests[-1]['max_tokens']==256
         stats=client.get('/api/admin/overview?mode=live',headers=access).json()
         assert stats['requests_24h']['total']==3 and stats['requests_24h']['complete']==2 and stats['requests_24h']['cancelled']==1
@@ -220,6 +233,30 @@ def model_controls_smoke(client, access):
         assert client.get('/api/chat/active', headers=access).json()['ids'] == []
         print('PASS: SSE disconnect, concurrent chat and recovery through the BFF')
 
+        with client.stream('POST', paths[1]+'/messages', headers=access, json=body(canvas_question)) as response:
+            assert response.status_code == 200
+            kind, opened, deltas, answer = '', False, [], None
+            for line in response.iter_lines():
+                if line.startswith('event: '):
+                    kind = line[7:]
+                elif line.startswith('data: '):
+                    value = json.loads(line[6:])
+                    if kind == 'canvas' and value['end'] is None:
+                        assert not opened and ''.join(deltas) == canvas_intro
+                        assert value == {'start': len(canvas_intro) + 1, 'end': None}
+                        pending = client.get(paths[1], headers=access).json()['messages'][-1]
+                        assert pending['status'] == 'pending' and pending['routing']['canvas'] == value
+                        opened = True
+                        release_canvas.set()
+                    elif kind == 'delta':
+                        deltas.append(value['content'])
+                    elif kind == 'done':
+                        answer = value['message']
+            assert opened and answer and ''.join(deltas) == canvas_intro + '\n' + canvas_body + canvas_outro
+        draft = client.get('/api/workflows/messages/'+answer['id']+'/canvas', headers=access)
+        assert draft.status_code == 200 and draft.json() == {'content': canvas_body, 'revision': 0}
+        print('PASS: model-selected Canvas appears before the reply finishes and reloads its Markdown block')
+
         checked = client.post('/api/admin/connections/wire-model/probe', headers=access, json={})
         assert checked.status_code == 200 and checked.json()['sample'] == '모델 응답', checked.text
         user_id = client.get('/api/account/users/me', headers=access).json()['subject']
@@ -239,7 +276,8 @@ def model_controls_smoke(client, access):
         assert client.get('/v1/models', headers=service).status_code == 401
         print('PASS: saved-model probe, gateway SSE, per-key token reporting and revocation')
     finally:
-        release.set(); release_background.set(); server.shutdown(); server.server_close(); thread.join(timeout=2)
+        release.set(); release_background.set(); release_canvas.set()
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
 def workflows_smoke(client,access):
     """Real BFF, upload session, branch, version, output bytes and feedback routes."""
     project=client.post('/api/workflows/projects',headers=access,json={'name':'HTTP 프로젝트','instructions':'한국어로 설명'});assert project.status_code==201,project.text

@@ -198,3 +198,31 @@ test("다음 답변이 캔버스에 표시되고 Markdown 원문을 편집·복�
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(original);
   await expect(toggle).toHaveAttribute("aria-pressed", "false");
 });
+
+test("캔버스 요청을 채팅에서 읽어 자동으로 열고 카드를 복원한다", async ({ page }, info) => {
+  await signUp(page, `canvas_auto_${info.project.name}_${Date.now()}`);
+  const toggle = page.getByRole("button", { name: "다음 답변 캔버스로 받기" });
+  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  const editor = page.getByLabel("메시지", { exact: true });
+  await editor.fill("초안을 캔버스로 작성해 줘");
+  await page.getByRole("button", { name: "메시지 전송", exact: true }).click();
+
+  const canvas = page.getByRole("complementary", { name: "캔버스", exact: true });
+  await expect(canvas).toBeVisible();
+  const markdown = canvas.getByRole("textbox", { name: "캔버스 Markdown" });
+  await expect(markdown).toBeEditable();
+  const original = await markdown.inputValue();
+  const card = page.locator(".cw-canvas-card");
+  await canvas.getByRole("button", { name: "캔버스 닫기" }).click();
+  await expect(card).toHaveAttribute("aria-expanded", "false");
+  await page.reload();
+  await card.click();
+  await expect(markdown).toHaveValue(original);
+  await canvas.getByRole("button", { name: "캔버스 닫기" }).click();
+
+  await editor.fill("간단한 인사를 해 줘");
+  await page.getByRole("button", { name: "메시지 전송", exact: true }).click();
+  await expect(page.getByRole("button", { name: "답변 복사", exact: true })).toHaveCount(2);
+  await expect(card).toHaveCount(1);
+  await expect(canvas).toHaveCount(0);
+});

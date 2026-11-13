@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
 from app.modules.chat.models import Admission, ContextNote, Conversation, GenerationRun, Message
-from app.modules.chat import context as context_budget, history, providers, scheduler
+from app.modules.chat import canvas, context as context_budget, history, providers, scheduler
 from app.modules.integrations import config as gitlab_config, service as gitlab_connections
 from app.modules.integrations import merge_requests
 from app.modules.integrations.models import MessageContext
@@ -27,7 +27,7 @@ from app.modules.workspaces import agent as workspace_agent
 from app.modules.workspaces import client as workspace_client
 from app.modules.assistant import context as assistant_context
 from app.modules.assistant import gitlab as gitlab_prompt
-from app.modules.assistant.models import TurnContext
+from app.modules.assistant.models import TurnContext, TurnDecision
 from app.modules.knowledge.models import Document
 from app.modules.workflows import conversations as workflows
 from app.modules.workflows import image_inputs, image_queue
@@ -57,6 +57,7 @@ class TurnInput(ConversationInput):
     content: str = Field(min_length=1, max_length=16000)
     request_id: UUID
     retry: bool = False
+    canvas: bool = False
     confirm_write_retry: bool = False
     publish_gitlab: bool = False
     apps: list[GitlabSelection] | None = Field(None,max_length=1)
@@ -281,6 +282,7 @@ class Turn:
     assistant_id: str
     history: list[dict]
     start: dict
+    presentation: canvas.Presentation
     previous_message: dict | None = None
     previous_connection: str | None = None
     started_clock: float = 0
@@ -303,6 +305,8 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     content = data.content.strip()
     if not content:
         raise HTTPException(422, '메시지를 입력해 주세요.')
+    presentation = canvas.Presentation(str(data.request_id), manual=data.canvas, demo=connection.provider == 'test',
+        explicit=canvas.requested(gitlab_prompt.without_inline_quotes(gitlab_prompt.unquoted(content))))
     model = 'demo' if connection.provider == 'test' else (data.model.strip() or connection.model)
     if not model:
         raise HTTPException(422, '연결 설정에서 모델을 선택해 주세요.')
@@ -448,7 +452,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     return Turn(item.id, str(data.request_id), assistant.id, history,
         {'conversation': conversation_data(item), 'user_message': message_data(user_message),
          'assistant_message': message_data(assistant) | {'content': ''}, **({'context': report} if report else {})},
-        previous_message, previous_connection, started_clock,
+        presentation, previous_message, previous_connection, started_clock,
         publish_gitlab=data.publish_gitlab, gitlab_generation=gitlab_generation, gitlab_request=gitlab_request)
 
 
@@ -504,25 +508,54 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
     options = turn.start['assistant_message']['assistant']
     image_mode = options.get('image_mode', 'auto')
     render_only = image_mode in {'generate', 'edit'}
+    presentation = turn.presentation
 
     async def generate():
-        text, status, error = '', 'cancelled', None
+        status, error = 'cancelled', None
         first_token_ms, error_code = None, 'cancelled'
         saved = None
         sources = []
         workspace_selection=None
         phase='queued';last_checkpoint=0.0
+
+        def save_routing(message, terminal_status=None):
+            selection = presentation.selection
+            record = message.decision_record
+            if not record and not selection:
+                return
+            data = json.loads(record.data_json) if record else {}
+            if selection:
+                data['canvas'] = selection
+            if terminal_status and terminal_status != 'complete':
+                data['status'] = terminal_status
+            encoded = json.dumps(data, ensure_ascii=False)
+            if record:
+                record.data_json = encoded
+            else:
+                message.decision_record = TurnDecision(data_json=encoded)
+
         def checkpoint(force=False):
             nonlocal last_checkpoint
             if not force and time.monotonic()-last_checkpoint<.75:return
             with Session(bind) as session:
                 active=session.get(Conversation,turn.conversation_id);message=session.get(Message,turn.assistant_id)
                 if active and active.generation_id==turn.request_id and message:
-                    message.content=text
+                    message.content = presentation.content
+                    if presentation.selection:
+                        save_routing(message)
                     workflow=workflows.state_for(session,message);workflow.phase=phase
                     if message.source_record:message.source_record.sources_json=json.dumps(sources,ensure_ascii=False)
                     session.commit()
             last_checkpoint=time.monotonic()
+
+        def answer_events(updates):
+            nonlocal first_token_ms
+            for kind, payload in updates:
+                if kind == 'delta' and first_token_ms is None:
+                    first_token_ms = max(0, int((time.monotonic() - turn.started_clock) * 1000))
+                checkpoint(force=kind == 'canvas')
+                yield event(kind, payload)
+
         def cancelled():
             with Session(bind) as session:
                 active = session.get(Conversation, turn.conversation_id)
@@ -552,9 +585,6 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                         from app.modules.workflows.summary import ensure_summary
                         async for summary_event in ensure_summary(bind,user_id,turn,admitted,settings,cancelled):
                             yield event(*summary_event)
-                    with Session(bind) as session:
-                        turn.history,report=context_budget.plan(session,turn.conversation_id,admitted,turn.start['conversation']['model'],data.content.strip())
-                        turn.start['context']=report
                     phase='model'
                     yield event('queue', {'status': 'running', 'position': 0, 'request_id': turn.request_id})
                 apps = turn.start['assistant_message']['apps']
@@ -570,15 +600,21 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                 else:
                     timeout = settings.terminal_agent_timeout_seconds
                 async with asyncio.timeout(timeout):
+                    reference = ''
                     if workspace_mode or general_mode:
+                        if not render_only:
+                            with Session(bind) as session:
+                                turn.history, turn.start['context'] = context_budget.plan(session, turn.conversation_id,
+                                    admitted, turn.start['conversation']['model'], data.content.strip())
                         workspace_selection=GitlabSelection.model_validate(apps[0]) if apps and (workspace_mode or turn.gitlab_request) else None
                         iterator=workspace_agent.stream(bind,user_id,turn,workspace_selection,admitted,settings,cancelled,options=options)
                         async with aclosing(guarded_parts(iterator,cancelled)) as parts:
                             async for kind,payload in parts:
                                 if kind=='delta':
-                                    text+=payload['content']
-                                    if len(text)>200000:raise providers.ProviderError('분석 답변 길이 제한을 초과했습니다.')
-                                    if first_token_ms is None:first_token_ms=max(0,int((time.monotonic()-turn.started_clock)*1000))
+                                    for answer in answer_events(presentation.feed(payload['content'],
+                                            model_output=payload.get('model_output', True))):
+                                        yield answer
+                                    continue
                                 elif kind=='sources':sources=payload['sources']
                                 elif kind=='workspace' and payload.get('selection'):
                                     workspace_selection=GitlabSelection.model_validate(payload['selection'])
@@ -590,28 +626,27 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                         yield event('tool', {'app':'gitlab','status':'reading','detail':'선택한 GitLab 파일을 읽고 있습니다.'})
                         with Session(bind) as session:
                             budget = context_budget.reference_budget(session,turn.conversation_id,admitted,
-                                turn.start['conversation']['model'],data.content.strip())
+                                turn.start['conversation']['model'],data.content.strip(),
+                                answer_instruction=presentation.instruction)
                         async def fetch_sources():
                             yield await read_context(bind,user_id,GitlabSelection.model_validate(apps[0]),data.content,budget)
                         async with aclosing(guarded_parts(fetch_sources(),cancelled)) as results:
-                            async for reference,sources in results:
-                                with Session(bind) as session:
-                                    turn.history,report = context_budget.plan(session,turn.conversation_id,admitted,
-                                        turn.start['conversation']['model'],data.content.strip(),extra_context=reference)
+                            reference, sources = await anext(results)
                         yield event('sources',{'sources':sources})
                     if not workspace_mode and not general_mode:
+                        with Session(bind) as session:
+                            turn.history, report = context_budget.plan(session, turn.conversation_id, admitted,
+                                turn.start['conversation']['model'], data.content.strip(), extra_context=reference,
+                                answer_instruction=presentation.instruction)
                         yield event('context', report)
                         iterator = providers.stream_reply(admitted, turn.start['conversation']['model'], turn.history, settings)
                         async with aclosing(guarded_parts(iterator, cancelled)) as parts:
                             async for part in parts:
-                                if len(text) + len(part) > 200000:
-                                    raise providers.ProviderError('응답 길이 제한에 도달했습니다. 질문을 나눠서 보내 주세요.')
-                                text += part
-                                if first_token_ms is None:
-                                    first_token_ms = max(0, int((time.monotonic() - turn.started_clock) * 1000))
-                                checkpoint()
-                                yield event('delta', {'content': part})
-                    if not text.strip():
+                                for answer in answer_events(presentation.feed(part)):
+                                    yield answer
+                    for answer in answer_events(presentation.finish()):
+                        yield answer
+                    if not presentation.content.strip():
                         raise providers.ProviderError('모델이 빈 응답을 보냈습니다. 다시 시도해 주세요.')
                     status, error_code = 'complete', None
         except (TurnCancelled,workspace_agent.AnalysisCancelled):
@@ -644,10 +679,10 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                     run.status, run.error_code = status, error_code
                     run.finished_at = int(time.time())
                     run.duration_ms = max(0, int((time.monotonic() - turn.started_clock) * 1000))
-                    run.first_token_ms, run.output_chars = first_token_ms, len(text)
+                    run.first_token_ms, run.output_chars = first_token_ms, presentation.length
                 scheduler.finish(session, turn.request_id, status)
                 if item and message:
-                    message.content, message.status, message.error = text, status, error
+                    message.content, message.status, message.error = presentation.content, status, error
                     workflow=workflows.state_for(session,message);workflow.error_code=error_code;workflow.phase=phase
                     if message.source_record:
                         message.source_record.sources_json = json.dumps(sources,ensure_ascii=False)
@@ -655,10 +690,7 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
                             updated=json.loads(message.source_record.apps_json)
                             updated[0]['workspace_id']=str(workspace_selection.workspace_id)
                             message.source_record.apps_json=json.dumps(updated)
-                    if message.decision_record:
-                        routing_data=json.loads(message.decision_record.data_json)
-                        if status!='complete':routing_data['status']=status
-                        message.decision_record.data_json=json.dumps(routing_data,ensure_ascii=False)
+                    save_routing(message, status)
                     # A failed/cancelled regeneration must not destroy a good answer.
                     if status != 'complete' and turn.previous_message:
                         previous = turn.previous_message

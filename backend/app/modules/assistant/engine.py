@@ -318,9 +318,15 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
                 raise HTTPException(422, 'MR 자료를 담을 문맥이 부족합니다. 더 큰 문맥의 모델을 선택하세요.')
             messages[-1] = dict(messages[-1], content=messages[-1]['content'] + extra)
             prefetched = True
+        answer_instruction = turn.presentation.instruction
+        canvas_system = {'role': 'system', 'content': messages[0]['content'] + '\n\n' + answer_instruction}
+        canvas_cost = message_cost([canvas_system]) - message_cost(messages[:1])
         if not tools:
             profile = connection.profile(turn.start['conversation']['model'])
-            omitted_turns += compact(messages, profile.context_window - profile.max_output_tokens - 256 - image_tokens)
+            budget = profile.context_window - profile.max_output_tokens - 256 - image_tokens
+            omitted_turns += compact(messages, budget)
+            if answer_instruction and message_cost(messages) + canvas_cost <= budget:
+                messages[0] = canvas_system
             connection=await acquire()
             try:
                 report = dict(turn.start['context'], estimated_input_tokens=message_cost(messages) + image_tokens)
@@ -343,13 +349,16 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
             budget=profile.context_window-profile.max_output_tokens-256-schema_cost
             if fit(budget):
                 yield 'activity',record('context','complete','문맥 예산에 맞춰 이전 대화·초기 자료 발췌·도구 로그 일부를 이번 입력에서 제외했습니다.')
-            yield 'context',dict(turn.start['context'],estimated_input_tokens=message_cost(messages)+schema_cost)
+            cost = message_cost(messages)
+            include_canvas = bool(answer_instruction) and cost + canvas_cost <= budget
+            model_messages = [canvas_system, *messages[1:]] if include_canvas else messages
+            yield 'context',dict(turn.start['context'],estimated_input_tokens=cost+schema_cost+(canvas_cost if include_canvas else 0))
             yield 'activity',record('model','running',f'답변과 다음 작업을 검토하고 있습니다. ({step}/{settings.terminal_agent_max_steps})')
             connection=await acquire()
             try:
                 if upstream:upstream.ensure_current()
                 async with asyncio.timeout(settings.llm_timeout_seconds):
-                    reply=await providers.tool_reply(connection,turn.start['conversation']['model'],messages,tools,settings)
+                    reply=await providers.tool_reply(connection,turn.start['conversation']['model'],model_messages,tools,settings)
             finally:await release()
             calls=reply['tool_calls']
             if not calls:

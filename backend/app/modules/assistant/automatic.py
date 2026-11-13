@@ -46,7 +46,9 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         with Session(bind) as db:
             row=db.get(TurnDecision,turn.assistant_id)
             if not row:row=TurnDecision(message_id=turn.assistant_id);db.add(row)
-            row.data_json=json.dumps(decision,ensure_ascii=False);db.commit()
+            selection = turn.presentation.selection
+            data = decision | ({'canvas': selection} if selection else {})
+            row.data_json=json.dumps(data,ensure_ascii=False);db.commit()
 
     async def release():
         with Session(bind) as db:scheduler.release_for_tools(db,turn.request_id,deadline);db.commit()
@@ -97,7 +99,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         detail = '이미지를 편집했습니다.' if editing else '이미지를 생성했습니다.'
         yield 'activity', record(phase, 'complete', detail)
         yield 'artifact', file
-        yield 'delta', {'content': detail}
+        yield 'delta', {'content': detail, 'model_output': False}
 
     async def analyze_image(source_options, *, admitted=False, evidence_options=None):
         decision.update(route='vision', status='running');save()
@@ -119,7 +121,8 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
                 system = {'role': 'system', 'content': engine.IMAGE_INSTRUCTION}
                 with Session(bind) as db:
                     history, report = context_budget.plan(db, turn.conversation_id, connection, model, question,
-                        extra_input_tokens=len(inputs) * providers.VISION_IMAGE_TOKENS + context_budget.estimate([system]))
+                        extra_input_tokens=len(inputs) * providers.VISION_IMAGE_TOKENS + context_budget.estimate([system]),
+                        answer_instruction=turn.presentation.instruction)
                 if history[0]['role'] == 'system':
                     history[0]['content'] = system['content'] + '\n\n' + history[0]['content']
                 else:
@@ -159,7 +162,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             decision.update(route='clarify',status='clarification');save()
             detail = '작업할 GitLab 프로젝트의 그룹/프로젝트 경로나 MR 링크를 알려 주세요.'
             yield 'activity',record('gitlab_resolve','complete',detail)
-            yield 'delta',{'content':detail}
+            yield 'delta',{'content':detail,'model_output':False}
             return
         if request.execute and connection.provider == 'test':
             raise HTTPException(422, 'GitLab 수정·커밋·게시는 도구 호출을 지원하는 실제 모델을 선택해야 합니다.')
@@ -229,9 +232,12 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
                 decision.update(route='direct', status='running');save()
                 await acquire()
                 try:
-                    yield 'context', turn.start['context']
+                    with Session(bind) as db:
+                        history, report = context_budget.plan(db, turn.conversation_id, connection, model, question,
+                            answer_instruction=turn.presentation.instruction)
+                    yield 'context', report
                     async with asyncio.timeout(settings.llm_timeout_seconds):
-                        async for part in providers.stream_reply(connection, model, turn.history, settings):
+                        async for part in providers.stream_reply(connection, model, history, settings):
                             yield 'delta', {'content': part}
                 finally:await release()
                 decision['status'] = 'complete';save()
@@ -280,7 +286,8 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             return
         if plan.route=='clarify':
             decision['status']='clarification';save()
-            yield 'delta',{'content':plan.clarification or ('이미지에서 확인하거나 바꿀 내용을 알려 주세요.' if source else '분석할 프로젝트나 필요한 자료 범위를 알려 주세요.')}
+            yield 'delta',{'content':plan.clarification or ('이미지에서 확인하거나 바꿀 내용을 알려 주세요.' if source else '분석할 프로젝트나 필요한 자료 범위를 알려 주세요.'),
+                'model_output':False}
             return
         if plan.route in {'gitlab','both'}:
             if connection.provider!='test' and not connection.profile(model).supports_tools:
@@ -332,18 +339,19 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
                     if kind=='workspace':
                         payload=dict(payload,selection=selection.model_dump(mode='json'),automatic=bool(decision.get('automatic_project')))
                     yield kind,payload
-        missing=routing.invalid_citations(text,sources)
-        uncertain=bool(re.search(r'잘 모르|알 수 없|확인할 수 없|확실하지|추측|모르겠습니다|not sure|do not know|cannot verify',text,re.I))
+        answer = turn.presentation.for_review(text)
+        missing=routing.invalid_citations(answer,sources)
+        uncertain=bool(re.search(r'잘 모르|알 수 없|확인할 수 없|확실하지|추측|모르겠습니다|not sure|do not know|cannot verify',answer,re.I))
         review=routing.Review(verdict='supported')
         wants_review=hold and settings.assistant_grounding_review and bool(plan.needs_review or plan.uncertain or uncertain or sources or auto_knowledge and not explicit)
         if wants_review:
             yield 'activity',record('evidence_review','running','초안의 사실 주장과 실제 조회한 근거를 점검하고 있습니다.')
-            review_text=text
+            review_text=answer
             if files:
                 from app.modules.workflows.models import Artifact
                 with Session(bind) as db:
                     review_text+='\n\nGenerated file payloads (must also be grounded):\n'+'\n'.join(db.get(Artifact,f['id']).payload_json for f in files)
-            snippets=await routing.evidence(bind,user_id,turn.conversation_id,selection,sources,text)
+            snippets=await routing.evidence(bind,user_id,turn.conversation_id,selection,sources,answer)
             await acquire()
             try:
                 async with asyncio.timeout(settings.llm_timeout_seconds):review=await routing.assess(connection,model,question,review_text,snippets,settings)
@@ -378,7 +386,8 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             continue
         await routing.verify(bind,user_id,turn.conversation_id,selection,sources)
         decision['status']='unverified';save()
-        yield 'delta',{'content':ABSTAIN+('\n\n'+decision['retrieval_notice'] if decision.get('retrieval_notice') else '')}
+        yield 'delta',{'content':ABSTAIN+('\n\n'+decision['retrieval_notice'] if decision.get('retrieval_notice') else ''),
+            'model_output':False}
         return
 
 

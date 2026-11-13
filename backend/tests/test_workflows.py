@@ -1,4 +1,4 @@
-import asyncio,io,json,time,zipfile
+import asyncio,io,json,re,time,zipfile
 from uuid import uuid4
 import pytest
 from sqlalchemy import select
@@ -55,6 +55,87 @@ def test_canvas_preserves_exact_markdown_and_rejects_stale_writes(client, accoun
     assert client.get(path, headers=owner).status_code == 404
     with client.db_factory() as db:
         assert db.get(CanvasDraft, message['id']) is None
+
+
+def test_model_inserts_canvas_between_streamed_paragraphs_and_saves_by_version(client, account, monkeypatch):
+    monkeypatch.setenv('LLM_CONNECTIONS_JSON', json.dumps([{
+        'id': 'local', 'name': 'Local', 'provider': 'vllm',
+        'base_url': 'http://chat-server.test/v1', 'model': 'local-chat',
+    }]))
+    get_settings.cache_clear()
+    owner = auth(account())
+    conversation = create(client, owner)
+    question = '신규 입사자를 위한 업무 인수인계 문서를 작성해 줘'
+    before = '📋 팀에 맞춰 바꿀 수 있는 초안입니다.\n\n'
+    document = '# 업무 인수인계\n\n- 첫 주 목표 🎯\n'
+    after = '\n배포 전에 담당자 연락처를 확인하세요.'
+    generations = iter([document, '# 새 초안\n'])
+    calls = []
+
+    async def model(connection, name, history, settings):
+        calls.append(history)
+        if history[-1]['content'] != question:
+            yield '네, 4입니다.'
+            return
+        opening, = set(re.findall(r'<llm-canvas-[0-9a-f]{12}>', history[0]['content']))
+        closing = '</' + opening[1:]
+        body = next(generations)
+        for part in [before, opening[:4], opening[4:] + '\n', body[:8], body[8:], closing[:11], closing[11:], after]:
+            yield part
+
+    monkeypatch.setattr(providers, 'stream_reply', model)
+    stream = events(send(client, owner, conversation, question, connection_id='local'))
+    assert len(calls) == 1
+    assert [kind for kind, _ in stream if kind in {'delta', 'canvas', 'done'}] == [
+        'delta', 'delta', 'canvas', 'delta', 'delta', 'canvas', 'delta', 'done',
+    ]
+    first = stream[-1][1]['message']
+    assert first['content'] == before + '\n' + document + after
+    selection = {'start': len(before) + 1, 'end': len(before) + 1 + len(document)}
+    assert first['routing']['canvas'] == selection
+    assert [data for kind, data in stream if kind == 'canvas'] == [selection | {'end': None}, selection]
+    assert last(client, owner, conversation)['routing']['canvas'] == selection
+
+    path = f"/workflows/messages/{first['id']}/canvas"
+    assert client.get(path, headers=owner).json() == {'content': document, 'revision': 0}
+    edited = {'content': '# 검토한 초안\n', 'revision': 0, 'version_id': first['active_version']}
+    assert client.put(path, headers=owner, json=edited).status_code == 200
+    second = events(send(client, owner, conversation, question, connection_id='local', retry=True))[-1][1]['message']
+    assert second['id'] == first['id'] and second['active_version'] != first['active_version']
+    assert client.get(path, headers=owner).json() == {'content': '# 새 초안\n', 'revision': 0}
+    assert client.put(path, headers=owner, json=edited).status_code == 409
+    selected = client.post(f"/workflows/messages/{first['id']}/versions/{first['active_version']}/select", headers=owner)
+    assert selected.status_code == 200
+    assert client.get(path, headers=owner).json() == {'content': edited['content'], 'revision': 1}
+
+    stream = events(send(client, owner, conversation, '2 + 2는?', connection_id='local'))
+    assert not any(kind == 'canvas' for kind, _ in stream)
+    assert stream[-1][1]['message']['content'] == '네, 4입니다.'
+    assert calls[-1][-2]['content'] == first['content']
+
+
+@pytest.mark.parametrize(('question', 'expected'), [
+    ('이 초안을 캔버스 답변으로 해달라고 했어', False),
+    ('캔버스는 어떻게 열어?', False),
+    ('“캔버스로 작성해 줘”를 영어로 번역해 줘', False),
+    ('캔버스 없이 답해 줘', False),
+    ('캔버스로 답변해 줘', True),
+    ('이 글은 캔버스에 작성해 주세요', True),
+    ('Use canvas for the draft', True),
+])
+def test_explicit_canvas_in_demo_chat(client, account, monkeypatch, question, expected):
+    owner = auth(account())
+    conversation = create(client, owner)
+
+    async def model(*_):
+        yield '# 테스트\n'
+
+    monkeypatch.setattr(providers, 'stream_reply', model)
+    stream = events(send(client, owner, conversation, question))
+    assert stream[-1][0] == 'done'
+    assert ('canvas' in [kind for kind, _ in stream]) == expected
+    if expected:
+        assert next(kind for kind, _ in stream if kind in {'canvas', 'delta'}) == 'canvas'
 
 
 def test_edit_forks_original_history_and_versions_can_be_compared_restored(client,account,monkeypatch):

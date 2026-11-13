@@ -29,6 +29,17 @@ test("a truncated stream preserves delivered text and reports interruption", asy
     (event) => received.push(event)), /중단/);
   assert.equal(received[0].data.content, "부분 답변");
 });
+test("canvas opens between text chunks and closes its range without finishing the reply", async () => {
+  const value = 'event: delta\ndata: {"content":"📋 설명"}\n\n'
+    + 'event: canvas\ndata: {"start":4,"end":null}\n\n'
+    + 'event: delta\ndata: {"content":"# 초안"}\n\n'
+    + 'event: canvas\ndata: {"start":4,"end":8}\n\n' + events;
+  const received = [];
+  await readChatStream(stream(encoder.encode(value), 1), event => received.push(event));
+  assert.deepEqual(received.filter(event => event.event === "canvas").map(event => event.data),
+    [{ start: 4, end: null }, { start: 4, end: 8 }]);
+  await assert.rejects(() => readChatStream(stream(encoder.encode(value.replace('"end":8', '"end":3'))), () => {}), /캔버스/);
+});
 test("an error or cancellation is an explicit terminal event", async () => {
   for (const name of ["error", "cancelled"]) {
     const received = [];

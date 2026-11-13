@@ -7,11 +7,10 @@ import type { CanvasEdit } from "./CanvasPanel";
 type Target = { conversationId: string; message: ChatMessage };
 
 export function useConversationCanvas(conversationId: string | null, messages: ChatMessage[]) {
-  const [target, setTarget] = useState<Target | null>(null);
+  const [target, setTarget] = useState<(Target & { trigger?: HTMLElement }) | null>(null);
   const [nextReply, setNextReply] = useState(false);
   const [unsaved, setUnsaved] = useState(false);
   const edits = useRef(new Map<string, CanvasEdit>());
-  const opener = useRef<HTMLElement | null>(null);
   const message = target && target.conversationId === conversationId
     ? messages.find(item => item.id === target.message.id) ?? target.message
     : null;
@@ -34,12 +33,20 @@ export function useConversationCanvas(conversationId: string | null, messages: C
   }, [unsaved]);
 
   const open = (id: string, answer: ChatMessage, trigger?: HTMLElement) => {
-    opener.current = trigger ?? null;
-    setTarget({ conversationId: id, message: answer });
+    setTarget({ conversationId: id, message: answer, trigger });
+  };
+
+  const openAutomatically = (id: string, answer: ChatMessage) => {
+    setTarget(current => {
+      if (current?.conversationId === id && [...edits.current.keys()].some(key => key.startsWith(`${id}:${current.message.id}:`))) {
+        return current;
+      }
+      return { conversationId: id, message: answer };
+    });
   };
 
   const close = () => {
-    const trigger = opener.current;
+    const trigger = target?.trigger;
     setTarget(null);
     requestAnimationFrame(() => {
       if (document.querySelector("dialog:modal")) return;
@@ -49,7 +56,6 @@ export function useConversationCanvas(conversationId: string | null, messages: C
   };
 
   const reset = () => {
-    opener.current = null;
     setTarget(null);
     setNextReply(false);
   };
@@ -61,5 +67,5 @@ export function useConversationCanvas(conversationId: string | null, messages: C
     setUnsaved(edits.current.size > 0);
   };
 
-  return { message, nextReply, setNextReply, open, close, reset, readEdit, rememberEdit, deleteEdits };
+  return { message, nextReply, setNextReply, open, openAutomatically, close, reset, readEdit, rememberEdit, deleteEdits };
 }
