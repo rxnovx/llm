@@ -31,7 +31,8 @@ def message_rows(db, conversation_id):
         .where(Message.conversation_id == conversation_id).order_by(Message.position)).all()
 
 
-def plan(db, conversation_id, connection, model, content='', *, retry=False, strict=True, extra_context='', extra_input_tokens=0):
+def plan(db, conversation_id, connection, model, content='', *, retry=False, strict=True, extra_context='',
+         extra_input_tokens=0, answer_instruction=''):
     profile = connection.profile(model)
     rows = message_rows(db, conversation_id)
     history = completed_history(rows[:-1] if retry else rows)
@@ -51,6 +52,13 @@ def plan(db, conversation_id, connection, model, content='', *, retry=False, str
     question = [{'role': 'user', 'content': question_text}] if question_text else []
     budget = profile.context_window - profile.max_output_tokens - 256
     required = estimate(summary + question) + extra_input_tokens
+    system = summary
+    if answer_instruction:
+        first_system = answer_instruction + ('\n\n' + summary[0]['content'] if summary else '')
+        candidate = [{'role': 'system', 'content': first_system}, *summary[1:]]
+        with_instruction = estimate(candidate + question) + extra_input_tokens
+        if with_instruction <= budget:
+            system, required = candidate, with_instruction
     too_large = required > budget
     if too_large and strict:
         raise HTTPException(422, '현재 질문과 요약 메모가 모델의 입력 문맥 예산을 초과합니다. 내용을 줄이거나 더 큰 문맥의 모델을 선택하세요.')
@@ -61,7 +69,7 @@ def plan(db, conversation_id, connection, model, content='', *, retry=False, str
             break
         included.insert(0, pair)
         used += cost
-    messages = summary + [item for pair in included for item in pair] + question
+    messages = system + [item for pair in included for item in pair] + question
     report = {'context_window': profile.context_window, 'input_budget': budget,
         'reserved_output_tokens': profile.max_output_tokens, 'estimated_input_tokens': used,
         'estimate_method': 'utf8_bytes_plus_template_and_image_allowance' if extra_input_tokens else 'utf8_bytes_plus_template_allowance',
@@ -76,8 +84,10 @@ def plan(db, conversation_id, connection, model, content='', *, retry=False, str
     return messages, report
 
 
-def reference_budget(db,conversation_id,connection,model,content):
+def reference_budget(db,conversation_id,connection,model,content,*,answer_instruction=''):
     messages,_=plan(db,conversation_id,connection,model,content,strict=False)
     summary=[m for m in messages if m['role']=='system']
     profile = connection.profile(model)
-    return max(0,profile.context_window-profile.max_output_tokens-256-estimate(summary+[{'content':content}])-32)
+    room = max(0,profile.context_window-profile.max_output_tokens-256-estimate(summary+[{'content':content}])-32)
+    instruction_cost = len(answer_instruction.encode()) + (2 if summary else 32)
+    return room - instruction_cost if answer_instruction and room - instruction_cost >= 2000 else room

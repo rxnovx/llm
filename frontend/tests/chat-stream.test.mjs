@@ -29,6 +29,17 @@ test("a truncated stream preserves delivered text and reports interruption", asy
     (event) => received.push(event)), /중단/);
   assert.equal(received[0].data.content, "부분 답변");
 });
+test("canvas opens between text chunks and closes its range without finishing the reply", async () => {
+  const value = 'event: delta\ndata: {"content":"📋 설명"}\n\n'
+    + 'event: canvas\ndata: {"start":4,"end":null}\n\n'
+    + 'event: delta\ndata: {"content":"# 초안"}\n\n'
+    + 'event: canvas\ndata: {"start":4,"end":8}\n\n' + events;
+  const received = [];
+  await readChatStream(stream(encoder.encode(value), 1), event => received.push(event));
+  assert.deepEqual(received.filter(event => event.event === "canvas").map(event => event.data),
+    [{ start: 4, end: null }, { start: 4, end: 8 }]);
+  await assert.rejects(() => readChatStream(stream(encoder.encode(value.replace('"end":8', '"end":3'))), () => {}), /캔버스/);
+});
 test("an error or cancellation is an explicit terminal event", async () => {
   for (const name of ["error", "cancelled"]) {
     const received = [];
@@ -98,6 +109,22 @@ test('knowledge sources preserve document version and location without an extern
   const source={id:'KS1',app:'knowledge',document_id:'document',chunk_id:'chunk',filename:'매뉴얼.pdf',location:'3쪽',sha256:'abc',revision:2};
   const stream=new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(`event: sources\ndata: ${JSON.stringify({sources:[source]})}\n\nevent: done\ndata: {}\n\n`));controller.close();}});
   await readChatStream(stream,event=>events.push(event));assert.deepEqual(events[0].data.sources,[source]);
+});
+
+test('web, earlier conversation and calculated evidence survive streamed answers', async () => {
+  const web = { id: 'WS1', app: 'web', title: '공식 문서', url: 'https://docs.example/guide', excerpt: '검색 결과' };
+  const chat = { id: 'CH1', app: 'chat_history', title: '이전 질문', conversation_id: 'conversation', message_id: 'message', excerpt: '이전 결정' };
+  const document = { document_id: 'file', filename: 'sales.xlsx', sha256: 'hash', revision: 2, sheet: '매출' };
+  const table = { id: 'TA1', app: 'table_analysis', title: '표 계산', documents: [document], excerpt: '1월 합계 125' };
+  const encoded = sources => encoder.encode(`event: sources\ndata: ${JSON.stringify({ sources })}\n\n${events}`);
+  const received = [];
+  await readChatStream(stream(encoded([web, chat, table]), 1), event => received.push(event));
+  assert.deepEqual(received[0].data.sources, [web, chat, table]);
+
+  for (const invalid of [{ ...web, url: 'https://user:password@docs.example/guide' }, { ...web, url: 'javascript:alert(1)' },
+    { ...chat, message_id: null }, { ...table, documents: [{ ...document, revision: '2' }] }, { ...table, documents: [null] }]) {
+    await assert.rejects(() => readChatStream(stream(encoded([invalid])), () => {}), /출처/);
+  }
 });
 
 test('automatic workspace selection and final routing survive split SSE data',async()=>{

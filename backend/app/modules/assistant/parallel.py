@@ -3,12 +3,22 @@
 import asyncio
 from contextlib import aclosing
 import json
+import re
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.modules.chat import providers
 from app.modules.chat.independent import RequestCancelled, admitted
+
+
+def requested(question):
+    """Invite planning even in a new chat with no other available resources."""
+    return bool(re.search(
+        r'병렬|서로\s*다른\s*관점|(?:여러|다양한|두|세|각각|각)의?\s*(?:관점|측면)|'
+        r'관점에서.{0,35}(?:각각|나눠|나누어|독립)|(?:나눠|나누어)\s*(?:검토|분석)|'
+        r'\b(?:parallel|independently|multiple perspectives|different perspectives)\b',
+        question, re.I))
 
 
 class Assignment(BaseModel):

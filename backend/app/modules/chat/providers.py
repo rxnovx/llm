@@ -226,22 +226,7 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
             payload['stream_options'] = {'include_usage': True}
     else:
         payload['options'] = options | {'num_predict': output_limit, 'num_ctx': profile.context_window}
-    request_payload = payload
-    if images:
-        if not profile.supports_vision:
-            raise ProviderError('선택한 모델에 이미지 입력 지원이 설정되어 있지 않습니다.')
-        if not history or history[-1].get('role') != 'user' or not isinstance(history[-1].get('content'), str):
-            raise ProviderError('이미지와 함께 보낼 사용자 메시지를 확인하세요.')
-        latest = history[-1]
-        encoded = [b64encode(image.data).decode('ascii') for image in images]
-        if vllm:
-            parts = [{'type': 'text', 'text': latest['content']}]
-            parts.extend({'type': 'image_url', 'image_url': {'url': f'data:{image.mime_type};base64,{value}'}}
-                for image, value in zip(images, encoded))
-            latest = latest | {'content': parts}
-        else:
-            latest = latest | {'images': encoded}
-        request_payload = payload | {'messages': [*history[:-1], latest]}
+    request_payload = with_images(payload, images, profile, vllm)
     complete = False
     with usage.measure(connection, model, payload, output_limit, settings.llm_timeout_seconds,
                        extra_input_tokens=len(images) * VISION_IMAGE_TOKENS) as meter:
@@ -291,7 +276,28 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
             raise ProviderError('모델 스트림의 응답 형식이 올바르지 않습니다. 서버 종류와 API 경로를 확인해 주세요.') from None
 
 
-async def tool_reply(connection,model,history,tools,settings):
+def with_images(payload, images, profile, vllm):
+    if not images:
+        return payload
+    if not profile.supports_vision:
+        raise ProviderError('선택한 모델에 이미지 입력 지원이 설정되어 있지 않습니다.')
+    history = payload['messages']
+    index = next((i for i in range(len(history) - 1, -1, -1) if history[i].get('role') == 'user'), None)
+    if index is None or not isinstance(history[index].get('content'), str):
+        raise ProviderError('이미지와 함께 보낼 사용자 메시지를 확인하세요.')
+    latest = history[index]
+    encoded = [b64encode(image.data).decode('ascii') for image in images]
+    if vllm:
+        parts = [{'type': 'text', 'text': latest['content']}]
+        parts.extend({'type': 'image_url', 'image_url': {'url': f'data:{image.mime_type};base64,{value}'}}
+                     for image, value in zip(images, encoded))
+        latest = latest | {'content': parts}
+    else:
+        latest = latest | {'images': encoded}
+    return payload | {'messages': [*history[:index], latest, *history[index + 1:]]}
+
+
+async def tool_reply(connection,model,history,tools,settings,*,images=()):
     """One structured agent step; tools are executed exclusively by the application host."""
     if connection.provider=='test':
         names={t['function']['name'] for t in tools}
@@ -366,10 +372,12 @@ async def tool_reply(connection,model,history,tools,settings):
         outgoing.append(entry)
     payload={'model':model,'messages':outgoing,'tools':tools,'stream':False}
     payload.update({'max_tokens':profile.max_output_tokens,'tool_choice':'auto'} if vllm else {'options':{'num_predict':profile.max_output_tokens,'num_ctx':profile.context_window}})
-    with usage.measure(connection, model, payload, profile.max_output_tokens, settings.llm_timeout_seconds) as meter:
+    request_payload = with_images(payload, images, profile, vllm)
+    with usage.measure(connection, model, payload, profile.max_output_tokens, settings.llm_timeout_seconds,
+                       extra_input_tokens=len(images) * VISION_IMAGE_TOKENS) as meter:
         try:
             async with client(connection,settings.llm_timeout_seconds) as session:
-                async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=payload) as response:
+                async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=request_payload) as response:
                     require_success(response, '모델 도구 호출 요청 거부', '모델의 도구 지원과 서버 파서 설정을 확인해 주세요.')
                     meter.accepted = True
                     raw=bytearray()
@@ -398,7 +406,7 @@ async def tool_reply(connection,model,history,tools,settings):
         except (ValueError,KeyError,IndexError,TypeError,AttributeError):
             raise ProviderError('모델 도구 응답을 처리하지 못했습니다. 도구 호출을 지원하는 모델과 parser 설정을 확인하세요.') from None
 
-async def structured_reply(connection,model,messages,schema,settings):
+async def structured_reply(connection,model,messages,schema,settings,*,images=()):
     """Bounded JSON decision; never executes tools or accepts a server URL from the model."""
     profile=connection.profile(model)
     vllm=connection.provider=='vllm'
@@ -408,10 +416,12 @@ async def structured_reply(connection,model,messages,schema,settings):
             response_format={'type':'json_schema','json_schema':{'name':'assistant_decision','schema':schema,'strict':True}})
     else:
         payload.update(format=schema,options={'temperature':0,'num_predict':min(1024,profile.max_output_tokens),'num_ctx':profile.context_window})
-    with usage.measure(connection, model, payload, min(1024, profile.max_output_tokens), settings.llm_timeout_seconds) as meter:
+    request_payload = with_images(payload, images, profile, vllm)
+    with usage.measure(connection, model, payload, min(1024, profile.max_output_tokens), settings.llm_timeout_seconds,
+                       extra_input_tokens=len(images) * VISION_IMAGE_TOKENS) as meter:
         try:
             async with client(connection,settings.llm_timeout_seconds) as session:
-                async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=payload) as response:
+                async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=request_payload) as response:
                     require_success(response, '모델 구조화 요청 거부', '모델 서버의 JSON 스키마 출력 지원을 확인해 주세요.')
                     meter.accepted = True
                     raw=bytearray()

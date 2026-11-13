@@ -17,7 +17,7 @@
 :where(
   .account-input,
   .cw-action-dialog input,
-  .cw-connection-detail :is(input, select),
+  .cw-model-manual input,
   .cw-context-label :is(textarea, select),
   .cw-scope-field :is(input, select),
   .cw-terminal-output input,

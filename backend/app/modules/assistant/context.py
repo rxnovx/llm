@@ -68,7 +68,11 @@ def validate(db,user_id,conversation_id,selection,connection,model):
     if (selection.get('mcp_ids') or selection.get('parallel_agents')) and connection.provider!='test' and not connection.profile(model).supports_tools:
         raise HTTPException(422,'MCP와 병렬 분석은 도구 호출을 지원하는 모델이 필요합니다.')
 
-def personal(db,user_id):
+def personal(db,user_id,*,conversation_id=None):
+    if conversation_id:
+        from app.modules.workflows.models import ProjectConversation
+        if db.get(ProjectConversation, str(conversation_id)):
+            return ''
     row=db.get(Preference,user_id)
     parts=[]
     if row and row.instructions:parts.append('User response preferences:\n'+row.instructions)
@@ -82,11 +86,19 @@ def active(db,user_id,selection,*,question='',conversation_id='',connection=None
     row=db.get(Preference,user_id)
     if image_inputs.reference(selection) or selection.get('base_ids') or selection.get('document_ids') or selection.get('mcp_ids') or selection.get('parallel_agents') or row and (row.instructions or row.memory_enabled):
         return True
-    from app.modules.workflows.artifacts import requested_tools
+    from app.modules.workflows.artifacts import planning_hint, requested_tools
     if requested_tools(question):return True
+    from app.modules.schedules import service as schedules
+    from app.modules.workflows import artifact_revision, table_analysis
+    from . import parallel, personal_tools, web_search
+    if personal_tools.memory_command(question) or schedules.requested(question):
+        return True
+    if artifact_revision.requested(question) or table_analysis.requested(question) or personal_tools.history_requested(question) or web_search.requested(question):
+        return True
     settings = get_settings()
     if not settings.assistant_automatic_enabled or not selection.get('automatic',True):return False
     if connection and connection.provider != 'test':
+        if parallel.requested(question) or web_search.available(settings) or planning_hint(question):return True
         if settings.image_generation_url.strip():return True
         if settings.image_edit_url.strip() or connection.profile(model).supports_vision:
             if image_inputs.latest_reference(db, user_id, conversation_id):return True

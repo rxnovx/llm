@@ -301,6 +301,27 @@ test("context preview and summary edits keep chat route and CSRF boundaries", as
   assert.equal((await fetch(`${origin}/api/chat/${path}/unknown`,{method:"POST",headers:csrf})).status,404);
 });
 
+test("scheduled task proxies forward authenticated reads and same-origin cancellation only", async () => {
+  mode = "tokens";
+  const id = "95d1e9ac-321f-4637-88d1-0cc4abdf3b28";
+  const path = "/workflows/schedules";
+  const headers = { ...csrf, authorization: "Bearer schedule-user", cookie: "private=value" };
+  for (const suffix of ["", `/${id}/runs`]) {
+    assert.equal((await fetch(`${origin}/api${path}${suffix}`, { headers })).status, 200);
+    assert.equal(received.path, path + suffix);
+    assert.equal(received.headers.authorization, "Bearer schedule-user");
+    assert.equal(received.headers.cookie, undefined);
+  }
+  assert.equal((await fetch(`${origin}/api${path}`, { method: "POST", headers })).status, 404);
+  const target = `${origin}/api${path}/${id}`;
+  assert.equal((await fetch(target, { method: "DELETE", headers: { ...headers, origin: "https://other.example" } })).status, 403);
+  assert.equal((await fetch(target, { method: "DELETE", headers })).status, 200);
+  assert.equal(received.method, "DELETE");
+  assert.equal(received.path, `${path}/${id}`);
+  assert.equal(received.headers.authorization, "Bearer schedule-user");
+  assert.equal(received.headers.cookie, undefined);
+});
+
 test("GitLab OAuth BFF binds independent HttpOnly state cookies and hides backend browser metadata", async () => {
   mode="apps-start";
   const headers={...csrf,origin:"http://localhost:3099",authorization:"Bearer alice",cookie:"private=value","x-oauth-browser":"attacker-nonce"};

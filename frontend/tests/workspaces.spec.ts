@@ -28,8 +28,8 @@ test('프로젝트 분석 선택과 작업공간 모달이 작성 중인 질문�
   await page.getByRole('checkbox').check();await page.getByRole('button',{name:'회원가입',exact:true}).click();
   await expect(page.getByRole('heading',{name:'무엇을 함께 해볼까요?'})).toBeVisible();
   await page.getByLabel('메시지',{exact:true}).fill('프로젝트 분석');
-  await page.getByRole('button',{name:'앱 추가',exact:true}).click();
-  await page.getByRole('option',{name:'GitLab 범위 직접 선택',exact:true}).click();
+  await page.getByRole('button',{name:'도구 추가',exact:true}).click();
+  await page.getByRole('group',{name:'채팅 도구'}).getByRole('button',{name:'GitLab 범위 직접 선택',exact:true}).click();
   const scope=page.getByRole('dialog',{name:'GitLab에서 가져오기'});
   await scope.getByLabel('작업 방식').selectOption('workspace');
   await scope.getByRole('button',{name:/team\/service/}).click();
@@ -47,7 +47,8 @@ test('프로젝트 분석 선택과 작업공간 모달이 작성 중인 질문�
   await page.getByRole('button',{name:'메시지 전송',exact:true}).click();
   await expect(page.getByRole('button',{name:'답변 복사',exact:true})).toBeVisible();
   await page.getByLabel('메시지',{exact:true}).fill('다음 질문 유지');
-  await page.getByRole('button',{name:'작업공간',exact:true}).click();
+  await page.getByRole('button',{name:'도구 추가',exact:true}).click();
+  await page.getByRole('group',{name:'채팅 도구'}).getByRole('button',{name:'작업공간',exact:true}).click();
   const modal=page.getByRole('dialog',{name:'프로젝트 작업공간'});
   await modal.getByRole('button',{name:'저장소 지도',exact:true}).click();
   await expect(modal.getByLabel('도구 조회 결과')).toContainText('main.py');

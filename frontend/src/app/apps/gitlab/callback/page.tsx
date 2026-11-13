@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { WorkspaceLink } from "@/components/shared/WorkspaceLink";
 import { useModalNavigation } from "@/components/auth/modal-navigation";
 import { appsJson, notifyAppsChanged, oauthReturnPath } from "@/lib/app-connections";
-import { getSafeNextPath } from "@/lib/workspace-navigation";
+import { getSafeNextPath, notifyWorkspaceLocation } from "@/lib/workspace-navigation";
 import { useAuthStore } from "@/stores/authStore";
 
 export default function GitlabCallbackPage() {
@@ -16,6 +16,7 @@ export default function GitlabCallbackPage() {
       const query = new URLSearchParams(window.location.search);
       values.current = { state: query.get("state") ?? "", code: query.get("code") ?? "", error: query.get("error") ? "access_denied" : "" };
       window.history.replaceState(null, "", window.location.pathname); // Never retain OAuth codes in browser history.
+      notifyWorkspaceLocation();
     }
     if (!initialized || started.current) return;
     started.current = true;
@@ -25,9 +26,10 @@ export default function GitlabCallbackPage() {
     }).then((data) => {
       notifyAppsChanged();
       if (!canNavigate()) return;
-      setResult({ username: data.connection.username, path: data.return_path });
+      const path = getSafeNextPath(data.return_path);
+      setResult({ username: data.connection.username, path });
       if (data.popup) window.close();
-      else window.location.replace(getSafeNextPath(data.return_path));
+      else window.location.replace(path);
     }).catch((e: unknown) => setError(e instanceof Error ? e.message : "GitLab 인증을 완료하지 못했습니다."));
   }, [canNavigate, initialized, user]);
   const failure = error || (initialized && !user ? "인증을 시작한 앱 계정의 로그인이 필요합니다. 다시 로그인한 뒤 설정에서 GitLab 연결을 시작하세요." : "");

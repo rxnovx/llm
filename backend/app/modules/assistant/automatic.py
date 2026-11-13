@@ -13,9 +13,11 @@ from app.modules.chat import providers,scheduler
 from app.modules.chat.models import Message
 from app.modules.integrations import config as gitlab_config, service as gitlab_connections
 from app.modules.workspaces.models import ToolTrace
-from . import engine,gitlab,routing
+from . import engine, gitlab, parallel, personal_tools, routing, web_search
 from .models import TurnDecision
-from app.modules.workflows import artifacts, image_inputs, image_queue, images
+from app.modules.schedules import service as schedules
+from app.modules.workflows import artifact_revision, artifacts, image_inputs, image_queue, images, table_analysis
+from app.modules.workflows.conversations import project_for
 
 ABSTAIN='현재 확인 가능한 근거로는 질문의 사실 관계를 충분히 검증하지 못했습니다. 확실하지 않은 내용을 단정하지 않겠습니다. 관련 자료를 추가하거나 질문 범위를 좁혀 주세요.'
 
@@ -24,15 +26,20 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
     options=dict(options or {})
     deadline=int(time.time())+settings.terminal_agent_timeout_seconds+15
     model=turn.start['conversation']['model'];question=turn.history[-1]['content']
-    file_request = bool(artifacts.requested_tools(question))
+    file_request = bool(artifacts.requested_tools(question)) or artifacts.planning_hint(question)
     image_mode = options.get('image_mode', 'auto')
     enabled=settings.assistant_automatic_enabled and options.get('automatic',True)
-    manual_knowledge=bool(options.get('base_ids') or options.get('document_ids'))
     current_image = image_inputs.reference(options)
+    if image_mode == 'vision' and not options.get('image_document_ids') and current_image.get('image_document_ids'):
+        options['document_ids'] = []
+    manual_knowledge=bool(options.get('base_ids') or options.get('document_ids'))
     request = turn.gitlab_request
     explicit_apps = bool(request or selection or options.get('mcp_ids') or turn.start['assistant_message']['apps'])
     explicit = bool(image_mode != 'auto' or current_image or manual_knowledge or explicit_apps)
-    auto_tools = enabled and not explicit
+    auto_tools = enabled and not explicit_apps
+    can_call_tools = connection.provider == 'test' or connection.profile(model).supports_tools
+    memory_command = personal_tools.memory_command(question) if not turn.scheduled else None
+    schedule_command = not turn.scheduled and (schedules.requested(question) or schedules.pending_for_turn(bind,user_id,turn))
     decision={'automatic':auto_tools}
     if selection and (turn.previous_message or {}).get('routing',{}).get('automatic_project'):decision['automatic_project']=True
 
@@ -46,7 +53,9 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         with Session(bind) as db:
             row=db.get(TurnDecision,turn.assistant_id)
             if not row:row=TurnDecision(message_id=turn.assistant_id);db.add(row)
-            row.data_json=json.dumps(decision,ensure_ascii=False);db.commit()
+            selection = turn.presentation.selection
+            data = decision | ({'canvas': selection} if selection else {})
+            row.data_json=json.dumps(data,ensure_ascii=False);db.commit()
 
     async def release():
         with Session(bind) as db:scheduler.release_for_tools(db,turn.request_id,deadline);db.commit()
@@ -92,65 +101,55 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         finally:
             image_queue.finish(bind, turn.request_id)
         if cancelled():raise engine.AnalysisCancelled()
-        artifacts.finalize(bind, user_id, turn.request_id, [file['id']], approve=True)
+        if turn.scheduled:
+            turn.pending_artifacts = [file['id']]
+        else:
+            artifacts.finalize(bind, user_id, turn.request_id, [file['id']], approve=True)
         decision['status'] = 'complete';save()
         detail = '이미지를 편집했습니다.' if editing else '이미지를 생성했습니다.'
         yield 'activity', record(phase, 'complete', detail)
         yield 'artifact', file
-        yield 'delta', {'content': detail}
-
-    async def analyze_image(source_options, *, admitted=False, evidence_options=None):
-        decision.update(route='vision', status='running');save()
-        yield 'activity', record('analyze_image', 'running', '첨부 이미지를 분석하고 있습니다.')
-        try:
-            inputs = await image_inputs.load(bind, user_id, turn.conversation_id, source_options,
-                mode='vision', before_message_id=turn.assistant_id)
-            if cancelled():raise engine.AnalysisCancelled()
-            if evidence_options:
-                sources = []
-                async with aclosing(engine.stream(bind, user_id, turn, None, connection, settings, cancelled,
-                        options=evidence_options, images=inputs)) as iterator:
-                    async for kind, payload in iterator:
-                        if kind == 'sources':
-                            sources = payload['sources']
-                        yield kind, payload
-                await routing.verify(bind, user_id, turn.conversation_id, None, sources)
-            else:
-                system = {'role': 'system', 'content': engine.IMAGE_INSTRUCTION}
-                with Session(bind) as db:
-                    history, report = context_budget.plan(db, turn.conversation_id, connection, model, question,
-                        extra_input_tokens=len(inputs) * providers.VISION_IMAGE_TOKENS + context_budget.estimate([system]))
-                if history[0]['role'] == 'system':
-                    history[0]['content'] = system['content'] + '\n\n' + history[0]['content']
-                else:
-                    history.insert(0, system)
-                if not admitted:
-                    await acquire()
-                try:
-                    yield 'context', report
-                    async for part in providers.stream_reply(connection, model, history, settings, images=inputs):
-                        yield 'delta', {'content': part}
-                finally:
-                    if not admitted:
-                        await release()
-        except (HTTPException, providers.ProviderError) as error:
-            detail = str(error.detail) if isinstance(error, HTTPException) else str(error)
-            yield 'activity', record('analyze_image', 'error', detail)
-            raise
-        decision['status'] = 'complete';save()
-        yield 'activity', record('analyze_image', 'complete', '이미지 분석을 마쳤습니다.')
+        yield 'delta', {'content': detail, 'model_output': False}
 
     if image_mode in {'generate', 'edit'}:
         async with aclosing(render_image(image_mode, question, current_image)) as iterator:
             async for event in iterator:yield event
         return
-    if image_mode == 'vision':
-        async with aclosing(analyze_image(current_image, admitted=True)) as iterator:
-            async for event in iterator:yield event
-        return
-
     await release()
+    if memory_command or schedule_command:
+        if cancelled():raise engine.AnalysisCancelled()
+        if memory_command and not schedule_command:
+            name = 'memory'
+            detail = personal_tools.run_memory(bind,user_id,memory_command,conversation_id=turn.conversation_id,
+                assistant_id=turn.assistant_id,request_id=turn.request_id)
+        else:
+            name = 'manage_schedule'
+            detail = (await asyncio.to_thread(schedules.run_command,bind,user_id,turn)
+                      or '이전 예약 요청이 만료되었습니다. 예약할 내용과 시각을 함께 다시 알려 주세요.')
+        decision.update(route=name,status='complete');save()
+        yield 'activity',record(name,'complete',detail)
+        yield 'delta',{'content':detail,'model_output':False}
+        return
     available=routing.resources(bind,user_id,turn.conversation_id,options)
+    if turn.scheduled:
+        with Session(bind) as db:
+            scheduled_project = bool(project_for(db, turn.conversation_id))
+        if scheduled_project:
+            available.update(mcp_apps=[],gitlab_connections=[],recent_projects=[])
+    else:
+        scheduled_project = False
+    web_requested = web_search.requested(question) and not scheduled_project
+    history_requested = not scheduled_project and personal_tools.history_requested(question)
+    table_requested = table_analysis.requested(question)
+    revise_requested = artifact_revision.clear_revision_request(question)
+    parallel_requested = parallel.requested(question)
+    table_scope = options | {'_auto_scope': enabled and available['retrieval_allowed']}
+    table_catalog = table_analysis.catalog(bind,user_id,turn.conversation_id,table_scope)[:10] if can_call_tools and (table_requested or manual_knowledge) else []
+    result_catalog = artifact_revision.catalog(bind,user_id,turn.conversation_id,
+        before_message_id=turn.assistant_id) if can_call_tools and (revise_requested or enabled and artifact_revision.requested(question)) else []
+    available.update(resource_routing=auto_tools,web_available=web_search.available(settings) and not scheduled_project,
+        history_available=history_requested,parallel_available=can_call_tools and (parallel_requested or auto_tools),
+        tables=table_catalog,result_files=result_catalog[:4],file_tools_available=can_call_tools)
     plan=routing.Plan(route='gitlab' if selection else 'direct',needs_review=bool(manual_knowledge or options.get('mcp_ids') or selection and selection.mode=='workspace'))
     if request:
         yield 'activity',record('gitlab_resolve','running','요청에서 GitLab 작업 범위와 연결 계정을 확인하고 있습니다.')
@@ -159,7 +158,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             decision.update(route='clarify',status='clarification');save()
             detail = '작업할 GitLab 프로젝트의 그룹/프로젝트 경로나 MR 링크를 알려 주세요.'
             yield 'activity',record('gitlab_resolve','complete',detail)
-            yield 'delta',{'content':detail}
+            yield 'delta',{'content':detail,'model_output':False}
             return
         if request.execute and connection.provider == 'test':
             raise HTTPException(422, 'GitLab 수정·커밋·게시는 도구 호출을 지원하는 실제 모델을 선택해야 합니다.')
@@ -183,12 +182,12 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         if selection.mode == 'files':
             selection = None  # The existing file-only path handles explicit file scope.
     source = current_image
-    can_route_media = connection.provider != 'test' and not (explicit_apps or options.get('parallel_agents')) and (enabled or bool(current_image))
+    can_route_media = connection.provider != 'test' and image_mode == 'auto' and (enabled or bool(current_image))
     if can_route_media:
         vision = connection.profile(model).supports_vision
-        edit = bool(settings.image_edit_url.strip())
-        generate = bool(enabled and settings.image_generation_url.strip())
-        if not source and (vision or edit):
+        edit = not scheduled_project and bool(settings.image_edit_url.strip())
+        generate = enabled and not scheduled_project and bool(settings.image_generation_url.strip())
+        if not source and not explicit_apps and not options.get('parallel_agents') and (vision or edit):
             with Session(bind) as db:
                 source = image_inputs.latest_reference(db, user_id, turn.conversation_id,
                     before_message_id=turn.assistant_id)
@@ -196,17 +195,15 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             available.update(image_source='current' if current_image else 'recent' if source else 'none',
                 image_count=len(image_inputs.attachment_ids(source)) or int(bool(source.get('image_artifact_id'))),
                 image_vision=vision and bool(source), image_edit=edit and bool(source), image_generation=generate)
-    media_only = bool(current_image or manual_knowledge)
     auto_knowledge=enabled and available['retrieval_allowed'] and available['knowledge_ready']
-    if auto_tools or (can_route_media and (source or available.get('image_generation'))):
+    plan_needed = auto_tools and (not explicit or bool(available['gitlab_connections'] or available['mcp_apps']
+        or table_catalog or result_catalog or file_request or parallel_requested or history_requested or web_requested))
+    fallback = False
+    if image_mode != 'vision' and (plan_needed or can_route_media and (source or available.get('image_generation'))):
         decision['automatic'] = True
         planner_input = available | {'file_request': file_request}
-        if media_only:
-            planner_input = {key: value for key, value in available.items() if key.startswith('image_')}
-            planner_input['media_only'] = True
         yield 'activity',record('route_decision','running','요청에 필요한 처리 방식을 판단하고 있습니다.')
         await acquire()
-        fallback = False
         try:
             async with asyncio.timeout(settings.llm_timeout_seconds):
                 plan = await routing.decide(connection, model, question, planner_input, settings)
@@ -225,24 +222,27 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             else:
                 detail = '자동 판단을 완료하지 못해 채팅으로 이어갑니다.'
             yield 'activity', record('route_decision', 'error', detail)
-            if not (current_image or manual_knowledge or file_request):
+            if not (current_image or manual_knowledge or file_request or web_requested or history_requested
+                    or table_requested or revise_requested or parallel_requested or explicit_apps):
                 decision.update(route='direct', status='running');save()
                 await acquire()
                 try:
-                    yield 'context', turn.start['context']
+                    with Session(bind) as db:
+                        history, report = context_budget.plan(db, turn.conversation_id, connection, model, question,
+                            answer_instruction=turn.presentation.instruction)
+                    yield 'context', report
                     async with asyncio.timeout(settings.llm_timeout_seconds):
-                        async for part in providers.stream_reply(connection, model, turn.history, settings):
+                        async for part in providers.stream_reply(connection, model, history, settings):
                             yield 'delta', {'content': part}
                 finally:await release()
                 decision['status'] = 'complete';save()
                 return
-        if media_only and plan.route not in {'direct', 'vision', 'image', 'image_edit', 'clarify'}:
-            plan.route = 'direct'
-            plan.mcp_ids = []
-        if current_image and plan.route == 'direct':
+        if explicit_apps and plan.route in {'gitlab','both','mcp','image','image_edit'}:
+            plan.route = 'gitlab' if selection else 'direct'
+        if current_image and plan.route == 'direct' and not explicit_apps:
             plan.route = 'vision'
         unavailable = ''
-        if plan.route == 'vision' and not available.get('image_vision'):
+        if (plan.route == 'vision' or plan.use_vision or current_image and plan.route in {'gitlab','both','mcp','knowledge','direct'}) and not available.get('image_vision'):
             unavailable = ('분석할 이미지를 첨부하세요.' if not source else
                 '이미지를 분석하려면 이미지 입력을 지원하도록 설정된 모델을 선택하세요.')
         elif plan.route == 'image_edit':
@@ -271,18 +271,12 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
                     plan.image_prompt.strip() or question, source if editing else {})) as iterator:
                 async for event in iterator:yield event
             return
-        if plan.route == 'vision':
-            evidence_options = None
-            if manual_knowledge or auto_knowledge and (plan.uncertain or options.get('rag_mode') == 'always'):
-                evidence_options = options | {'_query': plan.query or question, '_auto_scope': not manual_knowledge}
-            async with aclosing(analyze_image(source, evidence_options=evidence_options)) as iterator:
-                async for event in iterator:yield event
-            return
         if plan.route=='clarify':
             decision['status']='clarification';save()
-            yield 'delta',{'content':plan.clarification or ('이미지에서 확인하거나 바꿀 내용을 알려 주세요.' if source else '분석할 프로젝트나 필요한 자료 범위를 알려 주세요.')}
+            yield 'delta',{'content':plan.clarification or ('이미지에서 확인하거나 바꿀 내용을 알려 주세요.' if source else '분석할 프로젝트나 필요한 자료 범위를 알려 주세요.'),
+                'model_output':False}
             return
-        if plan.route in {'gitlab','both'}:
+        if auto_tools and plan.route in {'gitlab','both'}:
             if connection.provider!='test' and not connection.profile(model).supports_tools:
                 raise HTTPException(422,'자동 소스 분석에는 도구 호출을 지원하도록 설정된 모델이 필요합니다.')
             yield 'activity',record('gitlab_resolve','running','연결된 내 계정에서 프로젝트 경로와 접근 권한을 확인하고 있습니다.')
@@ -294,21 +288,72 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
                 message.source_record.apps_json=json.dumps(turn.start['assistant_message']['apps']);db.commit()
             yield 'activity',record('gitlab_resolve','complete','프로젝트를 확인했습니다. 읽기 전용 작업공간을 준비합니다.')
 
-    if auto_tools and plan.route=='mcp' and not plan.mcp_ids:raise HTTPException(409,'사용할 앱을 선택하지 못했습니다. 앱 설정에서 연결 상태를 확인하고 @ 앱으로 선택하세요.')
+    if auto_tools and plan.route=='mcp' and not plan.mcp_ids:raise HTTPException(409,'사용할 앱을 선택하지 못했습니다. 앱 설정에서 연결 상태를 확인하세요.')
     if auto_tools and plan.mcp_ids:
         permitted={a['id'] for a in available.get('mcp_apps',[])}
         if not set(plan.mcp_ids)<=permitted:raise HTTPException(403,'자동 선택할 수 없는 MCP 앱입니다.')
         if connection.provider!='test' and not connection.profile(model).supports_tools:raise HTTPException(422,'앱 자동 사용에는 도구 호출 모델이 필요합니다. 모델을 변경하세요.')
         options['mcp_ids']=plan.mcp_ids;options['allow_writes']=False
         decision['mcp_ids']=plan.mcp_ids
-    if auto_knowledge and not manual_knowledge and (plan.route in {'knowledge','both'} or options.get('rag_mode')=='always'):
+    if auto_knowledge and not manual_knowledge and (plan.route in {'knowledge','both'} or plan.use_knowledge
+            or plan.uncertain and plan.route=='vision' or options.get('rag_mode')=='always'):
         options['_auto_scope']=True
     if plan.route in {'knowledge','both'} and not manual_knowledge and not auto_knowledge:
         decision['retrieval_notice']='자동 검색이 꺼져 있거나 검색할 준비된 자료가 없습니다. 자료의 업로드·색인 상태를 확인하세요.'
         yield 'activity',record('knowledge_scope','complete',decision['retrieval_notice'])
     options['_query']=plan.query or question
+    options['_web'] = bool(web_requested or auto_tools and available['web_available'] and plan.search_web)
+    options['_web_query'] = plan.query if plan.search_web else ''
+    if options['_web_query']:
+        try:web_search.safe_query(options['_web_query'],question)
+        except HTTPException:options['_web_query'] = ''
+    options['_history'] = bool(history_requested or auto_tools and available['history_available'] and plan.search_history)
+    options['_history_query'] = plan.query if plan.search_history else personal_tools.history_query(question) if history_requested else ''
+    options['_tables'] = table_catalog if plan.analyze_table or table_requested and (
+        manual_knowledge or connection.provider == 'test' or fallback) else []
+    if options['_tables'] and not manual_knowledge:
+        options['_auto_scope'] = True
+    options['_result_files'] = result_catalog if revise_requested or plan.revise_file else []
+    options['_create_files'] = plan.create_files if not (revise_requested or plan.revise_file) else []
+    if can_call_tools and enabled and (plan.parallel_agents or parallel_requested and (not plan_needed or fallback or connection.provider=='test')):
+        options['parallel_agents'] = True
+    if revise_requested and not result_catalog:
+        detail = ('수정할 파일을 이 대화에서 먼저 생성해 주세요.' if can_call_tools else
+            '결과 파일을 수정하려면 도구 호출을 지원하는 모델을 선택해 주세요.')
+        decision.update(route='clarify',status='clarification');save()
+        yield 'delta',{'content':detail,'model_output':False}
+        return
+    if table_requested and not table_catalog and manual_knowledge:
+        detail = ('계산할 CSV, TSV 또는 XLSX 파일을 첨부해 주세요.' if can_call_tools else
+            '첨부 파일 전체를 계산하려면 도구 호출을 지원하는 모델을 선택해 주세요.')
+        yield 'activity',record('analyze_table','error',detail)
+        options['_table_notice'] = detail
+    if parallel_requested and not can_call_tools:
+        options['_parallel_notice'] = '병렬 분석은 도구 호출 모델이 필요합니다. 현재 모델의 단일 분석으로 답변합니다.'
+        yield 'activity',record('parallel_analyze','error',options['_parallel_notice'])
+    if options['_web'] and not web_search.available(settings):
+        detail = '운영자가 공개 웹 검색 서버를 연결해야 합니다. 이 답변에서는 공개 웹을 검색할 수 없습니다.'
+        yield 'activity',record(web_search.TOOL_NAME,'error',detail)
+        if not (manual_knowledge or options.get('_auto_scope') or selection or options.get('mcp_ids') or options['_history']):
+            decision.update(route='clarify',status='clarification');save()
+            yield 'delta',{'content':detail,'model_output':False}
+            return
+        options['_web'] = False
+        options['_web_notice'] = detail
+    inputs = ()
+    if image_mode == 'vision' or plan.route == 'vision' or plan.use_vision or current_image:
+        if cancelled():raise engine.AnalysisCancelled()
+        inputs = await image_inputs.load(bind,user_id,turn.conversation_id,current_image or source,
+            mode='vision',before_message_id=turn.assistant_id)
+        yield 'activity',record('analyze_image','running','첨부 이미지와 관련 자료를 확인하고 있습니다.')
+        if image_mode == 'vision':
+            plan.route = 'vision'
+        decision['vision'] = True
     decision.setdefault('route',plan.route);decision['status']='running';save()
-    hold=enabled and not (selection and selection.merge_request) and bool(plan.needs_review or plan.uncertain or manual_knowledge or auto_knowledge or options.get('mcp_ids') or selection and selection.mode=='workspace')
+    grounded = bool(plan.needs_review or plan.uncertain or manual_knowledge or auto_knowledge and not inputs
+        or options.get('mcp_ids') or options['_web'] or options['_history'] or selection and selection.mode=='workspace')
+    hold = (grounded or bool(file_request and inputs or options.get('_create_files') or options.get('_tables'))) and not (
+        selection and selection.merge_request)
     # Never replay execution or external writes merely because an answer needs more evidence.
     replay_safe=not options.get('allow_writes') and not (selection and selection.mode=='execute')
     attempts=settings.assistant_max_retrieval_rounds if enabled and replay_safe else 1
@@ -317,7 +362,8 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         if cancelled():raise engine.AnalysisCancelled()
         decision['rounds']=attempt+1
         text='';sources=[];files=[];coverage={}
-        async with aclosing(engine.stream(bind,user_id,turn,selection,connection,settings,cancelled,options=options)) as iterator:
+        image_args = {'images': inputs} if inputs else {}
+        async with aclosing(engine.stream(bind,user_id,turn,selection,connection,settings,cancelled,options=options,**image_args)) as iterator:
             async for kind,payload in iterator:
                 if kind=='delta':
                     text+=payload['content']
@@ -332,25 +378,32 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
                     if kind=='workspace':
                         payload=dict(payload,selection=selection.model_dump(mode='json'),automatic=bool(decision.get('automatic_project')))
                     yield kind,payload
-        missing=routing.invalid_citations(text,sources)
-        uncertain=bool(re.search(r'잘 모르|알 수 없|확인할 수 없|확실하지|추측|모르겠습니다|not sure|do not know|cannot verify',text,re.I))
+        answer = turn.presentation.for_review(text)
+        missing=routing.invalid_citations(answer,sources)
+        uncertain=bool(re.search(r'잘 모르|알 수 없|확인할 수 없|확실하지|추측|모르겠습니다|not sure|do not know|cannot verify',answer,re.I))
         review=routing.Review(verdict='supported')
-        wants_review=hold and settings.assistant_grounding_review and bool(plan.needs_review or plan.uncertain or uncertain or sources or auto_knowledge and not explicit)
+        review_text=answer
+        if files:
+            from app.modules.workflows.models import Artifact
+            with Session(bind) as db:
+                payloads = [json.loads(db.get(Artifact,f['id']).payload_json) for f in files]
+            regular_payloads = [json.dumps(payload,ensure_ascii=False) for payload in payloads
+                                if not (payload.get('analysis') or payload.get('revision_sources'))]
+            if regular_payloads:
+                review_text+='\n\nGenerated file payloads (must also be grounded):\n'+'\n'.join(regular_payloads)
+                missing = routing.invalid_citations(review_text, sources)
+        wants_review=hold and enabled and settings.assistant_grounding_review and bool(plan.needs_review
+            or plan.uncertain or uncertain or sources or inputs and files or auto_knowledge and not explicit)
         if wants_review:
             yield 'activity',record('evidence_review','running','초안의 사실 주장과 실제 조회한 근거를 점검하고 있습니다.')
-            review_text=text
-            if files:
-                from app.modules.workflows.models import Artifact
-                with Session(bind) as db:
-                    review_text+='\n\nGenerated file payloads (must also be grounded):\n'+'\n'.join(db.get(Artifact,f['id']).payload_json for f in files)
-            snippets=await routing.evidence(bind,user_id,turn.conversation_id,selection,sources,text)
+            snippets=await routing.evidence(bind,user_id,turn.conversation_id,selection,sources,review_text)
             await acquire()
             try:
-                async with asyncio.timeout(settings.llm_timeout_seconds):review=await routing.assess(connection,model,question,review_text,snippets,settings)
+                async with asyncio.timeout(settings.llm_timeout_seconds):review=await routing.assess(connection,model,question,review_text,snippets,settings,**image_args)
             finally:await release()
         # A revoked source must not be carried into a new model request as retry feedback.
         await routing.verify(bind,user_id,turn.conversation_id,selection,sources)
-        if hold and (missing or selection and selection.mode=='workspace' and not any(s.get('app')=='gitlab' for s in sources)
+        if missing or hold and (selection and selection.mode=='workspace' and not any(s.get('app')=='gitlab' for s in sources)
                 or plan.route in {'knowledge','both'} and not sources):
             review=routing.Review(verdict='needs_search',query=review.query or plan.query or question[:400],unsupported_claims=['조회되지 않은 출처 또는 요청한 자료의 실제 근거 누락'])
         if hold:
@@ -360,11 +413,16 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
                 yield 'activity',record('evidence_review','complete',label)
         if review.verdict=='supported':
             await routing.verify(bind,user_id,turn.conversation_id,selection,sources)
-            artifacts.finalize(bind,user_id,turn.request_id,[f['id'] for f in files],approve=True)
+            if turn.scheduled:
+                turn.pending_artifacts = [file['id'] for file in files]
+            else:
+                artifacts.finalize(bind,user_id,turn.request_id,[f['id'] for f in files],approve=True)
             coverage.update(source_files=len({s['path'] for s in sources if s.get('app')=='gitlab'}),documents=len({s['document_id'] for s in sources if s.get('app')=='knowledge'}),excerpts=len(sources),app_results=len([s for s in sources if s.get('app')=='mcp']),limitations=['정적 색인과 실제 조회한 발췌 범위입니다. 전체 실행 경로나 답변의 정확성을 보증하지 않습니다.'])
             decision['coverage']=coverage;decision['status']='complete';save()
             yield 'coverage',coverage
             for file in files:yield 'artifact',file
+            if inputs:
+                yield 'activity',record('analyze_image','complete','이미지 분석을 마쳤습니다.')
             if hold:
                 for start in range(0,len(text),120):yield 'delta',{'content':text[start:start+120]}
             return
@@ -378,7 +436,8 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             continue
         await routing.verify(bind,user_id,turn.conversation_id,selection,sources)
         decision['status']='unverified';save()
-        yield 'delta',{'content':ABSTAIN+('\n\n'+decision['retrieval_notice'] if decision.get('retrieval_notice') else '')}
+        yield 'delta',{'content':ABSTAIN+('\n\n'+decision['retrieval_notice'] if decision.get('retrieval_notice') else ''),
+            'model_output':False}
         return
 
 
@@ -388,4 +447,5 @@ async def stream(bind,user_id,turn,selection,connection,settings,cancelled,optio
             async for event in iterator:yield event
     finally:
         # Any draft that did not pass the final review is inaccessible and removed.
-        artifacts.finalize(bind,user_id,turn.request_id,[],approve=False)
+        if not turn.scheduled:
+            artifacts.finalize(bind,user_id,turn.request_id,[],approve=False)

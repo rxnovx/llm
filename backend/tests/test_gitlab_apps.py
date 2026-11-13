@@ -94,7 +94,8 @@ def test_catalog_requires_auth_and_empty_config_needs_no_crypto(client,account,m
 
 def test_oauth_pkce_browser_binding_encryption_and_replay(client,account,gitlab):
     headers = auth(account())
-    query,value = begin(client,headers,popup=True)
+    conversation = create(client, headers)
+    query,value = begin(client,headers,popup=True,chat_id=conversation)
     assert query['scope']==['read_user read_api read_repository'] and query['code_challenge_method']==['S256']
     assert query['redirect_uri']==['http://localhost:3000/apps/gitlab/callback']
     assert 'secret' not in value['authorize_url']
@@ -109,6 +110,9 @@ def test_oauth_pkce_browser_binding_encryption_and_replay(client,account,gitlab)
     response = finish(client,headers,query['state'][0])
     assert response.status_code==200,response.text
     assert response.json()['popup'] is True and response.json()['connection']['username']=='alice-gl'
+    return_path = urlsplit(response.json()['return_path'])
+    assert return_path.path == '/user/settings/apps'
+    assert parse_qs(return_path.query) == {'returnTo': [f'/c/{conversation}']}
     assert finish(client,headers,query['state'][0]).status_code==400
     assert len([call for call in gitlab[0] if call[1]=='/oauth/token'])==1
     with client.db_factory() as db:

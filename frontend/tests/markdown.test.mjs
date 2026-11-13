@@ -12,10 +12,11 @@ const cache = path.resolve("node_modules/.cache");
 mkdirSync(cache, { recursive: true });
 const temporary = mkdtempSync(path.join(cache, "markdown-tests-"));
 for (const [source, output] of [["src/components/chat/MessageContent.tsx", "MessageContent.mjs"],
-  ["src/components/chat/Icons.tsx", "Icons.mjs"], ["src/lib/markdown.ts", "markdown.mjs"]]) {
+  ["src/components/chat/Icons.tsx", "Icons.mjs"], ["src/lib/markdown.ts", "markdown.mjs"], ["src/lib/clipboard.ts", "clipboard.mjs"]]) {
   const code = ts.transpileModule(readFileSync(source, "utf8"), { compilerOptions: {
     module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
-  } }).outputText.replaceAll('"@/lib/markdown"', '"./markdown.mjs"').replaceAll('"./Icons"', '"./Icons.mjs"');
+  } }).outputText.replaceAll('"@/lib/markdown"', '"./markdown.mjs"')
+    .replaceAll('"@/lib/clipboard"', '"./clipboard.mjs"').replaceAll('"./Icons"', '"./Icons.mjs"');
   writeFileSync(path.join(temporary, output), code);
 }
 const { MessageContent, codeText } = await import(pathToFileURL(path.join(temporary, "MessageContent.mjs")).href);

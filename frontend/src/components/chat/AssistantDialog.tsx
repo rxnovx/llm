@@ -8,9 +8,21 @@ import { McpManager } from './McpManager';
 type Preferences={instructions:string;memory_enabled:boolean;revision:number};
 const failure=(e:unknown)=>e instanceof Error?e.message:'요청을 완료하지 못했습니다.';
 const toggle=(items:string[],id:string)=>items.includes(id)?items.filter(v=>v!==id):[...items,id];
-export function AssistantDialog({conversationId,value,onSelect,onClose,admin}:{conversationId:string;value:AssistantSelection;onSelect:(value:AssistantSelection)=>void;onClose:()=>void;admin:boolean}) {
+type Props = {
+  conversationId: string;
+  value: AssistantSelection;
+  onSelect: (value: AssistantSelection) => void;
+  onClose: () => void;
+  onAttachmentReady: (id: string) => void;
+  onAttachmentRemoved: (id: string) => void;
+  admin: boolean;
+  initialTab?: 'knowledge' | 'apps';
+};
+
+export function AssistantDialog({conversationId,value,onSelect,onClose,onAttachmentReady,onAttachmentRemoved,admin,initialTab='knowledge'}:Props) {
   const ref=useRef<HTMLDialogElement>(null);
-  const [tab,setTab]=useState('knowledge'),[selection,setSelection]=useState(value);
+  const attached = useRef(value.document_ids);
+  const [tab,setTab]=useState<string>(initialTab),[selection,setSelection]=useState(value);
   const [bases,setBases]=useState<KnowledgeBase[]>([]),[base,setBase]=useState(''),[documents,setDocuments]=useState<KnowledgeDocument[]>([]);
   const [servers,setServers]=useState<McpServer[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(false),[uploading,setUploading]=useState(false),[reload,setReload]=useState(0);
   const dismiss = useDialogDismiss(onClose, !uploading);
@@ -37,6 +49,24 @@ export function AssistantDialog({conversationId,value,onSelect,onClose,admin}:{c
     const abort=new AbortController();void knowledgeJson<{items:{id:string;username:string}[]}>(`/bases/${base}/members`,{signal:abort.signal}).then(r=>setMembers(r.items)).catch(e=>{if(!abort.signal.aborted)setError(failure(e));});
     return()=>abort.abort();
   },[base,owned,reload]);
+  const useUploadedDocument = (doc: KnowledgeDocument) => {
+    if (doc.base_id) return;
+    if (attached.current.includes(doc.id)) return;
+    if (attached.current.length >= 10) {
+      setError('파일을 저장했습니다. 이 대화에서 한 번에 사용할 첨부는 10개입니다.');
+      return;
+    }
+    attached.current = [...attached.current, doc.id];
+    setSelection(current => ({ ...current, document_ids: [...new Set([...current.document_ids, doc.id])].slice(0, 10) }));
+    onAttachmentReady(doc.id);
+  };
+  const removeDocument = (id: string) => action(async () => {
+    await knowledgeJson(`/documents/${id}`, { method: 'DELETE' });
+    attached.current = attached.current.filter(item => item !== id);
+    setSelection(current => ({ ...current, document_ids: current.document_ids.filter(item => item !== id) }));
+    onAttachmentRemoved(id);
+    setReload(current => current + 1);
+  });
   async function action(work:()=>Promise<void>){setBusy(true);setError('');try{await work();}catch(e){setError(failure(e));}finally{setBusy(false);}}
   const pending=documents.some(d=>(selection.document_ids.includes(d.id)||!!base&&selection.base_ids.includes(base))&&(d.status!=='ready'||d.needs_reindex));
   return <dialog ref={ref} className="cw-dialog cw-knowledge-dialog" aria-labelledby="assistant-dialog-title" {...dismiss}>
@@ -46,7 +76,7 @@ export function AssistantDialog({conversationId,value,onSelect,onClose,admin}:{c
       <label className="cw-knowledge-app">
         <input type="checkbox" checked={selection.parallel_agents}
           onChange={event => setSelection(value => ({ ...value, parallel_agents: event.target.checked }))} />
-        <span>병렬 Agent 분석<small>모델이 독립 질문 2~3개를 나누어 검토하고 결과를 합칩니다.</small></span>
+        <span>병렬 분석 우선 사용<small>자동 처리에서는 질문에 따라 병렬 분석을 선택합니다. 이 옵션은 독립적인 항목을 나눠 검토하도록 모델에 요청합니다.</small></span>
       </label>
       <label className="cw-scope-field">자동 문서 검색<select value={selection.rag_mode} disabled={!selection.automatic} onChange={e=>setSelection(v=>({...v,rag_mode:e.target.value as AssistantSelection['rag_mode']}))}>
         <option value="auto">필요할 때 검색 · 근거 부족 시 재검색</option><option value="always">답변 전에 항상 검색</option><option value="off">자동 문서 검색 끄기</option>
@@ -55,19 +85,19 @@ export function AssistantDialog({conversationId,value,onSelect,onClose,admin}:{c
     <nav className="cw-knowledge-tabs" aria-label="설정 종류">{[['knowledge','파일·지식'],['apps','앱'],['memory','맞춤 설정'],...(admin?[['operations','운영']]:[])].map(([id,label])=><button key={id} className={tab===id?'is-active':''} onClick={()=>setTab(id)} aria-pressed={tab===id}>{label}</button>)}</nav>
     {error&&<p className="cw-inline-error" role="alert">{error}</p>}
     {tab==='knowledge'&&<section className="cw-knowledge-section">
-      <p className="cw-dialog-description">파일을 이 대화에 첨부하거나, 지식베이스에 모아 여러 대화에서 활용하세요. 현재 검색: {mode==='hybrid'?'키워드 + 의미 검색':'키워드 검색'}.</p>
+      <p className="cw-dialog-description">현재 대화에 올린 파일은 준비가 끝나면 입력창에 첨부됩니다. 지식베이스에 올린 자료는 검색에 사용됩니다. 현재 검색 {mode==='hybrid'?'키워드 + 의미 검색':'키워드 검색'}.</p>
       <div className="cw-knowledge-base-list"><label className="cw-scope-field">자료 위치<select value={base} disabled={uploading} onChange={e=>setBase(e.target.value)}><option value="">현재 대화 첨부 · 24시간</option>{bases.map(b=><option key={b.id} value={b.id}>{b.name}{b.owned?'':' · 공유받음'}</option>)}</select></label>
-      </div><UploadQueue key={base||conversationId} baseId={base||undefined} conversationId={base?undefined:conversationId} disabled={busy||!owned} accept={formats} onBusy={setUploading} onChanged={()=>setReload(v=>v+1)} onReady={doc=>{if(!base)setSelection(s=>({...s,document_ids:[...new Set([...s.document_ids,doc.id])].slice(0,10)}));}}/>
+      </div><UploadQueue key={base||conversationId} baseId={base||undefined} conversationId={base?undefined:conversationId} disabled={busy||!owned} accept={formats} onBusy={setUploading} onChanged={()=>setReload(v=>v+1)} onReady={useUploadedDocument}/>
       {busy&&<p role="status">자료를 처리하고 있습니다…</p>}
       <form className="cw-knowledge-inline" onSubmit={e=>{e.preventDefault();void action(async()=>{const created=await knowledgeJson<KnowledgeBase>('/bases',{method:'POST',body:JSON.stringify({name})});setBases(b=>[...b,created]);setBase(created.id);setName('');});}}><input aria-label="새 지식베이스 이름" placeholder="새 지식베이스 이름" value={name} onChange={e=>setName(e.target.value)} maxLength={120}/><button className="cw-small-button" disabled={busy||!name.trim()||bases.filter(b=>b.owned).length>=20}>만들기</button></form>
       <div className="cw-knowledge-choices" aria-label="대화에서 사용할 지식베이스">{bases.map(b=><label key={b.id}><input type="checkbox" checked={selection.base_ids.includes(b.id)} disabled={!selection.base_ids.includes(b.id)&&selection.base_ids.length>=5} onChange={()=>setSelection(s=>({...s,base_ids:toggle(s.base_ids,b.id)}))}/>{b.name}</label>)}</div>
       <div className="cw-knowledge-documents">{!documents.length&&<p className="cw-dialog-description">등록된 자료가 없습니다.</p>}{documents.map(d=><div key={d.id} className="cw-knowledge-document"><div>{!base&&d.status!=='image'&&<input type="checkbox" aria-label={`${d.filename} 첨부 선택`} checked={selection.document_ids.includes(d.id)} disabled={!selection.document_ids.includes(d.id)&&selection.document_ids.length>=10} onChange={()=>setSelection(s=>({...s,document_ids:toggle(s.document_ids,d.id)}))}/>}<strong>{d.filename}</strong><small>{d.status==='image'?'원본 이미지':d.status==='ready'?`${d.chunk_count}개 구간 · 검색 준비됨`:d.status==='error'?'색인 실패':d.status==='indexing'?'내용을 색인하는 중…':'색인 대기 중'}{d.needs_reindex?' · 재색인 필요':''}</small>{d.error&&<p role="alert">{d.error}</p>}</div>
-        {owned&&<div>{d.status!=='image'&&<button className="cw-text-button" disabled={busy||d.status==='indexing'} onClick={()=>void action(async()=>{await knowledgeJson(`/documents/${d.id}/reindex`,{method:'POST'});setReload(v=>v+1);})}>재색인</button>}<button className="cw-text-button" disabled={busy} onClick={()=>void action(async()=>{await knowledgeJson(`/documents/${d.id}`,{method:'DELETE'});setSelection(s=>({...s,document_ids:s.document_ids.filter(id=>id!==d.id)}));setReload(v=>v+1);})}>삭제</button></div>}</div>)}</div>
+        {owned&&<div>{d.status!=='image'&&<button className="cw-text-button" disabled={busy||d.status==='indexing'} onClick={()=>void action(async()=>{await knowledgeJson(`/documents/${d.id}/reindex`,{method:'POST'});setReload(v=>v+1);})}>재색인</button>}<button className="cw-text-button" disabled={busy} onClick={()=>void removeDocument(d.id)}>삭제</button></div>}</div>)}</div>
       {base&&owned&&<details className="cw-knowledge-sharing"><summary>공유 및 관리</summary><p>등록한 사용자에게 자료 검색·읽기를 허용합니다.</p><form className="cw-knowledge-inline" onSubmit={e=>{e.preventDefault();void action(async()=>{await knowledgeJson(`/bases/${base}/members`,{method:'POST',body:JSON.stringify({username})});setUsername('');setReload(v=>v+1);});}}><input aria-label="공유할 사용자 이름" value={username} onChange={e=>setUsername(e.target.value)} placeholder="사용자 이름"/><button disabled={busy||!username.trim()} className="cw-small-button">공유</button></form>{members.map(m=><p key={m.id}>{m.username} <button className="cw-text-button" onClick={()=>void action(async()=>{await knowledgeJson(`/bases/${base}/members/${m.id}`,{method:'DELETE'});setReload(v=>v+1);})}>공유 해제</button></p>)}<button className="cw-text-button" disabled={busy} onClick={()=>void action(async()=>{await knowledgeJson(`/bases/${base}`,{method:'DELETE'});setBases(b=>b.filter(v=>v.id!==base));setSelection(s=>({...s,base_ids:s.base_ids.filter(id=>id!==base)}));setBase('');})}>이 지식베이스와 자료 삭제</button></details>}
     </section>}
     {tab==='apps'&&<section className="cw-knowledge-section"><p className="cw-dialog-description">이 대화에서 사용할 앱을 선택하세요. 모델이 질문에 필요한 도구를 호출합니다.</p>{!servers.length&&<p>운영자가 등록한 MCP 앱이 없습니다.</p>}{servers.map(s=><label className="cw-knowledge-app" key={s.id}><input type="checkbox" checked={selection.mcp_ids.includes(s.id)} disabled={!selection.mcp_ids.includes(s.id)&&selection.mcp_ids.length>=5} onChange={()=>setSelection(v=>({...v,mcp_ids:toggle(v.mcp_ids,s.id)}))}/><span><strong>{s.name}</strong><small>읽기 {s.read_tools.length}개 · 쓰기 {s.write_tools.length}개</small></span></label>)}<label className="cw-knowledge-app"><input type="checkbox" checked={selection.allow_writes} onChange={e=>setSelection(v=>({...v,allow_writes:e.target.checked}))}/><span>선택한 앱의 쓰기 도구 허용<small>외부 서비스에 변경이 발생할 수 있습니다. 기본값은 읽기 전용입니다.</small></span></label></section>}
     {tab==='memory'&&<section className="cw-knowledge-section"><form onSubmit={e=>{e.preventDefault();void action(async()=>setPreferences(await assistantJson<Preferences>('/preferences',{method:'PUT',body:JSON.stringify(preferences)})));}}><label className="cw-scope-field">답변 방식과 내 정보<textarea rows={5} maxLength={1800} value={preferences.instructions} onChange={e=>setPreferences(p=>({...p,instructions:e.target.value}))} placeholder="예: 한국어로 간결하게 답변하고, 예시는 Python을 사용해 주세요."/></label><label className="cw-knowledge-app"><input type="checkbox" checked={preferences.memory_enabled} onChange={e=>setPreferences(p=>({...p,memory_enabled:e.target.checked}))}/>저장한 기억을 대화에서 사용</label><button className="cw-small-button" disabled={busy}>맞춤 설정 저장</button></form>
-      <p className="cw-dialog-description">기억은 직접 등록한 내용만 저장합니다. 사용을 꺼도 목록은 남으며 개별 삭제할 수 있습니다.</p><form className="cw-knowledge-inline" onSubmit={e=>{e.preventDefault();void action(async()=>{const row=await assistantJson<{id:string;content:string}>('/memories',{method:'POST',body:JSON.stringify({content:memory})});setMemories(m=>[...m,row]);setMemory('');});}}><input aria-label="저장할 기억" maxLength={600} placeholder="기억해 둘 내용" value={memory} onChange={e=>setMemory(e.target.value)}/><button className="cw-small-button" disabled={busy||!memory.trim()}>기억 저장</button></form>{memories.map(m=><div className="cw-knowledge-document" key={m.id}><p>{m.content}</p><button className="cw-text-button" onClick={()=>void action(async()=>{await assistantJson(`/memories/${m.id}`,{method:'DELETE'});setMemories(v=>v.filter(x=>x.id!==m.id));})}>삭제</button></div>)}</section>}
+      <p className="cw-dialog-description">채팅에서 “답변은 짧게 써 달라고 기억해 줘”처럼 요청하거나 아래에서 직접 저장하세요. 사용을 꺼도 목록은 남으며 개별 삭제할 수 있습니다.</p><form className="cw-knowledge-inline" onSubmit={e=>{e.preventDefault();void action(async()=>{const row=await assistantJson<{id:string;content:string}>('/memories',{method:'POST',body:JSON.stringify({content:memory})});setMemories(m=>[...m,row]);setMemory('');});}}><input aria-label="저장할 기억" maxLength={600} placeholder="기억해 둘 내용" value={memory} onChange={e=>setMemory(e.target.value)}/><button className="cw-small-button" disabled={busy||!memory.trim()}>기억 저장</button></form>{memories.map(m=><div className="cw-knowledge-document" key={m.id}><p>{m.content}</p><button className="cw-text-button" onClick={()=>void action(async()=>{await assistantJson(`/memories/${m.id}`,{method:'DELETE'});setMemories(v=>v.filter(x=>x.id!==m.id));})}>삭제</button></div>)}</section>}
     {tab==='operations'&&admin&&<McpManager/>}
     <footer className="cw-dialog-footer"><span>지식 {selection.base_ids.length}개 · 첨부 {selection.document_ids.length}개 · 앱 {selection.mcp_ids.length}개{pending?' · 색인 완료 후 적용할 수 있습니다.':''}</span><button className="cw-primary-button" disabled={busy||uploading||pending} onClick={()=>void action(async()=>{
       const scopes=await Promise.all(selection.base_ids.map(id=>knowledgeJson<{items:KnowledgeDocument[]}>(`/documents?base_id=${id}`)));

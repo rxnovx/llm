@@ -1,4 +1,5 @@
 import { authenticatedFetch } from "./authenticated-fetch";
+import { conversationLocation, workspaceConversationId } from "./workspace-navigation";
 
 export type AppConnection = { id: string; app: "gitlab"; provider_id: string; username: string; display_name: string; status: "connected" | "needs_reconnect"; can_publish?: boolean };
 export type AppProvider = { id: string; name: string; base_url: string; ready: boolean; reason: string | null; publish_enabled?: boolean };
@@ -43,19 +44,19 @@ export function takeOAuthDraft(owner: string, chat: string | null): string | nul
   } catch { return null; }
 }
 export function oauthReturnPath(owner: string | undefined) {
+  const settings = { pathname: "/user/settings/apps", search: "" };
   try {
     const item = JSON.parse(sessionStorage.getItem(DRAFT_KEY) ?? "null");
-    if (item?.owner === owner && item.until > Date.now() && typeof item.chat === "string"
-        && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(item.chat))
-      return `/user/settings/apps?chat=${item.chat}`;
+    if (item && item.owner === owner && item.until > Date.now() && typeof item.chat === "string")
+      return conversationLocation(settings, item.chat);
   } catch { /* Storage may be unavailable. */ }
-  return "/user/settings/apps";
+  return settings.pathname;
 }
 export async function connectGitlab(provider: string, publish = false) {
   const popup = window.open("about:blank", "_blank", "popup,width=620,height=780");
   if (popup) popup.opener = null;
   try {
-    const chat = new URLSearchParams(window.location.search).get("chat");
+    const chat = workspaceConversationId(window.location);
     const data = await appsJson<{ authorize_url: string }>(`/gitlab/${encodeURIComponent(provider)}/authorize`, {
       method: "POST", body: JSON.stringify({ chat_id: chat, popup: !!popup, ...(publish ? { publish } : {}) }),
     });

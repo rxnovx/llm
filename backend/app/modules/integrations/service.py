@@ -165,7 +165,10 @@ async def complete(bind, user_id, auth_version, session_id, state, code, denial,
         if isinstance(error,(HTTPException,transport.GitlabError)):
             raise
         raise HTTPException(409,'GitLab 연결을 저장하지 못했습니다. 다시 연결해 주세요.') from None
-    return {'connection':result,'popup':attempt.popup,'return_path':'/user/settings/apps'+('?chat='+attempt.chat_id if attempt.chat_id else '')}
+    return_path = '/user/settings/apps'
+    if attempt.chat_id:
+        return_path += '?' + urlencode({'returnTo': f'/c/{attempt.chat_id}'})
+    return {'connection': result, 'popup': attempt.popup, 'return_path': return_path}
 
 
 @dataclass

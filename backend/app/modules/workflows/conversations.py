@@ -1,10 +1,11 @@
 """User-owned branches, response versions and project context."""
+import hashlib
 import json
 import time
 from uuid import uuid4
 from fastapi import HTTPException
-from sqlalchemy import delete,func,or_,select
-from sqlalchemy.orm import object_session
+from sqlalchemy import and_,delete,func,or_,select
+from sqlalchemy.orm import load_only, object_session
 from app.modules.chat.models import Conversation,Message,ContextNote
 from app.modules.chat.scheduler import lock
 from app.modules.assistant.models import TurnContext,TurnDecision
@@ -14,7 +15,7 @@ from app.modules.knowledge import service as knowledge
 from app.modules.knowledge.models import Document
 from .models import (Project,ProjectConversation,ConversationState,MessageVersion,MessageState,
     AttachmentScope,Artifact,ArtifactScope,AutoSummary,ToolEvidence)
-from .projects import project_access, project_role
+from .projects import available_projects, project_access, project_role
 
 
 def owned(db,user_id,conversation_id,*,idle=False):
@@ -104,10 +105,12 @@ def payload(item,run_id=None):
 def shared_payload(item, base_documents):
     record = item.source_record
     sources = json.loads(record.sources_json) if record else []
+    routing = json.loads(item.decision_record.data_json) if item.decision_record else {}
+    presentation = {'routing': {'canvas': routing['canvas']}} if routing.get('canvas') else {}
     return {key: getattr(item, key) for key in ('id', 'role', 'content', 'status', 'model', 'is_test', 'created_at')} | {
         'error': None,
         'sources': [source for source in sources if source.get('app') == 'knowledge' and source.get('document_id') in base_documents],
-    }
+    } | presentation
 
 
 def state_for(db,message):
@@ -250,31 +253,71 @@ def preserve_shared_files(db,conversation_id):
     db.flush()
 
 
-def search(db,user_id,query='',project_id=None,limit=50,offset=0):
+def _search_pattern(term):
+    return '%' + term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+
+
+def _search_hit(row, start, *, include_hash=False):
+    hit = {'message_id': row.id, 'role': row.role, 'excerpt': row.content[start:start + 220]}
+    if include_hash:
+        hit['content_hash'] = hashlib.sha256(row.content.encode()).hexdigest()
+    return hit
+
+
+def search(db,user_id,query='',project_id=None,limit=50,offset=0,*,assistant_scope=None):
     statement = select(Conversation)
     if project_id:
         project_access(db, user_id, project_id)
         statement=statement.join(ProjectConversation,ProjectConversation.conversation_id==Conversation.id).where(ProjectConversation.project_id==str(project_id))
     else:
         statement = statement.where(Conversation.user_id == user_id)
-    pattern='%'+query.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
+        if assistant_scope:
+            statement = statement.where(~select(ProjectConversation.conversation_id).where(
+                ProjectConversation.conversation_id == Conversation.id).exists())
+    if assistant_scope:
+        statement = statement.where(Conversation.id != assistant_scope)
+        if project_id:
+            statement = statement.where(ProjectConversation.project_id.in_(available_projects(user_id).with_only_columns(Project.id)))
+    terms = query.split()[:6] if assistant_scope else [query]
+    patterns = [_search_pattern(term) for term in terms]
     if query:
-        visible = or_(Conversation.user_id == user_id, Message.status == 'complete')
-        matches=select(Message.id).where(Message.conversation_id==Conversation.id,visible,Message.content.ilike(pattern,escape='\\')).exists()
-        statement=statement.where(or_(Conversation.title.ilike(pattern,escape='\\'),matches))
+        visible = Message.status == 'complete' if assistant_scope else or_(Conversation.user_id == user_id, Message.status == 'complete')
+        matches = select(Message.id).where(Message.conversation_id == Conversation.id, visible,
+            *(Message.content.ilike(pattern, escape='\\') for pattern in patterns)).exists()
+        statement = statement.where(or_(matches, and_(
+            *(Conversation.title.ilike(pattern, escape='\\') for pattern in patterns))))
+    if assistant_scope:
+        statement = statement.options(load_only(Conversation.id, Conversation.title, Conversation.user_id))
     rows=list(db.scalars(statement.order_by(Conversation.updated_at.desc(),Conversation.id.desc()).offset(offset).limit(limit+1)))
     result=[]
     from app.modules.chat.router import conversation_data
     for row in rows[:limit]:
         shared = row.user_id != user_id
-        data=conversation_data(row, shared=shared)
+        if assistant_scope:
+            if project_id:
+                link = db.get(ProjectConversation, row.id)
+                if not link or link.project_id != project_id or not project_role(db, db.get(Project, project_id), row.user_id):
+                    continue
+            data = {'id': row.id, 'title': row.title}
+        else:
+            data=conversation_data(row, shared=shared)
         if query:
-            matching = select(Message).where(Message.conversation_id==row.id,Message.content.ilike(pattern,escape='\\'))
-            if shared:
+            matching = select(Message).where(Message.conversation_id == row.id,
+                *(Message.content.ilike(pattern, escape='\\') for pattern in patterns))
+            if shared or assistant_scope:
                 matching = matching.where(Message.status == 'complete')
-            hit=db.scalar(matching.order_by(Message.position.desc()).limit(1))
+            hit = db.execute(matching.with_only_columns(Message.id, Message.role, Message.content)
+                             .order_by(Message.position.desc()).limit(1)).first()
             if hit:
-                at=hit.content.casefold().find(query.casefold());start=max(0,at-60)
-                data['match']={'message_id':hit.id,'role':hit.role,'excerpt':hit.content[start:start+220]}
+                lowered = hit.content.casefold()
+                at = min((position for term in terms if (position := lowered.find(term.casefold())) >= 0), default=0)
+                start = max(0, at - 60)
+                data['match'] = _search_hit(hit, start, include_hash=bool(assistant_scope))
+        if assistant_scope and 'match' not in data:
+            hit = db.execute(select(Message.id, Message.role, Message.content).where(
+                Message.conversation_id == row.id, Message.status == 'complete', Message.content != '')
+                .order_by(Message.position.desc()).limit(1)).first()
+            if hit:
+                data['match'] = _search_hit(hit, 0, include_hash=True)
         result.append(data)
     return {'items':result,'has_more':len(rows)>limit}

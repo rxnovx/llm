@@ -27,7 +27,8 @@ test("회원가입부터 프로필·사진·재접속·로그아웃까지", asyn
   await expect(page.getByRole("status")).toContainText("프로필을 저장했습니다.");
   await expect(page.locator(".settings-identity")).toContainText("변경된 표시 이름");
   const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aDV8AAAAASUVORK5CYII=", "base64");
-  await page.locator('input[type="file"]').setInputFiles({ name: "avatar.png", mimeType: "image/png", buffer: pixel });
+  await page.getByRole("dialog", { name: "설정", exact: true }).locator('input[type="file"]')
+    .setInputFiles({ name: "avatar.png", mimeType: "image/png", buffer: pixel });
   await expect(page.getByRole("status")).toContainText("프로필 사진을 업로드했습니다.");
   await expect(page.locator('.settings-content img[src^="/api/avatars/"]')).toBeVisible();
   await page.reload();

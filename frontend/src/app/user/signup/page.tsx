@@ -39,7 +39,7 @@ export default function SignupPage() {
         accept_terms: values.consent, locale: "ko", time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       });
       if (!canNavigate()) return;
-      if (data.email_verification_required) { router.replace(workspaceHref(`/user/verify-email?email=${encodeURIComponent(values.email)}`, window.location.search), { scroll: false }); return; }
+      if (data.email_verification_required) { router.replace(workspaceHref(`/user/verify-email?email=${encodeURIComponent(values.email)}`, window.location), { scroll: false }); return; }
       await useAuthStore.getState().login({ loginId: values.username, password: values.password }, complete);
     } catch (caught) { setError(getApiErrorMessage(caught, "회원가입을 완료하지 못했습니다.")); }
     finally { setBusy(false); }

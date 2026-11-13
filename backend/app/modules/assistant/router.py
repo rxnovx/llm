@@ -3,7 +3,7 @@ from typing import Annotated
 from uuid import UUID
 from fastapi import APIRouter,Depends,HTTPException
 from pydantic import BaseModel,ConfigDict,Field
-from sqlalchemy import func,select,delete
+from sqlalchemy import func,select
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.core.config import get_settings
@@ -12,8 +12,8 @@ from app.modules.admin.router import Admin
 from app.modules.auth.audit import add_audit_log
 from app.modules.chat.scheduler import lock
 from app.modules.knowledge.models import Document,VectorGarbage
-from . import mcp
-from .models import Memory,Preference,McpSetting
+from . import mcp, personal_tools
+from .models import Preference,McpSetting
 
 router=APIRouter(prefix='/assistant',tags=['assistant'])
 Database=Annotated[Session,Depends(get_db)]
@@ -50,18 +50,19 @@ def edit_preferences(data: PreferencesInput,context: Authenticated,db: Database)
 
 @router.get('/memories')
 def memories(context: Authenticated,db: Database):
-    return {'items':[{'id':r.id,'content':r.content} for r in db.scalars(select(Memory).where(Memory.user_id==context.user.id).order_by(Memory.created_at))]}
+    return {'items': personal_tools.list_memories(db, context.user.id)}
 
 @router.post('/memories',status_code=201)
 def remember(data: MemoryInput,context: Authenticated,db: Database):
-    lock(db)
-    if db.scalar(select(func.count()).select_from(Memory).where(Memory.user_id==context.user.id))>=20:raise HTTPException(422,'기억은 최대 20개까지 저장할 수 있습니다.')
-    row=Memory(user_id=context.user.id,content=data.content);db.add(row);db.commit();db.refresh(row)
-    return {'id':row.id,'content':row.content}
+    row = personal_tools.save_memory(db, context.user.id, data.content)
+    db.commit()
+    return row
 
 @router.delete('/memories/{memory_id}')
 def forget(memory_id: UUID,context: Authenticated,db: Database):
-    db.execute(delete(Memory).where(Memory.id==str(memory_id),Memory.user_id==context.user.id));db.commit();return {'deleted':True}
+    personal_tools.delete_memory(db, context.user.id, memory_id)
+    db.commit()
+    return {'deleted':True}
 
 @router.get('/mcp/servers')
 def servers(context: Admin,db: Database):return {'items':[s.model_dump() for s in mcp.servers(db)]}

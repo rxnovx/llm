@@ -8,17 +8,18 @@ from uuid import UUID,uuid4
 from fastapi import APIRouter,Depends,HTTPException,Query,Response
 from pydantic import BaseModel,ConfigDict,Field
 from sqlalchemy import and_,delete,func,select,update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
 from app.modules.auth.models import User
-from app.modules.chat import history
+from app.modules.chat import canvas, history
 from app.modules.chat.models import Conversation,Message
 from app.modules.chat.scheduler import lock
 from app.modules.knowledge.models import KnowledgeBase,Document
 from app.modules.knowledge import service as knowledge
 from . import conversations as service, artifacts, document_formats
-from .models import Project,ProjectConversation,ProjectMember,MessageVersion,ConversationState,UploadAttempt,Feedback,Artifact
+from .models import Project,ProjectConversation,ProjectMember,MessageVersion,ConversationState,UploadAttempt,Feedback,Artifact,CanvasDraft,CanvasVersionDraft
 from .projects import available_projects, project_access
 
 router=APIRouter(prefix='/workflows',tags=['workflows'])
@@ -58,6 +59,13 @@ class ExportInput(BaseModel):
     model_config=ConfigDict(extra='forbid')
     format: artifacts.ExportFormat
     name: str=Field('대화 결과',min_length=1,max_length=140)
+
+
+class CanvasInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    content: str = Field(max_length=200_000, pattern=r'^[^\x00]*$')
+    revision: int = Field(ge=0, lt=2_147_483_647)
+    version_id: UUID | None = None
 
 
 class UploadInput(BaseModel):
@@ -237,6 +245,57 @@ def select_version(message_id: UUID,version_id: UUID,context: Authenticated,db: 
     return detail(db,conversation,message_limit)|{'forked':False}
 
 
+def canvas_source(db: Session, user_id: str, message_id: UUID) -> Message:
+    message, _ = service.message_owned(db, user_id, message_id)
+    if message.role != 'assistant' or message.status != 'complete':
+        raise HTTPException(409, '완료된 답변에서 캔버스를 편집할 수 있습니다.')
+    return message
+
+
+def canvas_storage(message: Message, expected: UUID | None):
+    routing = json.loads(message.decision_record.data_json) if message.decision_record else {}
+    selection = routing.get('canvas')
+    version = message.workflow_state.active_version if message.workflow_state else None
+    if expected is not None and str(expected) != version:
+        raise HTTPException(409, '답변 버전이 바뀌었습니다. 대화를 새로고침하세요.')
+    if selection and version:
+        return selection, CanvasVersionDraft, CanvasVersionDraft.version_id, version
+    return selection, CanvasDraft, CanvasDraft.message_id, message.id
+
+
+@router.get('/messages/{message_id}/canvas')
+def read_canvas(message_id: UUID, context: Authenticated, db: Database, version_id: UUID | None = None):
+    message = canvas_source(db, context.user.id, message_id)
+    selection, model, _, key = canvas_storage(message, version_id)
+    draft = db.get(model, key)
+    if draft is None:
+        return {'content': canvas.original(message.content, selection), 'revision': 0}
+    return {'content': draft.content, 'revision': draft.revision}
+
+
+@router.put('/messages/{message_id}/canvas')
+def save_canvas(message_id: UUID, data: CanvasInput, context: Authenticated, db: Database):
+    lock(db)
+    message = canvas_source(db, context.user.id, message_id)
+    _, model, identifier, key = canvas_storage(message, data.version_id)
+    next_revision = data.revision + 1
+    conflict = '다른 창에서 저장한 변경사항이 있습니다. 저장본을 확인해 주세요.'
+    if data.revision == 0:
+        db.add(model(**{identifier.key: key}, content=data.content, revision=next_revision))
+    else:
+        result = db.execute(update(model)
+            .where(identifier == key, model.revision == data.revision)
+            .values(content=data.content, revision=next_revision))
+        if result.rowcount != 1:
+            raise HTTPException(409, conflict)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, conflict) from None
+    return {'content': data.content, 'revision': next_revision}
+
+
 @router.get('/formats')
 def formats(context: Authenticated):return {'formats':[file_format for file_format in artifacts.formats() if file_format != 'pptx']}
 
@@ -274,6 +333,8 @@ def preview(artifact_id: UUID,context: Authenticated,db: Database):
             for index, slide in enumerate(data['slides'], 1))
     result = service.artifact_public(row) | {'content': content[:20000], 'columns': data['columns'], 'rows': data['rows'][:100],
         'preview_truncated': len(content) > 20000 or len(data['rows']) > 100}
+    if 'analysis' in data:
+        result['kind'] = 'table_analysis'
     if row.format == 'html':
         result.update(html_preview=document_formats.html_preview(row.data), preview_truncated=False, content='')
     return result

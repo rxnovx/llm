@@ -6,15 +6,18 @@ import json
 import math
 from pathlib import Path
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 from xml.sax.saxutils import escape
 from fastapi import HTTPException
 from pydantic import BaseModel,ConfigDict,Field,model_validator
-from sqlalchemy import func,select,delete,update
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
+from app.modules.auth.models import User
+from app.modules.chat.models import Conversation, Message
 from app.modules.chat.scheduler import lock
-from .models import Artifact
-from .conversations import artifact_public,message_owned
+from .models import Artifact, ArtifactScope, MessageState
+from .conversations import artifact_public, message_owned, project_for
+from .projects import project_access
 from . import document_formats
 
 MIME={'md':'text/markdown; charset=utf-8','txt':'text/plain; charset=utf-8','csv':'text/csv; charset=utf-8',
@@ -26,12 +29,15 @@ MIME={'md':'text/markdown; charset=utf-8','txt':'text/plain; charset=utf-8','csv
     'png':'image/png','jpg':'image/jpeg','webp':'image/webp'}
 MAX_RESULT_BYTES = 10 * 1024 * 1024
 MAX_FILES_PER_RUN = 3
+REVISION_DRAFT = 'revision_draft'
+DRAFT_STATUSES = ('draft', REVISION_DRAFT)
 DOCUMENT_TOOL = 'create_document'
 AUDIO_TOOL = 'create_audio'
 ARCHIVE_TOOL = 'create_archive'
 FILE_TOOLS = {DOCUMENT_TOOL, AUDIO_TOOL, ARCHIVE_TOOL}
 ExportFormat = Literal['md', 'txt', 'csv', 'xlsx', 'pdf', 'html', 'docx']
 DocumentFormat = Literal['md', 'txt', 'csv', 'xlsx', 'pdf', 'html', 'docx', 'pptx']
+DOCUMENT_FORMATS = get_args(DocumentFormat)
 
 
 class SlideInput(BaseModel):
@@ -82,6 +88,15 @@ def requested_tools(question: str) -> set[str]:
     if not requested and re.search(r'다운로드|파일.{0,15}(?:만들|생성|정리|내보)|export', question, re.I):
         requested.add(DOCUMENT_TOOL)
     return requested
+
+
+def planning_hint(question: str) -> bool:
+    """Find requests for a deliverable even when a file extension is omitted."""
+    return bool(re.search(
+        r'(?:발표|프레젠테이션|보고서|스프레드시트|표|문서|파일)(?:용)?(?:으?로|을|를)?'
+        r'[^\n.!?]{0,48}(?:정리|만들|보내|작성|달라|줘)|'
+        r'\b(?:turn|prepare|put|convert)\b[^\n.!?]{0,72}\b(?:presentation|deck|slides|report|downloadable)\b',
+        question, re.I))
 
 
 def formats():
@@ -168,12 +183,16 @@ def build(data):
 def create(bind,user_id,message_id,run_id,args,*,ready=False,expected_content_hash=None):
     try:data=DocumentInput.model_validate(args)
     except ValueError:raise HTTPException(422,'파일 이름·형식·본문 또는 표 데이터를 확인하세요.') from None
-    if data.format not in formats():raise HTTPException(503,'이 파일 형식의 문서 생성 의존성을 설치해야 합니다.')
-    try:raw=build(data)
-    except ImportError:raise HTTPException(503,'문서 생성 의존성을 확인하세요.') from None
-    except (ValueError,KeyError):raise HTTPException(422,'문서를 생성하지 못했습니다. 내용·표·글꼴을 확인하세요.') from None
+    raw = render(data)
     return store(bind, user_id, message_id, run_id, name=file_name(data.name, data.format), file_format=data.format, raw=raw,
                  payload_json=data.model_dump_json(), ready=ready, expected_content_hash=expected_content_hash)
+
+
+def render(data: DocumentInput) -> bytes:
+    if data.format not in formats():raise HTTPException(503,'이 파일 형식의 문서 생성 의존성을 설치해야 합니다.')
+    try:return build(data)
+    except ImportError:raise HTTPException(503,'문서 생성 의존성을 확인하세요.') from None
+    except (ValueError,KeyError):raise HTTPException(422,'문서를 생성하지 못했습니다. 내용·표·글꼴을 확인하세요.') from None
 
 
 def file_name(name: str, file_format: str) -> str:
@@ -181,29 +200,105 @@ def file_name(name: str, file_format: str) -> str:
     return str(Path(stem).with_suffix('.' + file_format))
 
 
+def before_position(conversation_id, message_id):
+    return select(Message.position).where(
+        Message.id == str(message_id), Message.conversation_id == str(conversation_id),
+    ).correlate(None).scalar_subquery()
+
+
+def visible_results(db, user_id, conversation_id, formats, *, before_message_id=None, artifact_id=None,
+                    names=(), limit=1, for_update=False):
+    """Ready files on active answers in this conversation, including forked file links."""
+    linked = select(ArtifactScope.artifact_id).where(
+        ArtifactScope.artifact_id == Artifact.id, ArtifactScope.message_id == Message.id,
+    ).exists()
+    candidates = (
+        select(Artifact, Message.position, MessageState.artifact_ids_json)
+        .select_from(Message)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .join(User, User.id == Conversation.user_id)
+        .join(MessageState, MessageState.message_id == Message.id)
+        .join(Artifact, or_(Artifact.message_id == Message.id, linked))
+        .where(
+            Conversation.id == str(conversation_id), Conversation.user_id == user_id,
+            User.is_active.is_(True), User.registration_status == 'approved',
+            Message.role == 'assistant', Message.status == 'complete',
+            Artifact.owner_id == user_id, Artifact.status == 'ready',
+            Artifact.format.in_(formats),
+        )
+    )
+    if before_message_id is not None:
+        candidates = candidates.where(Message.position < before_position(conversation_id, before_message_id))
+    if artifact_id is not None:
+        candidates = candidates.where(Artifact.id == str(artifact_id))
+    if names:
+        candidates = candidates.where(func.lower(Artifact.name).in_(names))
+    if for_update:
+        candidates = candidates.with_for_update(of=Artifact)
+    results = {}
+    for item, position, active_ids in db.execute(candidates.order_by(
+        Message.position.desc(), Artifact.created_at.desc(), Artifact.id.desc(),
+    )):
+        if item.id not in results and item.id in json.loads(active_ids or '[]'):
+            results[item.id] = (item, position)
+            if len(results) == limit:
+                break
+    return list(results.values())
+
+
+def verify_revision_source(db, user_id, message, conversation, file_format, source_id, source_hash):
+    project = project_for(db, conversation.id)
+    if project:
+        project_access(db, user_id, project.id, write=True)
+    matches = visible_results(db, user_id, conversation.id, (file_format,), before_message_id=message.id,
+        artifact_id=source_id, for_update=True)
+    if not matches or matches[0][0].sha256 != source_hash:
+        raise HTTPException(409, '원본 결과 파일이 바뀌었거나 삭제되었습니다. 현재 파일을 다시 확인하세요.')
+
+
 def store(bind, user_id, message_id, run_id, *, name, file_format, raw, payload_json,
-          ready=False, expected_content_hash=None):
+          ready=False, expected_content_hash=None, revision_sources=()):
     if len(raw) > MAX_RESULT_BYTES:
         raise HTTPException(413, '결과 파일이 10MiB를 초과합니다.')
+    status = 'ready' if ready else 'draft'
+    if revision_sources:
+        payload_json = json.dumps(json.loads(payload_json) | {'revision_sources': revision_sources}, ensure_ascii=False)
+        status = REVISION_DRAFT
     with Session(bind,expire_on_commit=False) as db:
         lock(db);message,conversation=message_owned(db,user_id,message_id,idle=ready)
         if ready and (message.status!='complete' or expected_content_hash and hashlib.sha256(message.content.encode()).hexdigest()!=expected_content_hash):raise HTTPException(409,'답변이 변경되었습니다. 현재 답변에서 다시 내보내세요.')
         if not ready and (message.status!='pending' or conversation.generation_id!=str(run_id) or conversation.cancel_requested):raise HTTPException(409,'취소되었거나 완료된 요청의 파일은 저장하지 않습니다.')
+        for source in revision_sources:
+            verify_revision_source(db, user_id, message, conversation, source['format'], source['id'], source['sha256'])
         count,size=db.execute(select(func.count(Artifact.id),func.coalesce(func.sum(Artifact.size),0)).where(Artifact.owner_id==user_id)).one()
         if count>=200 or size+len(raw)>100*1024*1024:raise HTTPException(422,'결과 파일 저장 한도입니다. 필요 없는 파일을 삭제하세요.')
         if db.scalar(select(func.count()).select_from(Artifact).where(Artifact.run_id==str(run_id)))>=MAX_FILES_PER_RUN:raise HTTPException(422,'한 번에 결과 파일은 3개까지 만들 수 있습니다.')
-        row=Artifact(owner_id=user_id,message_id=message.id,run_id=str(run_id),name=name,format=file_format,status='ready' if ready else 'draft',
+        row=Artifact(owner_id=user_id,message_id=message.id,run_id=str(run_id),name=name,format=file_format,status=status,
             data=raw,size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),payload_json=payload_json)
         db.add(row);db.commit();return artifact_public(row)
 
 
 def finalize(bind,user_id,run_id,ids,*,approve):
     with Session(bind) as db:
-        query=select(Artifact).where(Artifact.owner_id==user_id,Artifact.run_id==str(run_id),Artifact.status=='draft')
-        for row in db.scalars(query):
-            if approve and row.id in ids:row.status='ready'
-            else:db.delete(row)
+        settle_drafts(db,user_id,run_id,ids if approve else ())
         db.commit()
+
+
+def settle_drafts(db,user_id,run_id,approved_ids):
+    query=select(Artifact).where(Artifact.owner_id==user_id,Artifact.run_id==str(run_id),
+        Artifact.status.in_(DRAFT_STATUSES))
+    for row in db.scalars(query):
+        if row.id not in approved_ids:
+            db.delete(row)
+            continue
+        if row.status == REVISION_DRAFT:
+            lock(db)
+            message, conversation = message_owned(db, user_id, row.message_id)
+            if message.status != 'pending' or conversation.generation_id != str(run_id) or conversation.cancel_requested:
+                raise HTTPException(409, '취소되었거나 완료된 요청의 파일은 공개하지 않습니다.')
+            for source in json.loads(row.payload_json)['revision_sources']:
+                verify_revision_source(db, user_id, message, conversation, source['format'], source['id'], source['sha256'])
+        row.status='ready'
 
 
 def export_input(name,format,content):

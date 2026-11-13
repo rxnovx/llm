@@ -79,7 +79,11 @@ test("채팅에서 로그인·가입·설정 모달을 열고 닫아도 작성 �
   await expectCentered(page, settings);
   for (let index=0;index<14;index++) {
     await page.keyboard.press("Tab");
-    expect(await page.evaluate(() => Boolean(document.activeElement?.closest('dialog[data-workspace-modal="settings"]')))).toBe(true);
+    expect(await page.evaluate(() => {
+      const focused = document.activeElement;
+      // Focus can pass through browser chrome between native dialog tab cycles.
+      return focused === document.body || Boolean(focused?.closest('dialog[data-workspace-modal="settings"]'));
+    })).toBe(true);
   }
   expect(await composer!.evaluate((element) => element.isConnected && element === document.getElementById("chat-message"))).toBe(true);
   await expect(page.locator("#chat-message")).toHaveValue(unsent);
@@ -89,7 +93,7 @@ test("채팅에서 로그인·가입·설정 모달을 열고 닫아도 작성 �
   await expect(page).toHaveURL(conversationUrl);
   await expect(page.locator(".workspace-background")).toHaveJSProperty("inert", false);
   await expect(page.getByLabel("메시지", { exact: true })).toHaveValue(unsent);
-  await expect(page.getByRole("article", { name: "내 메시지" })).toHaveText(draft);
+  await expect(page.getByRole("article", { name: "내 메시지" }).getByText(draft, { exact: true })).toBeVisible();
   await accountMenu(page);
   await page.getByRole("link", { name: "설정", exact: true }).click();
   await expect(settings).toBeVisible();
@@ -102,12 +106,25 @@ test("채팅에서 로그인·가입·설정 모달을 열고 닫아도 작성 �
   await expect(page).toHaveURL(conversationUrl);
   await expect(page.locator(".workspace-background")).toHaveJSProperty("inert", false);
 
-  const modelButton = page.getByRole("button", { name: "테스트 모드", exact: true });
+  const modelButton = page.getByRole("button", { name: "모델 선택 · 테스트 모드", exact: true });
   await modelButton.click();
-  const models = page.getByRole("dialog", { name: "모델 연결", exact: true });
-  await models.getByRole("heading", { name: "모델 연결", exact: true }).click();
-  await pressBackdrop(page, models, info.project.use.hasTouch);
+  const models = page.getByRole("group", { name: "모델 목록", exact: true });
+  await expect(models).toBeVisible();
+  await expect(page.locator("dialog:modal")).toHaveCount(0);
+  await page.keyboard.press("ArrowDown");
+  await expect(models.getByRole("button", { name: "테스트 모드", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(models).toHaveCount(0);
   await expect(modelButton).toBeFocused();
+  await modelButton.click();
+  await expect(models).toBeVisible();
+  const toolbar = await page.locator(".cw-topbar").boundingBox();
+  expect(toolbar).not.toBeNull();
+  const point = { x: toolbar!.x + toolbar!.width / 2, y: toolbar!.y + 1 };
+  if (info.project.use.hasTouch) await page.touchscreen.tap(point.x, point.y);
+  else await page.mouse.click(point.x, point.y);
+  await expect(models).toHaveCount(0);
+  await expect(page.locator("dialog:modal")).toHaveCount(0);
   await expect(page).toHaveURL(conversationUrl);
   expect(await composer!.evaluate((element) => element.isConnected && element === document.getElementById("chat-message"))).toBe(true);
   await expect(page.getByLabel("메시지", { exact: true })).toHaveValue(unsent);
