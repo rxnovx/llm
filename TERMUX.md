@@ -61,6 +61,29 @@ node node_modules/typescript/bin/tsc --noEmit --pretty false
 
 타입 검사가 통과한 소스에서는 기존 WASM 빌드도 성공할 수 있습니다. 따라서 정상 빌드뿐 아니라 의도적인 타입 오류가 있는 경우 원래 진단을 보여주며 실패하는지도 회귀 검사합니다. 이 변경은 빌드의 타입 검사 경로에 적용되며, Next.js 자체의 다른 WASM 코드프레임 경로까지 수정하지는 않습니다.
 
+### 인증 스토어와 여러 화면에서 TS7006이 함께 나오는 경우
+
+`authStore.ts`의 `set`, `get`, 로그인 인수뿐 아니라 `useAuthStore`를 사용하는 여러 화면의 selector·구독 인수까지 동시에 `implicitly has an 'any' type`가 된다면, 먼저 Zustand의 타입 선언 연결을 확인합니다. 정상 설치에서는 `create<State>`가 이 인수에 상태 타입을 전달합니다. Zustand 내부의 `zustand/vanilla` 선언을 해석하지 못해도 같은 연쇄 오류가 발생할 수 있으므로 각 인수에 `any`를 추가해서 해결하지 않습니다.
+
+선언 파일 내부의 원인 오류도 빌드에 표시하도록 `skipLibCheck`는 `false`로 설정합니다. `strict`도 계속 켜 둡니다. 설치 상태는 잠금 파일 기준으로 일치시킨 후 검사합니다. `npm ci`는 의존성을 다시 설치하며 `package-lock.json`을 재생성하지 않습니다.
+
+```bash
+cd ~/workspace/llm/frontend
+npm ci --include=optional
+npm run typecheck
+npm run test:types
+npm run build
+```
+
+같은 오류가 계속되면 다음 출력으로 설치 버전과 숨겨진 선언 오류를 확인합니다. TypeScript 5.9.3·Zustand 5.1.0은 이번 잠금 파일을 새로 설치해 확인한 버전이며, 사용자 단말의 설치 버전이 이미 같다고 가정하지 않습니다.
+
+```bash
+npm ls typescript zustand
+node node_modules/typescript/bin/tsc --noEmit --incremental false --skipLibCheck false --pretty false
+```
+
+`npm run test:types`는 실제 인증 스토어를 TypeScript로 검사합니다. 잘못된 상태 필드, 로그인·Google 로그인·로그아웃 인수는 컴파일 오류여야 하며 selector·구독·스토어 API가 `any`로 바뀌면 검사가 실패합니다. 정상 Linux 설치와 강제 WASM 빌드의 통과만으로 사용자 Termux 설치의 문제가 해결됐다고 판단하지 않습니다.
+
 ## “요청 출처를 확인할 수 없습니다” 오류
 
 이 메시지는 Next.js의 인증 요청 출처 검사에서 나옵니다. `localhost`와 `127.0.0.1`, 서로 다른 포트, HTTP와 HTTPS는 각각 다른 출처입니다. `frontend/.env.local`의 개발 설정은 다음과 같습니다.

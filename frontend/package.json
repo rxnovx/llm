@@ -12,6 +12,7 @@
     "typecheck": "next typegen && tsc --noEmit",
     "lint": "eslint .",
     "test:session": "node --test tests/auth-session.test.mjs",
+    "test:types": "node --test tests/auth-store-types.test.mjs",
     "test:proxy": "node --test tests/proxy.test.mjs",
     "test:env": "node --test tests/env.test.mjs",
     "test:chat": "node --experimental-strip-types --test tests/chat-stream.test.mjs tests/chat-scroll.test.mjs",
