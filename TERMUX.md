@@ -39,6 +39,28 @@ WATCHPACK_POLLING=true npm run dev
 
 운영용 Next.js 실행 명령은 `npm run build` 후 `npm start`입니다. 실제 Termux 단말에서의 빌드·화면 동작은 아직 검증하지 못했으며, Linux에서 PostgreSQL 없는 설치와 WASM 컴파일 경로를 검증한 결과는 [VALIDATION.md](VALIDATION.md)에 기록합니다.
 
+### 빌드의 TypeScript 단계에서 `expected usize`가 나오는 경우
+
+Next.js 16.2.12의 WASM 오류 출력기는 터미널 너비가 없는 worker에서 `maxWidth: undefined`를 전달받으면 `invalid type: unit value, expected usize`로 실패합니다. 이 메시지는 **원래 TypeScript 진단을 표시하는 과정에서 생기는 추가 오류**이므로, 컴파일 성공만으로 타입 검사가 통과했다고 볼 수 없습니다. [Next.js의 관련 오류 보고](https://github.com/vercel/next.js/issues/99348)
+
+Android에서는 `next.config.ts`의 `experimental.useTypeScriptCli`를 켜서 설치된 TypeScript의 `tsc`로 검사합니다. Next가 생성한 페이지·라우트 타입도 검사하며, 타입 오류가 있으면 원래 진단을 출력하고 빌드가 실패합니다. `ignoreBuildErrors`로 검사를 건너뛰거나 설치된 Next.js 파일을 직접 수정하지 않습니다. Linux에서는 `NEXT_TEST_WASM=1` 검증 시 같은 경로를 사용합니다.
+
+프론트엔드 디렉터리에서 다음 명령으로 타입 생성과 검사를 먼저 실행할 수 있습니다.
+
+```bash
+cd ~/workspace/llm/frontend
+npm run typecheck
+npm run build
+```
+
+기존 버전에서 오류가 가려져도, 빌드 직후 아래 명령은 WASM 오류 출력기를 거치지 않고 실제 진단을 보여줍니다. `TS` 오류 코드와 파일·줄 위치를 기준으로 수정합니다.
+
+```bash
+node node_modules/typescript/bin/tsc --noEmit --pretty false
+```
+
+타입 검사가 통과한 소스에서는 기존 WASM 빌드도 성공할 수 있습니다. 따라서 정상 빌드뿐 아니라 의도적인 타입 오류가 있는 경우 원래 진단을 보여주며 실패하는지도 회귀 검사합니다. 이 변경은 빌드의 타입 검사 경로에 적용되며, Next.js 자체의 다른 WASM 코드프레임 경로까지 수정하지는 않습니다.
+
 ## “요청 출처를 확인할 수 없습니다” 오류
 
 이 메시지는 Next.js의 인증 요청 출처 검사에서 나옵니다. `localhost`와 `127.0.0.1`, 서로 다른 포트, HTTP와 HTTPS는 각각 다른 출처입니다. `frontend/.env.local`의 개발 설정은 다음과 같습니다.

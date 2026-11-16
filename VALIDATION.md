@@ -1,5 +1,23 @@
 # 계정·대화·운영 기능 검증
 
+## Termux WASM 빌드의 TypeScript 진단 복구 — 2026-11-17
+
+PR #11의 `e17b796c95e22d2e8bdcef0f10035be506b95818`을 기준으로 확인했습니다. Node 24.22.1, Next.js·SWC WASM 16.2.12, TypeScript 5.9.3을 사용했으며 설치된 필수 패키지 버전은 잠금 파일과 일치했습니다.
+
+`codeFrameColumns`에 `maxWidth: undefined`를 전달하면 사용자 로그와 같은 `invalid type: unit value, expected usize`가 발생하고, 해당 필드를 생략하면 정상 출력되는 것을 실제 WASM 바인딩에서 재현했습니다. 오류가 없는 기존 PR 소스는 독립 타입 검사와 강제 WASM 빌드가 모두 통과하므로, 사용자 체크아웃에서 이 표시 오류에 가려진 원래 TypeScript 진단은 아직 특정하지 못했습니다.
+
+Android 및 `NEXT_TEST_WASM=1` 검증 환경에서 Next의 `experimental.useTypeScriptCli`를 사용하도록 변경했습니다. 프로젝트의 `tsc`로 검사하고 오류 시 실패하는 동작은 유지합니다. `npm run typecheck`에도 Android WASM 준비 단계를 추가했습니다. 설치된 Next 소스와 의존성 버전은 변경하지 않았습니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| WASM 실패 회귀 | 실제 production 설정을 읽고 WASM 바인딩을 확인한 후 Next의 검사 경로에서 의도적인 타입 오류를 검사했습니다. `fixture.ts(1,14): error TS2322`와 종료 코드 1을 확인하고, 잘못된 `expected usize` 메시지가 나오지 않는지 검사했습니다. |
+| WASM 정상 회귀 | 정상 TypeScript fixture는 실제 CLI 검사 결과와 종료 코드 0을 확인했습니다. 기존 변환 검사를 포함한 portability 검사 3개가 통과했습니다. |
+| 전체 프론트엔드 | Node **97개 통과**, 전체 ESLint 통과. 최종 회귀 파일의 ESLint도 확인했습니다. |
+| 타입 생성·검사 | `NEXT_TEST_WASM=1 npm run typecheck` 통과. Next의 라우트 타입 생성과 `tsc --noEmit`을 실행했습니다. |
+| 프로덕션 빌드 | 수정 후 일반 `npm run build`와 `NEXT_TEST_WASM=1 npm run build` 모두 통과. TypeScript 검사와 정적 페이지 15개 생성을 완료했습니다. |
+
+Linux에서 WASM을 강제한 검증이며 실제 Android/Termux 단말의 빌드 성공을 확인한 것은 아닙니다. 사용자 환경의 원래 진단은 `node node_modules/typescript/bin/tsc --noEmit --pretty false`로 확인해야 합니다. 이 변경은 빌드의 타입 검사 경로를 보완하며 개발 오류 등 Next의 다른 WASM 코드프레임 경로까지 수정하지는 않습니다. 백엔드는 변경하지 않았고 GitHub Actions는 실행하지 않았습니다.
+
 ## 채팅 스크롤·ZIP·이미지 생성 복구 — 2026-11-17
 
 최신 원격 `main`의 `e4ad6a9d9410e1ba519dd0959b28b465a3b893ea`를 기준으로 검증했습니다.

@@ -22,6 +22,7 @@
     "test:browser": "playwright test",
     "predev": "node scripts/prepare-next-wasm.mjs",
     "prebuild": "node scripts/prepare-next-wasm.mjs",
+    "pretypecheck": "node scripts/prepare-next-wasm.mjs",
     "test:portable": "node --test tests/termux-runtime.test.mjs"
   },
   "dependencies": {

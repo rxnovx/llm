@@ -11,6 +11,13 @@ const config: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
   reactStrictMode: true,
+  experimental: {
+    // Next 16.2.12's WASM code-frame renderer can hide TypeScript diagnostics
+    // behind "invalid type: unit value, expected usize" (vercel/next.js#99348).
+    // Keep type checking enabled, using the project's tsc to report errors.
+    // NEXT_TEST_WASM exercises the same path in Linux portability checks.
+    useTypeScriptCli: process.platform === "android" || process.env.NEXT_TEST_WASM === "1",
+  },
   async headers() {
     return [{ source: "/:path*", headers: [
       { key: "X-Content-Type-Options", value: "nosniff" },
