@@ -113,3 +113,52 @@ def test_tool_call_contract_preserves_arguments_for_followup(monkeypatch, kind):
     assert asyncio.run(run())['content'] == '확인했습니다.'
     assert (calls[0].get('tool_choice') == 'auto') is (kind == 'vllm')
     assert calls[1]['messages'][1]['tool_calls'][0]['function']['arguments'] == (json.dumps(args) if kind == 'vllm' else args)
+
+
+@pytest.mark.parametrize('kind', ['vllm', 'ollama'])
+@pytest.mark.parametrize('content', [
+    '{"route":"image"}',
+    '  ```json\n{"route":"image"}\n```  ',
+    '```\r\n{"route":"image"}\r\n```',
+])
+def test_structured_reply_accepts_one_complete_json_block(monkeypatch, kind, content):
+    def upstream(_):
+        message = {'content': content}
+        return httpx.Response(200, json={'choices': [{'message': message}]} if kind == 'vllm' else {'message': message})
+
+    connection = setup(monkeypatch, kind, upstream)
+    result = asyncio.run(providers.structured_reply(connection, 'fixture', HISTORY,
+        {'type': 'object'}, Settings(_env_file=None)))
+    assert result == {'route': 'image'}
+
+
+@pytest.mark.parametrize('content', [
+    '이것은 예시입니다. {"route":"image"}',
+    '```json\n{"route":"image"}\n```\n추가 설명',
+    '```json\n{"route":"image"}',
+    '[{"route":"image"}]',
+    '{"route":"image"} {"route":"direct"}',
+])
+def test_structured_reply_rejects_embedded_or_incomplete_json(monkeypatch, content):
+    connection = setup(monkeypatch, 'vllm', lambda _: httpx.Response(200,
+        json={'choices': [{'message': {'content': content}}]}))
+    with pytest.raises(providers.ProviderError, match='구조화 출력'):
+        asyncio.run(providers.structured_reply(connection, 'fixture', HISTORY,
+            {'type': 'object'}, Settings(_env_file=None)))
+
+
+@pytest.mark.parametrize('kind', ['vllm', 'ollama'])
+@pytest.mark.parametrize(('requested', 'expected'), [(None, 1024), (1536, 1536), (8192, 2048)])
+def test_structured_file_budget_uses_profile_limit_without_changing_routing_default(monkeypatch, kind, requested, expected):
+    requests = []
+
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        message = {'content': '{"name":"bundle","entries":[]}'}
+        return httpx.Response(200, json={'choices': [{'message': message}]} if kind == 'vllm' else {'message': message})
+
+    connection = setup(monkeypatch, kind, upstream)
+    asyncio.run(providers.structured_reply(connection, 'fixture', HISTORY,
+        {'type': 'object'}, Settings(_env_file=None), max_tokens=requested))
+    payload, = requests
+    assert (payload['max_tokens'] if kind == 'vllm' else payload['options']['num_predict']) == expected

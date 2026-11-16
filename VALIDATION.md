@@ -1,5 +1,35 @@
 # 계정·대화·운영 기능 검증
 
+## 채팅 스크롤·ZIP·이미지 생성 복구 — 2026-11-17
+
+최신 원격 `main`의 `e4ad6a9d9410e1ba519dd0959b28b465a3b893ea`를 기준으로 검증했습니다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 백엔드 전체 회귀 | **459개 통과**, 기존 Starlette 폐기 예정 경고 2건. 전체 실행을 시작한 뒤 추가한 사례 2개를 포함하여 파일·이미지 생성 회귀 파일 **38개를 다시 실행해 통과**했습니다. 최종 수집 대상은 461개이며 두 실행 사이의 중복 사례는 합산하지 않습니다. |
+| 파일 생성 | 기본 문맥 8192·출력 2048·`supports_tools=false` 설정에서 구조화 응답으로 ZIP·TXT·DOCX를 생성하고 실제 다운로드 바이트를 검사했습니다. ZIP 내부 경로·내용, 생성 후 최종 답변, 모델의 거절·호출 JSON만 있는 응답·여러 단계 파일 호출 복구를 포함합니다. |
+| 이미지 생성 | 판단 JSON 오류·HTTP 400·일반 답변 및 문서 오분류에서 명시적 이미지 요청을 보존하고 PNG를 생성·다운로드했습니다. 서버 미설정 안내와 필요한 확인 질문, 번역·설명·부정문·복합 요청에 대한 강제 생성 제외도 검사했습니다. |
+| 구조화 응답 | vLLM·Ollama의 순수 JSON 및 전체 JSON 코드 블록, 설명 속 JSON·잘린 JSON 거절, 기본 1024 판단 한도와 파일별 출력 한도의 모델 프로필 상한 적용을 검사했습니다. |
+| 프론트엔드 | Node **95개**, 전체 린트, TypeScript 검사, 프로덕션 빌드 통과. 상향 이동 0.5·1·3·24·99px, 하단 근처에서 정지 유지, 실제 하단 복귀, 지연 이벤트 및 창 크기 변경을 포함합니다. 최종 스크롤 입력 정리 뒤 관련 22개·해당 린트·타입·빌드를 재확인했습니다. |
+| 브라우저 | 새 Playwright 시나리오를 데스크톱·모바일 4건으로 실행했으나 Chromium의 Unix socket `Operation not permitted`로 페이지를 열기 전에 중단됐습니다. 실제 브라우저 통과로 기록하지 않습니다. |
+
+모델과 이미지 API는 로컬 HTTP 대역을 사용했으며 FastAPI·파일 저장·인증된 다운로드 경로는 실제로 실행했습니다. 실제 폐쇄망 모델의 출력 품질, 운영 `IMAGE_GENERATION_URL` 연결 및 사용자 단말의 브라우저 동작은 이번 환경에서 확인하지 못했습니다. GitHub Actions는 검증에 사용하지 않았습니다.
+
+주요 재현 명령:
+
+```bash
+cd backend
+python -m pytest -q
+python -m pytest tests/test_artifact_routing.py -q
+cd ../frontend
+node --experimental-strip-types --test tests/*.test.mjs
+npm run lint
+node node_modules/typescript/bin/tsc --noEmit
+npm run build
+# 로컬 API·웹 서버를 실행한 환경에서 수행합니다.
+ACCOUNTS_BASE_URL=http://localhost:3000 npm run test:browser -- tests/chat-scroll.spec.ts
+```
+
 ## 프롬프트 GitLab 작업과 계정·공통 디자인 검증 — 2026-11-11
 
 | 검증 | 결과 |

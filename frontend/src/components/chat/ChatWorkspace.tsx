@@ -215,7 +215,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
   const requestedMatch = useRef<{ id: string; messageId: string } | null>(null);
   const oauthDraftChecked = useRef(false);
   const generation = useRef<{ id: string; conversation: string } | null>(null);
-  const { messages, page, viewportRef, pinnedRef, setMessages, replaceHistory, refreshLatest, cancelPage, loadingPage, pageError,
+  const { messages, page, viewportRef, transcriptRef, pinnedRef, setMessages, replaceHistory, refreshLatest, cancelPage, loadingPage, pageError,
     loadPage, onScroll, scrollDown, scrollToBottom } = useMessageHistory();
   const canvas = useConversationCanvas(active?.id ?? null, messages);
   const hasNewer = page.newer_after !== null;
@@ -1128,11 +1128,8 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           {connection?.is_test && <p className="cw-demo-note"><span />현재 테스트 모드입니다. 실제 모델 대신 랜덤 예시 답변이 표시됩니다.</p>}
           {conversations.length > 0 && <section className="cw-recent"><h2>이어서 나눠볼 이야기</h2>{conversations.slice(0, 3).map((item) => <button key={item.id} disabled={starting||uploading} onClick={() => void openConversation(item)}>
             <Icon name="chat" size={15} /><span>{item.title}{item.busy && <small className="cw-search-excerpt">작업 중</small>}</span><time>{shortDate(item.updated_at)}</time><span className="cw-recent-arrow">↗</span></button>)}</section>}</div>
-          : <div className="cw-transcript" aria-label="대화 내용" onLoadCapture={event => {
-            if (event.target instanceof HTMLImageElement && pinnedRef.current && viewportRef.current) {
-              viewportRef.current.scrollTop = viewportRef.current.scrollHeight;
-            }
-        }}>{historyBoundary('older')}{messages.map((message, index) => <article key={message.id} id={`message-${message.id}`} className={`cw-message cw-message-${message.role}`} tabIndex={-1} aria-label={message.role === "user" ? "내 메시지" : "모델 답변"}>
+          : <div className="cw-transcript" aria-label="대화 내용" ref={transcriptRef}>
+          {historyBoundary('older')}{messages.map((message, index) => <article key={message.id} id={`message-${message.id}`} className={`cw-message cw-message-${message.role}`} tabIndex={-1} aria-label={message.role === "user" ? "내 메시지" : "모델 답변"}>
             {message.role === "assistant" && <div className="cw-assistant-label"><Wordmark small /><span>{message.is_test ? "테스트 모델" : message.model}</span>{message.is_test && <small>예시 답변</small>}</div>}
             {message.role === "user" ? <div className="cw-human-text">{message.content}</div> : <>
               {!!message.apps?.length && <p className="cw-message-app">GitLab · {message.apps[0].merge_request ? `기존 MR !${message.apps[0].merge_request.iid}` : message.apps[0].mode==='execute'?'프로젝트 분석·실행':message.apps[0].mode==='workspace'?'프로젝트 자동 분석':message.apps[0].paths.join(", ")}

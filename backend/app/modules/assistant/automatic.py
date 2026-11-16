@@ -13,7 +13,7 @@ from app.modules.chat import providers,scheduler
 from app.modules.chat.models import Message
 from app.modules.integrations import config as gitlab_config, service as gitlab_connections
 from app.modules.workspaces.models import ToolTrace
-from . import engine, gitlab, parallel, personal_tools, routing, web_search
+from . import engine, file_generation, gitlab, parallel, personal_tools, routing, web_search
 from .models import TurnDecision
 from app.modules.schedules import service as schedules
 from app.modules.workflows import artifact_revision, artifacts, image_inputs, image_queue, images, table_analysis
@@ -26,7 +26,8 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
     options=dict(options or {})
     deadline=int(time.time())+settings.terminal_agent_timeout_seconds+15
     model=turn.start['conversation']['model'];question=turn.history[-1]['content']
-    file_request = bool(artifacts.requested_tools(question)) or artifacts.planning_hint(question)
+    image_requested = file_generation.image_request(question)
+    file_request = not image_requested and (bool(artifacts.requested_tools(question)) or artifacts.planning_hint(question))
     image_mode = options.get('image_mode', 'auto')
     enabled=settings.assistant_automatic_enabled and options.get('automatic',True)
     current_image = image_inputs.reference(options)
@@ -78,8 +79,11 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         url = settings.image_edit_url if editing else settings.image_generation_url
         decision.update(route='image_edit' if editing else 'image', status='running');save()
         try:
-            if connection.provider == 'test' or not url.strip():
-                raise HTTPException(503, f'{label} 서버가 설정되어 있지 않습니다.')
+            if connection.provider == 'test':
+                raise HTTPException(503, f'테스트 모델에서는 {label}을 실행하지 않습니다. 실제 모델을 선택하세요.')
+            if not url.strip():
+                variable = 'IMAGE_EDIT_URL' if editing else 'IMAGE_GENERATION_URL'
+                raise HTTPException(503, f'{label} 서버가 설정되어 있지 않습니다. 운영자가 {variable}을 설정해야 합니다.')
             if editing and not source_options:
                 raise HTTPException(422, '편집할 이미지를 선택하거나 첨부하세요.')
             async for state in image_queue.wait(bind, user_id, turn.request_id, settings):
@@ -149,7 +153,8 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         before_message_id=turn.assistant_id) if can_call_tools and (revise_requested or enabled and artifact_revision.requested(question)) else []
     available.update(resource_routing=auto_tools,web_available=web_search.available(settings) and not scheduled_project,
         history_available=history_requested,parallel_available=can_call_tools and (parallel_requested or auto_tools),
-        tables=table_catalog,result_files=result_catalog[:4],file_tools_available=can_call_tools)
+        tables=table_catalog,result_files=result_catalog[:4],
+        file_tools_available=can_call_tools or file_generation.is_creation_request(question))
     plan=routing.Plan(route='gitlab' if selection else 'direct',needs_review=bool(manual_knowledge or options.get('mcp_ids') or selection and selection.mode=='workspace'))
     if request:
         yield 'activity',record('gitlab_resolve','running','요청에서 GitLab 작업 범위와 연결 계정을 확인하고 있습니다.')
@@ -182,6 +187,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         if selection.mode == 'files':
             selection = None  # The existing file-only path handles explicit file scope.
     source = current_image
+    image_requested = image_requested and enabled and not explicit_apps and not scheduled_project and image_mode == 'auto'
     can_route_media = connection.provider != 'test' and image_mode == 'auto' and (enabled or bool(current_image))
     if can_route_media:
         vision = connection.profile(model).supports_vision
@@ -191,7 +197,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             with Session(bind) as db:
                 source = image_inputs.latest_reference(db, user_id, turn.conversation_id,
                     before_message_id=turn.assistant_id)
-        if source or generate or edit:
+        if source or generate or edit or image_requested:
             available.update(image_source='current' if current_image else 'recent' if source else 'none',
                 image_count=len(image_inputs.attachment_ids(source)) or int(bool(source.get('image_artifact_id'))),
                 image_vision=vision and bool(source), image_edit=edit and bool(source), image_generation=generate)
@@ -212,7 +218,10 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         finally:await release()
         if fallback:
             decision['fallback'] = 'route_decision'
-            if current_image and available.get('image_vision'):
+            if image_requested:
+                plan = routing.Plan(route='image', image_prompt=question)
+                detail = '명시한 이미지 생성 요청을 이미지 서버로 전달합니다.'
+            elif current_image and available.get('image_vision'):
                 plan = routing.Plan(route='vision')
                 detail = '자동 판단을 완료하지 못해 참조 이미지를 분석합니다.'
             elif current_image:
@@ -222,7 +231,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             else:
                 detail = '자동 판단을 완료하지 못해 채팅으로 이어갑니다.'
             yield 'activity', record('route_decision', 'error', detail)
-            if not (current_image or manual_knowledge or file_request or web_requested or history_requested
+            if not (image_requested or current_image or manual_knowledge or file_request or web_requested or history_requested
                     or table_requested or revise_requested or parallel_requested or explicit_apps):
                 decision.update(route='direct', status='running');save()
                 await acquire()
@@ -237,6 +246,9 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
                 finally:await release()
                 decision['status'] = 'complete';save()
                 return
+        if image_requested and (plan.route == 'direct' or plan.route == 'clarify' and not plan.clarification.strip()
+                or not settings.image_generation_url.strip()):
+            plan = routing.Plan(route='image', image_prompt=question)
         if explicit_apps and plan.route in {'gitlab','both','mcp','image','image_edit'}:
             plan.route = 'gitlab' if selection else 'direct'
         if current_image and plan.route == 'direct' and not explicit_apps:

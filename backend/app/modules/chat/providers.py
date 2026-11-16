@@ -3,6 +3,7 @@ import asyncio
 from base64 import b64encode
 from collections.abc import AsyncIterator, Sequence
 import json
+import re
 import secrets
 import ssl
 from typing import TYPE_CHECKING, Literal
@@ -406,18 +407,21 @@ async def tool_reply(connection,model,history,tools,settings,*,images=()):
         except (ValueError,KeyError,IndexError,TypeError,AttributeError):
             raise ProviderError('모델 도구 응답을 처리하지 못했습니다. 도구 호출을 지원하는 모델과 parser 설정을 확인하세요.') from None
 
-async def structured_reply(connection,model,messages,schema,settings,*,images=()):
+async def structured_reply(connection,model,messages,schema,settings,*,images=(),max_tokens=None):
     """Bounded JSON decision; never executes tools or accepts a server URL from the model."""
     profile=connection.profile(model)
+    output_limit=min(1024 if max_tokens is None else max_tokens,profile.max_output_tokens)
+    if output_limit < 1:
+        raise ValueError('구조화 출력의 토큰 한도는 1 이상이어야 합니다.')
     vllm=connection.provider=='vllm'
     payload={'model':model,'messages':messages,'stream':False}
     if vllm:
-        payload.update(max_tokens=min(1024,profile.max_output_tokens),temperature=0,
+        payload.update(max_tokens=output_limit,temperature=0,
             response_format={'type':'json_schema','json_schema':{'name':'assistant_decision','schema':schema,'strict':True}})
     else:
-        payload.update(format=schema,options={'temperature':0,'num_predict':min(1024,profile.max_output_tokens),'num_ctx':profile.context_window})
+        payload.update(format=schema,options={'temperature':0,'num_predict':output_limit,'num_ctx':profile.context_window})
     request_payload = with_images(payload, images, profile, vllm)
-    with usage.measure(connection, model, payload, min(1024, profile.max_output_tokens), settings.llm_timeout_seconds,
+    with usage.measure(connection, model, payload, output_limit, settings.llm_timeout_seconds,
                        extra_input_tokens=len(images) * VISION_IMAGE_TOKENS) as meter:
         try:
             async with client(connection,settings.llm_timeout_seconds) as session:
@@ -427,14 +431,18 @@ async def structured_reply(connection,model,messages,schema,settings,*,images=()
                     raw=bytearray()
                     async for part in response.aiter_bytes():
                         raw.extend(part)
-                        if len(raw)>65536:raise ProviderError('자동 판단 응답이 너무 큽니다.')
+                        if len(raw)>(65536 if max_tokens is None else 256000):raise ProviderError('구조화 응답이 너무 큽니다.')
             value=json.loads(raw)
             meter.observe(value, vllm)
             message=value['choices'][0]['message'] if vllm else value['message']
             content=message.get('content','')
             if not isinstance(content,str):raise ValueError()
             meter.output(content)
-            result=json.loads(content)
+            # 일부 로컬 모델은 JSON 전용 응답에도 코드 펜스를 덧붙입니다.
+            # 전체 응답이 하나의 JSON 블록인 경우만 허용하고 설명 속 JSON은 추출하지 않습니다.
+            content=content.strip()
+            fenced=re.fullmatch(r'```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```',content,re.IGNORECASE)
+            result=json.loads(fenced.group(1) if fenced else content)
             if not isinstance(result,dict):raise ValueError()
             return result
         except httpx.HTTPError as error:

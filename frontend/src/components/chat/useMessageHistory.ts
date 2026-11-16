@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type SetStateAction } from 'react';
 import { chatJson } from '@/lib/chat-api';
 import { conversationHistoryPath } from '@/lib/chat-history';
+import { scrollFollowState, scrollPosition } from '@/lib/chat-scroll';
 import type { ChatMessage, ConversationDetail, MessagePage } from '@/types/chat';
 
 type Direction = 'older' | 'newer';
@@ -23,7 +24,61 @@ export function useMessageHistory() {
   const pinnedRef = useRef(true);
   const request = useRef<AbortController | null>(null);
   const target = useRef<ScrollTarget | null>(null);
-  const previousTop = useRef(0);
+  const previousScroll = useRef({ scrollTop: 0, scrollHeight: 0, clientHeight: 0 });
+  const pageRef = useRef(emptyPage);
+
+  const followBottom = useCallback(() => {
+    const element = viewportRef.current;
+    if (!element || !pinnedRef.current || pageRef.current.newer_after !== null) return;
+    element.scrollTop = element.scrollHeight;
+    previousScroll.current = scrollPosition(element);
+    setScrollDown(false);
+  }, []);
+
+  const pauseFollowing = useCallback(() => {
+    const element = viewportRef.current;
+    if (!element || element.scrollHeight <= element.clientHeight) return;
+    pinnedRef.current = false;
+    setScrollDown(true);
+  }, []);
+
+  // 스크롤 이벤트보다 스트리밍 렌더가 먼저 와도 사용자의 위쪽 이동을 존중합니다.
+  useEffect(() => {
+    const element = viewportRef.current;
+    if (!element) return;
+    let touchY: number | undefined;
+    const wheel = (event: WheelEvent) => { if (event.deltaY < 0) pauseFollowing(); };
+    const touchStart = (event: TouchEvent) => { touchY = event.touches[0]?.clientY; };
+    const touchMove = (event: TouchEvent) => {
+      const nextY = event.touches[0]?.clientY;
+      if (nextY !== undefined && touchY !== undefined && nextY > touchY) pauseFollowing();
+      touchY = nextY;
+    };
+    const keyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || event.key === ' ' && event.shiftKey) pauseFollowing();
+    };
+    element.addEventListener('wheel', wheel, { passive: true });
+    element.addEventListener('touchstart', touchStart, { passive: true });
+    element.addEventListener('touchmove', touchMove, { passive: true });
+    element.addEventListener('keydown', keyDown);
+    return () => {
+      element.removeEventListener('wheel', wheel);
+      element.removeEventListener('touchstart', touchStart);
+      element.removeEventListener('touchmove', touchMove);
+      element.removeEventListener('keydown', keyDown);
+    };
+  }, [pauseFollowing]);
+
+  const transcriptRef = useCallback((element: HTMLDivElement | null) => {
+    if (!element) return;
+    // 이미지 로딩, 접힌 내용 펼치기, 입력창·창 크기 변경에도 같은 추적 상태를 사용합니다.
+    const observer = new ResizeObserver(followBottom);
+    observer.observe(element);
+    if (viewportRef.current) observer.observe(viewportRef.current);
+    return () => observer.disconnect();
+  }, [followBottom]);
 
   const cancelPage = useCallback(() => {
     request.current?.abort();
@@ -56,6 +111,7 @@ export function useMessageHistory() {
   }, []);
 
   useLayoutEffect(() => {
+    pageRef.current = view.page;
     const element = viewportRef.current;
     if (!element) return;
     const scroll = target.current;
@@ -66,11 +122,11 @@ export function useMessageHistory() {
         anchor.focus({ preventScroll: true });
         anchor.scrollIntoView({ block: 'center' });
       } else element.scrollTop += anchor.getBoundingClientRect().top - element.getBoundingClientRect().top - scroll.offset;
+      previousScroll.current = scrollPosition(element);
     } else if (pinnedRef.current && view.page.newer_after === null) {
-      element.scrollTop = element.scrollHeight;
+      followBottom();
     }
-    previousTop.current = element.scrollTop;
-  }, [view]);
+  }, [view, followBottom]);
 
   const loadPage = async (conversationId: string, direction: Direction) => {
     const cursor = direction === 'older' ? view.page.older_before : view.page.newer_after;
@@ -121,9 +177,10 @@ export function useMessageHistory() {
     if (!element) return;
     const { scrollTop, scrollHeight, clientHeight } = element;
     const bottom = scrollHeight - scrollTop - clientHeight;
-    const direction = scrollTop < previousTop.current ? 'older' : scrollTop > previousTop.current ? 'newer' : null;
-    previousTop.current = scrollTop;
-    pinnedRef.current = view.page.newer_after === null && bottom < 100;
+    const current = scrollPosition(element);
+    const { direction, following } = scrollFollowState(previousScroll.current, current, pinnedRef.current, view.page.newer_after !== null);
+    previousScroll.current = current;
+    pinnedRef.current = following;
     setScrollDown(!pinnedRef.current);
     if (!conversationId || !direction || pageError === direction) return;
     if (direction === 'older' ? scrollTop < 160 : bottom < 160) void loadPage(conversationId, direction);
@@ -131,10 +188,9 @@ export function useMessageHistory() {
 
   const scrollToBottom = () => {
     pinnedRef.current = true;
-    viewportRef.current?.scrollTo({ top: viewportRef.current.scrollHeight, behavior: 'smooth' });
-    setScrollDown(false);
+    followBottom();
   };
 
-  return { ...view, viewportRef, pinnedRef, setMessages, replaceHistory, refreshLatest, cancelPage,
+  return { ...view, viewportRef, transcriptRef, pinnedRef, setMessages, replaceHistory, refreshLatest, cancelPage,
     loadingPage, pageError, loadPage, onScroll, scrollDown, scrollToBottom };
 }

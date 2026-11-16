@@ -58,9 +58,9 @@ def validate(db,user_id,conversation_id,selection,connection,model):
             if not source:
                 raise HTTPException(422, '분석할 이미지를 첨부하세요.')
         if mode == 'generate' and not settings.image_generation_url.strip():
-            raise HTTPException(503, '이미지 생성 서버가 설정되어 있지 않습니다.')
+            raise HTTPException(503, '이미지 생성 서버가 설정되어 있지 않습니다. 운영자가 IMAGE_GENERATION_URL을 설정해야 합니다.')
         if mode == 'edit' and not settings.image_edit_url.strip():
-            raise HTTPException(503, '이미지 편집 서버가 설정되어 있지 않습니다.')
+            raise HTTPException(503, '이미지 편집 서버가 설정되어 있지 않습니다. 운영자가 IMAGE_EDIT_URL을 설정해야 합니다.')
         return
     if selection.get('base_ids') or selection.get('document_ids'):
         knowledge.selected_documents(db,user_id,selection,conversation_id)
@@ -90,7 +90,7 @@ def active(db,user_id,selection,*,question='',conversation_id='',connection=None
     if requested_tools(question):return True
     from app.modules.schedules import service as schedules
     from app.modules.workflows import artifact_revision, table_analysis
-    from . import parallel, personal_tools, web_search
+    from . import file_generation, parallel, personal_tools, web_search
     if personal_tools.memory_command(question) or schedules.requested(question):
         return True
     if artifact_revision.requested(question) or table_analysis.requested(question) or personal_tools.history_requested(question) or web_search.requested(question):
@@ -98,6 +98,7 @@ def active(db,user_id,selection,*,question='',conversation_id='',connection=None
     settings = get_settings()
     if not settings.assistant_automatic_enabled or not selection.get('automatic',True):return False
     if connection and connection.provider != 'test':
+        if file_generation.image_request(question):return True
         if parallel.requested(question) or web_search.available(settings) or planning_hint(question):return True
         if settings.image_generation_url.strip():return True
         if settings.image_edit_url.strip() or connection.profile(model).supports_vision:

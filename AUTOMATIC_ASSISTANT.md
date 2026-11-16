@@ -84,7 +84,7 @@ Python 상대 import·별칭·일반적인 src 배치와 JS/TS 상대 ESM import
 
 ## 모델과 실행 환경
 
-실제 모델에는 구조화 출력 지원이 필요합니다. vLLM은 response_format의 json_schema, Ollama는 format의 JSON schema를 사용합니다. 도구를 사용하는 모델은 앱의 supports_tools와 서버의 도구 호출 parser도 맞춰야 합니다. 지원하지 않는 응답은 일반 답변으로 숨기지 않고 오류를 표시합니다.
+실제 모델에는 구조화 출력 지원이 필요합니다. vLLM은 response_format의 json_schema, Ollama는 format의 JSON schema를 사용합니다. 일반 도구를 사용하는 모델은 앱의 supports_tools와 서버의 도구 호출 parser도 맞춰야 합니다. 명시적인 문서·ZIP·오디오 생성은 일반 도구 호출이 없어도 검증된 파일 스키마로 처리할 수 있습니다. 이 경로는 외부 앱·터미널 권한을 늘리지 않습니다. 전체 응답이 하나의 JSON 코드 블록인 경우에는 펜스를 제거하고 검증하며, 설명 속에 섞인 JSON을 추출해 실행하지 않습니다. 지원하지 않는 구조화 응답은 오류로 표시합니다.
 
 백엔드와 Terminal MCP(서버 버전 1.1.0)는 함께 업데이트·재시작해야 합니다. 구형 MCP에는 새 분석 도구가 없다는 오류를 표시합니다.
 
