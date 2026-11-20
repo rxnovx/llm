@@ -221,7 +221,7 @@ def continue_conversation(conversation_id: UUID,context: Authenticated,db: Datab
 @router.get('/messages/{message_id}/versions')
 def versions(message_id: UUID,context: Authenticated,db: Database):
     message,_=service.message_owned(db,context.user.id,message_id)
-    return {'current':service.payload(message),'items':[{'id':v.id,'sequence':v.sequence,'model':v.model,'created_at':v.created_at,'message':json.loads(v.payload_json)} for v in message.versions]}
+    return {'current':service.payload(message),'items':[{'id':v.id,'sequence':v.sequence,'model':v.model,'created_at':v.created_at,'message':service.trace_history.public_message(json.loads(v.payload_json))} for v in message.versions]}
 
 
 @router.post('/messages/{message_id}/versions/{version_id}/select')

@@ -12,8 +12,9 @@ from app.modules.chat import context as context_budget
 from app.modules.chat import providers,scheduler
 from app.modules.chat.models import Message
 from app.modules.integrations import config as gitlab_config, service as gitlab_connections
-from app.modules.workspaces.models import ToolTrace
-from . import engine, gitlab, parallel, personal_tools, routing, web_search
+from app.modules.integrations.actions import permissions as gitlab_api_permissions
+from app.modules.chat.trace import record_activity
+from . import engine, gitlab, gitlab_tools, parallel, personal_tools, routing, web_search
 from .models import TurnDecision
 from app.modules.schedules import service as schedules
 from app.modules.workflows import artifact_revision, artifacts, image_inputs, image_queue, images, table_analysis
@@ -36,6 +37,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
     request = turn.gitlab_request
     explicit_apps = bool(request or selection or options.get('mcp_ids') or turn.start['assistant_message']['apps'])
     explicit = bool(image_mode != 'auto' or current_image or manual_knowledge or explicit_apps)
+    simple_chat = routing.simple_chat(question) and not explicit
     auto_tools = enabled and not explicit_apps
     can_call_tools = connection.provider == 'test' or connection.profile(model).supports_tools
     memory_command = personal_tools.memory_command(question) if not turn.scheduled else None
@@ -44,10 +46,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
     if selection and (turn.previous_message or {}).get('routing',{}).get('automatic_project'):decision['automatic_project']=True
 
     def record(name,status,detail):
-        detail=detail.encode()[:2200].decode(errors='ignore')
-        with Session(bind) as db:
-            db.add(ToolTrace(message_id=turn.assistant_id,step=0,name=name,status=status,detail=detail));db.commit()
-        return {'name':name,'step':0,'status':status,'detail':detail}
+        return record_activity(name,status,detail,bind=bind,message_id=turn.assistant_id)
 
     def save():
         with Session(bind) as db:
@@ -151,7 +150,33 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         history_available=history_requested,parallel_available=can_call_tools and (parallel_requested or auto_tools),
         tables=table_catalog,result_files=result_catalog[:4],file_tools_available=can_call_tools)
     plan=routing.Plan(route='gitlab' if selection else 'direct',needs_review=bool(manual_knowledge or options.get('mcp_ids') or selection and selection.mode=='workspace'))
-    if request:
+    if request and not request.projects and not selection and not gitlab_tools.wants_api(question):
+        with Session(bind) as db:
+            selection = gitlab.previous_selection(db, turn.conversation_id)
+    multi_repository = bool(request and len(request.projects) > 1 and not request.execute)
+    api_request = not turn.scheduled and (gitlab_tools.wants_api(question) or multi_repository
+        or bool(request and not request.execute and not request.projects and not selection))
+    if selection and selection.merge_request and not gitlab_api_permissions(question):
+        api_request = False  # 선택된 MR 읽기는 도구 호출 미지원 모델의 기존 경로도 유지한다.
+    if api_request:
+        yield 'activity',record('gitlab_discovery','running','GitLab 연결과 요청에 필요한 접근 권한을 확인하고 있습니다.')
+        if not available['gitlab_connections']:
+            raise HTTPException(409, 'GitLab 계정이 연결되어 있지 않습니다. + 메뉴의 GitLab에서 연결한 뒤 같은 질문을 다시 보내세요.')
+        if not can_call_tools:
+            raise HTTPException(422, 'GitLab 자동 검색은 도구 호출을 지원하는 모델을 선택해야 합니다.')
+        options['_gitlab_tools'] = True
+        options['_gitlab_analyze'] = multi_repository
+        if not selection and not (request and request.projects):
+            with Session(bind) as db:
+                selection = gitlab.previous_selection(db, turn.conversation_id)
+        # API 탐색은 Terminal MCP 유무와 무관하게 동작한다. 소스 수정 권한이나
+        # 이전 실행 모드는 상속하지 않으며, 다중 저장소 분석 도구도 읽기 전용이다.
+        if selection:
+            selection = selection.model_copy(update={'mode': 'files', 'workspace_id': None, 'paths': []})
+        plan = routing.Plan(route='direct')
+        decision.update(route='gitlab_api',status='running',remote_writes=bool(gitlab_api_permissions(question)));save()
+        yield 'activity',record('gitlab_discovery','complete',f'연결된 GitLab 계정 {len(available["gitlab_connections"])}개에서 요청에 맞는 자료를 탐색합니다.')
+    if request and not api_request:
         yield 'activity',record('gitlab_resolve','running','요청에서 GitLab 작업 범위와 연결 계정을 확인하고 있습니다.')
         selection = await gitlab.resolve(bind, user_id, turn.conversation_id, request, selection, available['gitlab_connections'])
         if selection is None:
@@ -182,7 +207,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
         if selection.mode == 'files':
             selection = None  # The existing file-only path handles explicit file scope.
     source = current_image
-    can_route_media = connection.provider != 'test' and image_mode == 'auto' and (enabled or bool(current_image))
+    can_route_media = not api_request and not simple_chat and connection.provider != 'test' and image_mode == 'auto' and (enabled or bool(current_image))
     if can_route_media:
         vision = connection.profile(model).supports_vision
         edit = not scheduled_project and bool(settings.image_edit_url.strip())
@@ -196,7 +221,7 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
                 image_count=len(image_inputs.attachment_ids(source)) or int(bool(source.get('image_artifact_id'))),
                 image_vision=vision and bool(source), image_edit=edit and bool(source), image_generation=generate)
     auto_knowledge=enabled and available['retrieval_allowed'] and available['knowledge_ready']
-    plan_needed = auto_tools and (not explicit or bool(available['gitlab_connections'] or available['mcp_apps']
+    plan_needed = not api_request and not simple_chat and auto_tools and (not explicit or bool(available['gitlab_connections'] or available['mcp_apps']
         or table_catalog or result_catalog or file_request or parallel_requested or history_requested or web_requested))
     fallback = False
     if image_mode != 'vision' and (plan_needed or can_route_media and (source or available.get('image_generation'))):
@@ -350,12 +375,12 @@ async def _stream(bind,user_id,turn,selection,connection,settings,cancelled,opti
             plan.route = 'vision'
         decision['vision'] = True
     decision.setdefault('route',plan.route);decision['status']='running';save()
-    grounded = bool(plan.needs_review or plan.uncertain or manual_knowledge or auto_knowledge and not inputs
+    grounded = not simple_chat and bool(plan.needs_review or plan.uncertain or manual_knowledge or auto_knowledge and not inputs
         or options.get('mcp_ids') or options['_web'] or options['_history'] or selection and selection.mode=='workspace')
     hold = (grounded or bool(file_request and inputs or options.get('_create_files') or options.get('_tables'))) and not (
         selection and selection.merge_request)
     # Never replay execution or external writes merely because an answer needs more evidence.
-    replay_safe=not options.get('allow_writes') and not (selection and selection.mode=='execute')
+    replay_safe=not options.get('allow_writes') and not options.get('_gitlab_tools') and not (selection and selection.mode=='execute')
     attempts=settings.assistant_max_retrieval_rounds if enabled and replay_safe else 1
 
     for attempt in range(attempts):

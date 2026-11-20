@@ -41,14 +41,19 @@ async def embed(texts):
     data=await request('POST',address+('/api/embed' if s.knowledge_embedding_provider=='ollama' else '/embeddings'),
         {'model':s.knowledge_embedding_model,'input':texts},s.knowledge_embedding_key.get_secret_value())
     try:
-        vectors=data['embeddings'] if s.knowledge_embedding_provider=='ollama' else [r['embedding'] for r in sorted(data['data'],key=lambda r:r['index'])]
+        if s.knowledge_embedding_provider=='ollama':vectors=data['embeddings']
+        else:
+            records=data['data']
+            indices=[record['index'] for record in records]
+            if any(type(index) is not int for index in indices) or sorted(indices)!=list(range(len(texts))):raise ValueError()
+            vectors=[record['embedding'] for record in sorted(records,key=lambda record:record['index'])]
         if len(vectors)!=len(texts):raise ValueError()
         dimension=len(vectors[0])
         if not 1<=dimension<=4096:raise ValueError()
         for v in vectors:
             if len(v)!=dimension or any(isinstance(n,bool) or not isinstance(n,(int,float)) or not math.isfinite(n) for n in v):raise ValueError()
-            norm=math.sqrt(sum(n*n for n in v))
-            if not norm:raise ValueError()
+            norm=math.hypot(*v)
+            if not norm or not math.isfinite(norm):raise ValueError()
             v[:]=[n/norm for n in v]
         return vectors
     except (ValueError,TypeError,KeyError,IndexError):raise ValueError('임베딩 벡터의 형식·차원을 확인하세요.') from None
@@ -77,7 +82,14 @@ async def nearest(query_vector,documents,index_profile):
     data=await vector_request('POST','/collections/'+collection(index_profile)+'/points/query',
         {'query':query_vector,'filter':{'must':[{'key':'document_id','match':{'any':documents}}]},
          'limit':30,'with_payload':False,'with_vector':False})
-    return [] if data is None else [p['id'] for p in data['result']['points']]
+    if data is None:return []
+    try:
+        points=data['result']['points']
+        if not isinstance(points,list) or len(points)>30:raise ValueError()
+        ids=[point['id'] for point in points]
+        if any(not isinstance(value,str) or not 1<=len(value)<=128 for value in ids):raise ValueError()
+        return list(dict.fromkeys(ids))
+    except (KeyError,TypeError,ValueError):raise ValueError('벡터 검색 서버의 응답을 확인하세요.') from None
 
 async def purge(document_id,owner_id,index_profile,revision=None):
     if not index_profile:return
@@ -94,6 +106,7 @@ async def rerank(query,candidates):
         s.knowledge_rerank_key.get_secret_value())
     try:
         indices=[r['index'] for r in result['results']]
-        if len(set(indices))!=len(indices) or any(not isinstance(i,int) or not 0<=i<len(candidates) for i in indices):raise ValueError()
+        if len(indices)!=len(candidates) or any(type(i) is not int or not 0<=i<len(candidates) for i in indices):raise ValueError()
+        if len(set(indices))!=len(indices):raise ValueError()
         return [candidates[i] for i in indices]
     except (TypeError,KeyError,ValueError):raise ValueError('재정렬 서버의 응답을 확인하세요.') from None

@@ -88,8 +88,16 @@ def reply(*, provider='vllm'):
 
 def structured_reply(plan, *, provider='vllm'):
     message = {'content': json.dumps(plan) if isinstance(plan, dict) else plan}
-    return httpx.Response(200, json={'message': message} if provider == 'ollama'
-        else {'choices': [{'message': message}]})
+    if provider == 'ollama':
+        return httpx.Response(200, text=json.dumps({'message': message, 'done': True}) + '\n',
+            headers={'content-type': 'application/x-ndjson'})
+    chunk = {'choices': [{'delta': message, 'finish_reason': 'stop'}]}
+    return httpx.Response(200, text='data: ' + json.dumps(chunk) + '\n\ndata: [DONE]\n\n',
+        headers={'content-type': 'text/event-stream'})
+
+
+def is_decision(payload):
+    return 'response_format' in payload or 'format' in payload
 
 
 def vision_message(payload, provider='vllm'):
@@ -140,12 +148,13 @@ def test_image_router_failure_preserves_text_chat(client, account, wire, failure
     async def handle(request):
         assert request.url.host == 'chat-server.test'
         payload = json.loads(request.content)
-        if payload['stream']:
+        if not is_decision(payload):
             assert payload['messages'][-1]['content'] == '오늘의 업무를 정리해 줘'
             return reply()
+        assert payload['stream'] is True
         if failure == 'timeout':
             raise httpx.ReadTimeout('upstream diagnostic must stay private', request=request)
-        return httpx.Response(200, json={'choices': [{'message': {'content': 'invalid JSON'}}]})
+        return structured_reply('invalid JSON')
 
     requests = wire(handle)
     headers = auth(account())
@@ -154,7 +163,8 @@ def test_image_router_failure_preserves_text_chat(client, account, wire, failure
     stream = events(response)
     assert stream[-1][0] == 'done', response.text
     assert stream[-1][1]['message']['content'] == TEXT_REPLY
-    assert [json.loads(request.content)['stream'] for request in requests] == [False, True]
+    assert [is_decision(json.loads(request.content)) for request in requests] == [True, False]
+    assert all(json.loads(request.content)['stream'] for request in requests)
     assert not any(name == 'artifact' for name, _ in stream)
     assert 'upstream diagnostic must stay private' not in response.text
 
@@ -238,9 +248,9 @@ def test_automatic_edit_uses_latest_image_in_the_conversation(client, account, w
         if request.url.host == 'chat-server.test':
             payload = json.loads(request.content)
             decision = json.loads(payload['messages'][-1]['content'])
-            assert not payload['stream'] and decision['available']['image_edit']
+            assert payload['stream'] and is_decision(payload) and decision['available']['image_edit']
             plan = {'route': 'image_edit', 'image_prompt': '해 질 무렵의 따뜻한 색감으로 바꾼다.'}
-            return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(plan)}}]})
+            return structured_reply(plan)
         assert str(request.url) == EDIT_URL
         parts = multipart_parts(request)
         assert parts['image'].get_payload(decode=True) == png_bytes
@@ -277,7 +287,7 @@ def test_llm_routes_the_same_attachment_by_request(client, account, wire, png_by
             return image_result(png_bytes)
         assert request.url.path == ('/api/chat' if provider == 'ollama' else '/v1/chat/completions')
         payload = json.loads(request.content)
-        if payload['stream']:
+        if not is_decision(payload):
             if payload['messages'][-1]['content'] == translate:
                 assert encoded not in request.content
             else:
@@ -325,7 +335,7 @@ def test_automatic_vision_uses_explicit_document_evidence(client, account, wire,
     async def handle(request):
         assert request.url.host == 'chat-server.test'
         payload = json.loads(request.content)
-        if not payload['stream']:
+        if is_decision(payload):
             return structured_reply({'route': 'vision', 'query': '점검 주기'})
         text, pixels = vision_message(payload)
         assert pixels == png_bytes and question in text and evidence in text
@@ -352,7 +362,7 @@ def test_automatic_router_failure_keeps_the_current_image(client, account, wire,
     async def handle(request):
         assert request.url.host == 'chat-server.test'
         payload = json.loads(request.content)
-        if not payload['stream']:
+        if is_decision(payload):
             assert base64.b64encode(png_bytes) not in request.content
             return structured_reply('invalid JSON')
         assert vision_message(payload) == (question, png_bytes)
@@ -376,7 +386,7 @@ def test_automatic_route_cannot_send_images_to_text_only_model(client, account, 
     async def handle(request):
         assert request.url.host == 'chat-server.test'
         payload = json.loads(request.content)
-        assert not payload['stream'] and base64.b64encode(png_bytes) not in request.content
+        assert payload['stream'] and is_decision(payload) and base64.b64encode(png_bytes) not in request.content
         available = json.loads(payload['messages'][-1]['content'])['available']
         assert not available['image_vision'] and available['image_edit']
         return structured_reply({'route': 'vision'})
@@ -400,7 +410,7 @@ def test_edited_question_inherits_raw_image_in_fork(client, account, wire, png_b
 
     async def handle(request):
         payload = json.loads(request.content)
-        if not payload['stream']:
+        if is_decision(payload):
             return structured_reply({'route': 'vision'})
         text, pixels = vision_message(payload)
         assert pixels == png_bytes and text in {describe, revised}
@@ -466,7 +476,7 @@ def assert_rejected(response):
 @pytest.mark.parametrize('mode', ['vision', 'auto'])
 def test_vision_upload_cancellation_respects_turn_acceptance(client, account, wire, png_bytes, mode):
     async def handle(request):
-        if not json.loads(request.content)['stream']:
+        if is_decision(json.loads(request.content)):
             assert mode == 'auto'
             return structured_reply({'route': 'vision'})
         return reply()

@@ -1,5 +1,38 @@
 # 계정·대화·운영 기능 검증
 
+## 폐쇄망 에이전트 통합 고도화 — 2026-11-20
+
+기준 원격 main: `e4ad6a9d9410e1ba519dd0959b28b465a3b893ea`. 브랜치: `feat/offline-agent-trace-20261120`. 시작 전과 최종 전달 전 원격 main을 확인했습니다. GitHub Actions는 실행하지 않았습니다. [변경 파일·목적](docs/agent-upgrade-changes.md), [구성·설정·제약](AGENT_SYSTEM.md)을 함께 참고하세요.
+
+| 최종 검사 | 실제 결과 |
+| --- | --- |
+| 백엔드 전체 | `cd backend && ../.venv/bin/python -m pytest -q`: **566 passed**, 234.80초. 기존 Starlette 폐기 예정 경고 2건 |
+| 프론트엔드 | Node **100 passed**, 린트 경고 0건, 타입 검사·프로덕션 빌드 통과 |
+| 독립 실행 HTTP | 실제 Python·Next 별도 프로세스와 격리 SQLite의 `scripts/smoke_standalone.py` 통과. 로그인·SSE/재접속·Canvas·게이트웨이·파일 생성/다운로드·OAuth·업로드/색인/RAG·개인 설정·운영 권한 확인 |
+| 구성·정적 검사 | Compose YAML 5개 파싱, Python 구문 검사, 최종 staged diff 공백 검사 통과. 기능 검사 최대 시간을 BFF·두 Nginx 예시에 반영 |
+| 화면 조작 | Playwright 50개 시나리오 정의(신규 8개). Chromium이 페이지 접근 전에 Unix 소켓 제한으로 종료되어 **미검증**. 공식 headless-shell 설치도 네트워크 403으로 제한됨. 화면 성공·반응형 실검증이나 스크린샷을 주장하지 않음 |
+
+| 필수 시나리오 | 검증 근거 |
+| --- | --- |
+| 1. 한국어 스트리밍 | `test_generation_trace_integration.py`, `test_chat.py`: HTTPX SSE 대역, UTF-8·별도 답변 저장 |
+| 2–3. 추론 분리·미지원 모델 | `test_reasoning_trace_provider.py`: vLLM reasoning/reasoning_content·Ollama thinking, 공개/지원 꺼짐, 분할 비밀값·개인키 제거, 실측 출처 구분 |
+| 4. RAG·MCP·GitLab 단계 | 자동 처리·GitLab·Trace 검사: 실제 시작/완료·고정 ID·시간·출처, 병렬 완료 순서 상관관계 |
+| 5. OAuth 연결·만료·권한 | `test_gitlab_apps.py`, `test_gitlab_discovery_actions.py`: PKCE·갱신·다중 계정·재연결·읽기 권한 거절 |
+| 6. 탐색→Clone→분석→수정→검증→커밋→게시→MR | `test_prompt_gitlab.py`, `test_gitlab_publishing.py`, `test_gitlab_agent_discovery.py`: 실제 로컬 Git HTTP·MCP·파일/명령 실행, 게시 API는 GitLab 대역 |
+| 7. 동일 MR 후속 커밋 | `test_gitlab_merge_requests.py`: 리뷰·CI 발췌, 기존 소스 브랜치·경합 검사, 병합된 MR 제외 |
+| 8. CI·경합·경로·시간 초과 | MR·터미널·GitLab 검사: 실패 로그·응답 유실·잘못된 경로·보호 범위·비밀 파일 이름 변경 Diff 우회 차단 |
+| 9–11. 멀티태스킹·복원·10명 | `test_ten_user_queue.py`, `test_trace_jobs_recovery.py`, Trace 통합 검사: 10명 동시 모의 요청·독립 대화·FIFO·상한·구독 해제/넘침·취소·재시도·버전·분기·중단 복구 |
+| 12. 비밀·인가·인젝션·중복 쓰기 | `test_agent_recovery.py`, GitLab·검색·작업공간 검사: 자료/인용문/보고서/번역은 게시 승인 아님, 슬롯 획득 직후 권한 회수 차단, 재생성·동시 요청·OAuth 재연결 중복 게시 차단 |
+| 13. 기존 기능 회귀 | 전체 566개 + Node 100개 + HTTP 통합. 이미지/오디오/파일 대역을 새 구조화·도구 SSE 계약에 맞추고 기존 오류·취소·권한 단언 유지 |
+
+성능 관측은 실제 GPU 벤치마크와 구분합니다. 로컬 모의 SSE 10개 요청은 모두 완료되고 최대 동시 모델 호출 3개를 지켰습니다(해당 시험 0.985초). 1,000청크 키워드 검색 중앙값 215.33ms, 100파일/1,000함수 정적 색인 최초 106.01ms·캐시 중앙값 42.20ms였습니다. 현재 로컬 표본이며 변경 전후 개선율이나 H100 처리량이 아닙니다. 프론트엔드 검사는 1,000조각 버스트를 한 번의 텍스트 업데이트로 합쳤고, 추론 저장은 약 0.75초 체크포인트를 검증했습니다.
+
+실제 폐쇄망 GitLab CE/GitLab.com, vLLM·Ollama/Gemma·gpt-oss, H100 4장, Android Termux, PostgreSQL, Docker/Nginx 데몬은 실가동 검증하지 않았습니다. 기존 연결 관계·마이그레이션·인덱스 보존은 실제 SQLite에서 확인했으며 PostgreSQL은 코드·타입 검토입니다. 모의 서버 통과를 실제 모델 인증으로 표시하지 않습니다. 문맥 검사는 제한된 샘플, 동시 기능 검사는 2건이며 최대 문맥·10명 GPU 처리량을 보증하지 않습니다.
+
+알려진 제약: 이슈의 updated_at은 사전 확인이며 외부 동시 수정을 원자적으로 막지 않습니다. 웹훅은 GitLab에서 수동 등록하고 앱 내 선택형 알림만 제공합니다. 임베딩을 설정한 신규 색인 중 서버가 실패하면 오류 상태에서 재색인이 필요하며, 이미 색인된 자료의 검색 장애는 키워드로 복구합니다. 서버 재시작 후 원격 쓰기를 자동 재실행하지 않고 임대 만료 시 저장된 부분 결과를 오류로 복원합니다.
+
+
+
 ## 프롬프트 GitLab 작업과 계정·공통 디자인 검증 — 2026-11-11
 
 | 검증 | 결과 |

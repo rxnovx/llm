@@ -30,7 +30,7 @@ ACTION = re.compile(
     r'|(?P<push>푸[시쉬]|\bpush\b)'
     r'|(?P<commit>커밋|\bcommit\b)'
     r'|(?P<edit>(?:수정|고쳐|구현|리팩터링|변경)(?!사항|내역|이력|기록|목록)|테스트\s*(?:실행|돌려)?'
-    r'|\b(?:edit|fix|refactor|implement|run tests)\b)',
+    r'|빌드\s*(?:실행|돌려)?|\b(?:edit|fix|refactor|implement|run tests|build)\b)',
     re.I,
 )
 DIRECTIVE = re.compile(

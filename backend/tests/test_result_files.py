@@ -69,15 +69,21 @@ def upstream(client, monkeypatch):
                 return audio_reply
             assert SPEECH_KEY.encode() not in request.content
             payload = json.loads(request.content)
+            assert payload['stream'] is True
             if 'response_format' in payload:
                 assert json.loads(payload['messages'][-1]['content'])['available']['file_request']
                 if route_error:
                     return httpx.Response(400, json={'error': 'structured output unsupported'})
                 message = {'content': '{"route":"direct"}'}
             else:
-                assert not payload['stream']
+                assert 'tools' in payload
                 message = reply(payload)
-            return httpx.Response(200, json={'choices': [{'message': message}]})
+            delta = dict(message)
+            if delta.get('tool_calls'):
+                delta['tool_calls'] = [dict(call, index=index) for index, call in enumerate(delta['tool_calls'])]
+            chunk = {'choices': [{'delta': delta, 'finish_reason': 'tool_calls' if delta.get('tool_calls') else 'stop'}]}
+            return httpx.Response(200, text='data: ' + json.dumps(chunk) + '\n\ndata: [DONE]\n\n',
+                headers={'content-type': 'text/event-stream'})
 
         original = httpx.AsyncClient
         transport = httpx.MockTransport(serve)

@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
-  testDir: "./tests", workers: 1, fullyParallel: false,
+  testDir: "./tests", testMatch: "**/*.spec.ts", workers: 1, fullyParallel: false,
   timeout: 60_000, expect: { timeout: 10_000 },
   use: {
     baseURL: process.env.ACCOUNTS_BASE_URL ?? "http://localhost:3000",

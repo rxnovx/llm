@@ -8,6 +8,8 @@ from sqlalchemy import and_,delete,func,or_,select
 from sqlalchemy.orm import load_only, object_session
 from app.modules.chat.models import Conversation,Message,ContextNote
 from app.modules.chat.scheduler import lock
+from app.modules.chat import trace_history
+from app.modules.chat.trace import safe_text
 from app.modules.assistant.models import TurnContext,TurnDecision
 from app.modules.integrations.models import MessageContext
 from app.modules.workspaces.models import ToolTrace
@@ -78,10 +80,14 @@ def message_extra(item,run_id=None):
     writes=bool(options.get('allow_writes') or any(a.get('mode')=='execute' for a in apps))
     recovery=None
     if item.role=='assistant' and (item.status in {'error','cancelled'} or state and state.error_code):
+        if not writes:
+            from app.modules.integrations.models import GitlabWriteReceipt
+            db=object_session(item)
+            writes=bool(db and db.scalar(select(GitlabWriteReceipt.id).where(GitlabWriteReceipt.message_id==item.id).limit(1)))
         code=state.error_code if state else item.status
         recovery={'code':code or item.status,'phase':state.phase if state else '',
             'preserved_previous':item.status=='complete','requires_confirmation':writes,'can_retry':True,'can_resume_execution':False,
-            'actions':['retry','select_model','check_apps' if apps or options.get('mcp_ids') else 'check_documents']}
+            'actions':['retry','select_model','check_apps' if apps or options.get('mcp_ids') or state and state.phase.startswith(('gitlab','mcp')) else 'check_documents']}
     return {'versions':[{'id':v.id,'sequence':v.sequence,'model':v.model,'created_at':v.created_at} for v in item.versions],
         'active_version':active,'artifacts':[artifact_public(a) for a in artifacts],
         'recovery':recovery,'feedback_count':len(item.answer_feedback)}
@@ -98,7 +104,8 @@ def payload(item,run_id=None):
         'apps':json.loads(record.apps_json) if record else [],'sources':json.loads(record.sources_json) if record else [],
         'assistant':json.loads(item.assistant_context.data_json) if item.assistant_context else {},
         'routing':json.loads(item.decision_record.data_json) if item.decision_record else {},
-        'tools':[{'name':t.name,'step':t.step,'status':t.status,'detail':t.detail} for t in traces],
+        'tools':[{'name':t.name,'step':t.step,'status':t.status,'detail':safe_text(t.detail)} for t in traces],
+        'generation_trace':trace_history.payload(object_session(item),item,run_id),
         **message_extra(item,run_id)}
 
 
@@ -151,7 +158,10 @@ def apply_payload(db,message,data,*,branch=False):
     message.assistant_context.data_json=json.dumps(options)
     if not message.decision_record:message.decision_record=TurnDecision()
     message.decision_record.data_json=json.dumps(data.get('routing',{}),ensure_ascii=False)
-    message.tool_traces=[ToolTrace(name=t['name'],status=t['status'],step=t['step'],detail=t['detail']) for t in data.get('tools',[])[:80]]
+    trace = data.get('generation_trace')
+    steps = trace.get('steps', [])[:240] if trace else data.get('tools',[])[:80]
+    message.tool_traces=[ToolTrace(name=t['name'],status=t['status'],step=t['step'],detail=t['detail']) for t in steps]
+    trace_history.restore(db,message,trace)
     state=state_for(db,message);state.artifact_ids_json=json.dumps([a['id'] for a in data.get('artifacts',[])])
     return options
 

@@ -19,7 +19,7 @@ from app.db.session import get_db
 from app.modules.auth.dependencies import AuthContext, Authenticated
 from app.modules.auth.models import AuditLog, RefreshSession, User
 from app.modules.chat.models import ConnectionSetting, Conversation, GenerationRun as Run, Message
-from app.modules.chat import providers, registry, scheduler, usage
+from app.modules.chat import diagnostics, providers, registry, scheduler, usage
 from app.modules.chat.independent import admitted
 from app.modules.auth.audit import add_audit_log
 from app.modules.workflows import image_queue, images
@@ -169,6 +169,49 @@ async def check(connection_id: str, context: Admin, db: Database):
         return {'status': 'test' if connection.provider == 'test' else 'reachable', 'models': models}
     except providers.ProviderError as error:
         raise HTTPException(502, str(error)) from None
+
+
+@router.get('/telemetry')
+def generation_telemetry(context: Admin, db: Database, hours: int = Query(24, ge=1, le=168)):
+    return diagnostics.telemetry(db, hours=hours)
+
+
+@router.get('/connections/{connection_id}/capabilities')
+def connection_capabilities(connection_id: str, context: Admin, db: Database, model: str = Query('', max_length=200)):
+    try:
+        connection = providers.resolve(get_settings(), connection_id, db, context.user)
+        selected = diagnostics.configured_model(connection, model)
+    except providers.ProviderError as error:
+        raise HTTPException(422, str(error)) from None
+    return diagnostics.history(db, connection, selected)
+
+
+@router.post('/connections/{connection_id}/capabilities/probe')
+async def probe_capabilities(connection_id: str, data: diagnostics.ProbeInput, request: Request, context: Admin, db: Database):
+    settings = get_settings()
+    try:
+        connection = providers.resolve(settings, connection_id, db, context.user)
+        selected = diagnostics.configured_model(connection, data.model)
+    except providers.ProviderError as error:
+        raise HTTPException(422, str(error)) from None
+    bind, user_id = db.get_bind(), context.user.id
+    db.rollback()
+    task = asyncio.create_task(diagnostics.probe(bind, user_id, connection, selected, settings, data))
+    try:
+        while not task.done():
+            if await request.is_disconnected():
+                raise HTTPException(499, '모델 기능 검사가 중단되었습니다. 완료된 검사 기록은 유지됩니다.')
+            await asyncio.wait({task}, timeout=0.5)
+        result = task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    add_audit_log(db, action='admin.model.capabilities', actor_user_id=user_id, request=request,
+                  details={'connection_id': connection_id, 'model': selected,
+                           'checks': {item['capability']: item['status'] for item in result['items']}})
+    db.commit()
+    return result
 
 
 @router.get('/connections')

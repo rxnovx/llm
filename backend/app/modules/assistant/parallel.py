@@ -57,14 +57,16 @@ def parse(arguments):
     return tasks
 
 
-async def results(bind, user_id, connection, model, settings, tasks, question, evidence, cancelled):
+async def results(bind, user_id, connection, model, settings, tasks, question, evidence, cancelled, *, validate=None):
     def guard(_db):
         if cancelled():
             raise RequestCancelled()
 
     async def analyze(index, task):
         try:
+            if validate:await validate()
             async with admitted(bind, user_id, connection, model, settings, guard=guard) as (selected, _):
+                if validate:await validate()
                 profile = selected.profile(model)
                 limit = min(512, profile.max_output_tokens)
                 instruction = (

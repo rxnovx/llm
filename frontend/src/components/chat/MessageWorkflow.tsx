@@ -8,7 +8,7 @@ import { WorkspaceLink } from '@/components/shared/WorkspaceLink';
 import { useDialogDismiss } from '@/components/shared/useDialogDismiss';
 import { AnswerFiles } from './AnswerFiles';
 import { activityLabel } from './activity-labels';
-export function MessageWorkflow({message,conversationId,disabled,onResult,onFiles,onRetry,onModels,onApps,onReferenceImage}:{message:ChatMessage;conversationId:string;disabled:boolean;onResult:(r:ForkResult)=>void;onFiles:(files:NonNullable<ChatMessage['artifacts']>)=>void;onRetry?:()=>void;onModels:()=>void;onApps:()=>void;onReferenceImage?:(file:ResultFile)=>void}){
+export function MessageWorkflow({message,conversationId,disabled,onResult,onFiles,onRetry,onModels,onApps,onGitlabConnect,onReferenceImage}:{message:ChatMessage;conversationId:string;disabled:boolean;onResult:(r:ForkResult)=>void;onFiles:(files:NonNullable<ChatMessage['artifacts']>)=>void;onRetry?:()=>void;onModels:()=>void;onApps:()=>void;onGitlabConnect?:()=>void;onReferenceImage?:(file:ResultFile)=>void}){
   const dialog=useRef<HTMLDialogElement>(null);
   const [mode,setMode]=useState(''),[text,setText]=useState(message.content),[busy,setBusy]=useState(false),[error,setError]=useState('');
   const closeDialog = () => setMode('');
@@ -20,9 +20,13 @@ export function MessageWorkflow({message,conversationId,disabled,onResult,onFile
   const fork=(content?:string)=>action(async()=>{const r=await workflowJson<ForkResult>(`/conversations/${conversationId}/fork?${messagePageQuery}`,{method:'POST',body:JSON.stringify({message_id:message.id,...(content===undefined?{}:{content})})});setMode('');onResult(r);});
   const openVersions=()=>{setMode('versions');void action(async()=>{const r=await workflowJson<{items:typeof versions}>(`/messages/${message.id}/versions`);setVersions(r.items);setChosen(message.active_version||r.items.at(-1)?.id||'');setCompare(r.items.find(v=>v.id!==message.active_version)?.id||'');});};
   const coverage=message.routing?.coverage;
+  const gitlabRecovery=message.role==='assistant'&&message.status==='error'&&(
+    message.recovery?.code==='gitlab_error'||/gitlab/i.test(message.error??'')
+    ||message.recovery?.code==='app_connection'&&(!!message.apps?.length||['gitlab','both'].includes(message.routing?.route??'')));
   return <>
     {message.role==='assistant'&&coverage&&<details className="cw-coverage"><summary>확인한 범위 · 소스 {coverage.source_files??0}개 파일 · 문서 {coverage.documents??0}개 · 앱 조회 {coverage.app_results??0}개</summary><dl><div><dt>실제 발췌</dt><dd>{coverage.excerpts??0}개</dd></div>{coverage.repository&&<><div><dt>색인한 파일</dt><dd>{coverage.repository.indexed_files??0}개</dd></div><div><dt>정의 / import</dt><dd>{coverage.repository.symbols??0} / {coverage.repository.imports??0}</dd></div></>}</dl>{coverage.repository?.truncated&&<p>저장소 색인 한도로 일부 파일이 제외되었습니다.</p>}{coverage.issues?.length? <p>파싱·색인 주의사항 {coverage.issues.length}개 · 작업 기록에서 상세 내용을 확인하세요.</p>:null}{coverage.limitations?.map((text,i)=><p key={i}>{text}</p>)}</details>}
     {message.recovery&&<div className="cw-recovery" role="status"><strong>중단된 단계: {activityLabel(message.recovery.phase, message.recovery.phase ? '도구 작업' : '응답 생성')}</strong><p>{message.recovery.preserved_previous?'재생성이 중단되어 이전 정상 답변을 유지했습니다. ':'표시된 부분 답변은 저장했습니다. '}{message.recovery.requires_confirmation?'재시도하면 명령이나 외부 변경이 다시 실행될 수 있습니다.':'연결 상태와 자료를 확인한 뒤 다시 시도하세요.'}</p><div>{onRetry&&<button type="button" className="cw-text-button" disabled={disabled} onClick={onRetry}>다시 시도</button>}<button type="button" className="cw-text-button" onClick={onModels}>모델 변경·연결 확인</button><button type="button" className="cw-text-button" onClick={onApps}>앱·자료 확인</button></div>{['app_connection','gitlab_error'].includes(message.recovery.code)&&<p>GitLab 로그인은 <WorkspaceLink href="/user/settings/apps">계정 설정의 연결된 앱</WorkspaceLink>에서 진행하세요. 일반 MCP의 주소·인증·허용 도구는 운영자가 등록합니다.</p>}</div>}
+    {gitlabRecovery&&<p className="cw-gitlab-recovery"><WorkspaceLink href="/user/settings/apps" onClick={onGitlabConnect}>GitLab 연결</WorkspaceLink><span>질문을 유지한 채 계정 연결·재인증과 권한을 확인하세요.</span></p>}
     {message.role==='assistant'&&message.status==='complete'&&<AnswerFiles messageId={message.id} files={message.artifacts} onChange={onFiles} onReferenceImage={onReferenceImage} referenceDisabled={disabled}/>}
     {message.status!=='pending'&&<div className="cw-message-workflows">
       {message.role==='user'&&<button type="button" className="cw-text-button" disabled={disabled} onClick={()=>{setText(message.content);setError('');setMode('edit');}}>질문 수정</button>}

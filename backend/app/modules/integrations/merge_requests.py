@@ -248,7 +248,7 @@ async def diffs(upstream, mr):
         if not isinstance(row, dict):
             continue
         path = row.get('new_path') or row.get('old_path')
-        if isinstance(path, str) and config.source_file(path):
+        if isinstance(path, str) and config.source_change(row.get('old_path'), row.get('new_path')):
             patch = clip(row.get('diff'), 900)
             entries.append({'path': path, 'patch': patch,
                 'partial': bool(row.get('collapsed') or row.get('too_large') or patch != row.get('diff'))})

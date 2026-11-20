@@ -138,7 +138,7 @@ def test_parallel_workers_overlap_and_parent_synthesizes_partial_results(client,
     async def handle(request):
         payload = json.loads(request.content)
         calls.append(payload)
-        if payload['stream']:
+        if payload['stream'] and 'tools' not in payload:
             assert 'tools' not in payload and payload['max_tokens'] <= 512
             task = json.loads(payload['messages'][-1]['content'])['assignment']
             completed.add(task)

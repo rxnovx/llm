@@ -135,3 +135,9 @@ def source_file(path):
         return False
     return name in {'dockerfile','makefile','readme','license'} or bool(re.search(
         r'\.(py|ts|tsx|js|jsx|json|yaml|yml|toml|md|txt|go|rs|java|c|cpp|h|hpp|cs|php|rb|sql|sh|vue|svelte|html|css|scss|ini|properties|xml|gradle|kt|kts|swift|dart|example)$',name))
+
+
+def source_change(old_path, new_path):
+    """이름이 바뀐 파일은 변경 전후 경로가 모두 공개 가능한 소스여야 합니다."""
+    paths = [path for path in (old_path, new_path) if path is not None and path != '']
+    return bool(paths) and all(isinstance(path, str) and source_file(path) for path in paths)

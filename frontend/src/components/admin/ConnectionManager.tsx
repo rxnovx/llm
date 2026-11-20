@@ -3,14 +3,16 @@ import { useEffect, useState, type FormEvent } from "react";
 import { authenticatedFetch, ApiRequestError } from "@/lib/authenticated-fetch";
 import type { ModelProfile } from "@/types/chat";
 import { ImageDiagnostics } from "./ImageDiagnostics";
+import { CapabilityDiagnostics } from "./CapabilityDiagnostics";
 
 type Draft = { id: string; name: string; provider: "vllm" | "ollama"; base_url: string; model: string; enabled: boolean;
   allowed_users: string[]; models: ModelProfile[]; context_window: number; max_output_tokens: number; max_concurrent: number;
-  auth_mode: "inherit" | "none" | "reference"; key_ref: string; revision: number; supports_tools: boolean; supports_vision: boolean };
+  auth_mode: "inherit" | "none" | "reference"; key_ref: string; revision: number; supports_tools: boolean; supports_vision: boolean;
+  supports_reasoning: boolean; reasoning_visibility: "off" | "public" };
 type Managed = Draft & { source: "database" | "environment"; has_key: boolean; has_environment: boolean };
 const empty = (): Draft => ({ id: "", name: "", provider: "vllm", base_url: "", model: "", enabled: true,
   allowed_users: [], models: [], context_window: 8192, max_output_tokens: 2048, max_concurrent: 2, auth_mode: "none", key_ref: "", revision: 0,
-  supports_tools: false, supports_vision: false });
+  supports_tools: false, supports_vision: false, supports_reasoning: false, reasoning_visibility: "off" });
 const draftOf = (item: Managed): Draft => Object.fromEntries(Object.keys(empty()).map((key) => [key, item[key as keyof Draft]])) as Draft;
 
 export function ConnectionManager({ onForbidden }: { onForbidden: () => void }) {
@@ -25,6 +27,7 @@ export function ConnectionManager({ onForbidden }: { onForbidden: () => void }) 
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [refresh, setRefresh] = useState(0);
+  const [diagnosing, setDiagnosing] = useState("");
   useEffect(() => {
     const abort = new AbortController();
     void authenticatedFetch("/api/admin/connections", { signal: AbortSignal.any([abort.signal, AbortSignal.timeout(12000)]) })
@@ -85,8 +88,11 @@ export function ConnectionManager({ onForbidden }: { onForbidden: () => void }) 
         <button className="ops-button" disabled={!item.enabled || loading || saving || !!probing} onClick={() => void probe(item)}>
           {probing === item.id ? '응답 확인 중…' : '테스트 응답'}</button>
         <button className="ops-button" disabled={loading || saving} onClick={() => edit(item)}>설정 수정</button>
+        <button className="ops-button" disabled={!item.enabled || loading || saving} onClick={() => setDiagnosing(item.id)}>기능 진단</button>
       </div></div>)}</div>
     {!loading && !items.length && <p className="ops-empty">등록된 모델 연결이 없습니다. 첫 연결을 등록하세요.</p>}
+    {items.find(item => item.id === diagnosing) && <CapabilityDiagnostics key={diagnosing} connection={items.find(item => item.id === diagnosing)!}
+      onForbidden={onForbidden} onClose={() => setDiagnosing("")} />}
     {draft && <form className="ops-connection-form" onSubmit={(event) => void save(event)}><h3>{creating ? "새 연결 등록" : `${draft.name} 설정`}</h3>
       <fieldset disabled={saving}><div className="ops-form-grid">
         <label>연결 ID<input required pattern="[a-zA-Z0-9_-]{1,64}" maxLength={64} disabled={!creating} value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })} placeholder="office-vllm" /></label>
@@ -104,8 +110,12 @@ export function ConnectionManager({ onForbidden }: { onForbidden: () => void }) 
         <div className="ops-capabilities">
           <label><input type="checkbox" checked={draft.supports_tools} onChange={(event) => setDraft({ ...draft, supports_tools: event.target.checked })} />기본 모델의 도구 호출 사용</label>
           <label><input type="checkbox" checked={!!draft.supports_vision} onChange={(event) => setDraft({ ...draft, supports_vision: event.target.checked })} />기본 모델의 이미지 입력 사용</label>
+          <label><input type="checkbox" checked={!!draft.supports_reasoning} onChange={(event) => setDraft({ ...draft, supports_reasoning: event.target.checked,
+            reasoning_visibility: event.target.checked ? draft.reasoning_visibility : "off" })} />기본 모델의 추론 출력 지원</label>
+          <label><input type="checkbox" disabled={!draft.supports_reasoning} checked={draft.reasoning_visibility === "public"}
+            onChange={(event) => setDraft({ ...draft, reasoning_visibility: event.target.checked ? "public" : "off" })} />모델이 제공한 추론을 사용자에게 공개</label>
         </div>
-      </div><p className="ops-form-help">vLLM 주소는 /v1까지, Ollama는 서버 루트를 입력하세요. 이미지 입력은 지원하는 모델에서 켜세요. 문맥 한도는 실제 서빙 설정 이내로 지정하세요. 인증키 값은 서버의 LLM_PROVIDER_KEYS_JSON에 보관하며 화면에 전달하지 않습니다.</p>
+      </div><p className="ops-form-help">vLLM 주소는 /v1까지, Ollama는 서버 루트를 입력하세요. 이미지·추론 출력은 지원하는 모델에서 켜세요. 추론은 기본 비공개이며 공개 설정 시 비밀값을 제거한 모델 출력만 표시합니다. 문맥 한도는 실제 서빙 설정 이내로 지정하세요. 인증키 값은 서버의 LLM_PROVIDER_KEYS_JSON에 보관하며 화면에 전달하지 않습니다.</p>
       <label className="ops-wide-label">사용을 허용할 사용자명<textarea rows={2} maxLength={32000} value={users} onChange={(event) => setUsers(event.target.value)} placeholder="비우면 전체 사용자 · 쉼표 또는 줄바꿈으로 구분" /></label>
       <label className="ops-checkbox"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />이 연결 사용</label>
       <div className="ops-model-profiles"><h4>모델별 설정</h4><p>등록하면 이 목록의 모델만 사용할 수 있습니다. 비워 두면 서버의 모델을 직접 선택합니다.</p>
@@ -118,6 +128,10 @@ export function ConnectionManager({ onForbidden }: { onForbidden: () => void }) 
             <div className="ops-capabilities">
               <label><input type="checkbox" checked={!!item.supports_tools} onChange={(event) => profile(index, { supports_tools: event.target.checked })} />도구 호출 사용</label>
               <label><input type="checkbox" checked={!!item.supports_vision} onChange={(event) => profile(index, { supports_vision: event.target.checked })} />이미지 입력 사용</label>
+              <label><input type="checkbox" checked={!!item.supports_reasoning} onChange={(event) => profile(index, { supports_reasoning: event.target.checked,
+                reasoning_visibility: event.target.checked ? item.reasoning_visibility ?? "off" : "off" })} />추론 출력 지원</label>
+              <label><input type="checkbox" disabled={!item.supports_reasoning} checked={item.reasoning_visibility === "public"}
+                onChange={(event) => profile(index, { reasoning_visibility: event.target.checked ? "public" : "off" })} />추론 공개</label>
             </div>
             <button type="button" className="ops-button" aria-label={`${item.name || index + 1} 모델 설정 삭제`} onClick={() => setDraft({ ...draft, models: draft.models.filter((_, at) => at !== index) })}>삭제</button>
           </div>
