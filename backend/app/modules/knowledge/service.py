@@ -158,12 +158,31 @@ def selected_documents(db,user_id,selection,conversation_id):
     return documents
 
 def terms(text):
-    words=re.findall(r'[\w]+',text.casefold())[:2000]
-    # Korean particles vary; character bigrams supplement exact word matching.
-    return words+[w[i:i+2] for w in words if re.search('[가-힣]',w) for i in range(len(w)-1)]
+    words=re.findall(r'[\w]+',text)[:2000]
+    tokens=[]
+    for word in words:
+        value=word.casefold()
+        tokens.append(value)
+        # 전체 식별자와 구성 단어를 함께 보존해 loginUser/login_user도 검색한다.
+        if '_' in word or word!=word.lower():
+            split=re.sub(r'([A-Z]+)([A-Z][a-z])',r'\1 \2',word)
+            split=re.sub(r'([a-z0-9])([A-Z])',r'\1 \2',split)
+            pieces=[piece.casefold() for piece in re.split(r'[_\s]+',split) if piece]
+            if pieces!=[value]:tokens.extend(pieces)
+        # 한국어 조사가 달라도 실제 본문을 찾도록 문자 bigram을 함께 사용한다.
+        if re.search('[가-힣]',value):tokens.extend(value[i:i+2] for i in range(len(value)-1))
+    return tokens
 
-def lexical_ranks(chunks,query):
-    query_terms=set(terms(query));tokens=[Counter(terms(c.content)) for c in chunks]
+def lexical_ranks(chunks,query,documents=None):
+    if not chunks:return []
+    documents=documents or {}
+    query_terms=set(terms(query))
+    tokens=[]
+    for chunk in chunks:
+        document=documents.get(chunk.document_id)
+        # 제목이나 시트명으로 찾은 경우에도 반드시 실제 청크를 반환한다.
+        metadata=(document.filename+' '+chunk.location) if document else ''
+        tokens.append(Counter(terms(chunk.content+' '+metadata)))
     avg=sum(sum(t.values()) for t in tokens)/len(tokens)
     frequencies={t:sum(t in counts for counts in tokens) for t in query_terms}
     scores=[]
@@ -217,17 +236,22 @@ async def search(bind,user_id,selection,conversation_id,query,limit=8,*,include_
     if len(chunks)>15000:raise HTTPException(422,'검색 범위가 큽니다. 자료를 나눠 선택하세요.')
     if not chunks:return {'matches':[],'mode':'lexical','notice':'검색할 자료가 없습니다.'}
     limit = max(1, min(10, limit))
-    lexical=await asyncio.to_thread(lexical_ranks,chunks,query)
-    dense=[];s=get_settings()
+    lexical=await asyncio.to_thread(lexical_ranks,chunks,query,documents)
+    dense=[];s=get_settings();notices=[]
     if s.knowledge_embedding_provider!='disabled':
-        vector=(await providers.embed([query]))[0]
-        if s.knowledge_vector_store=='qdrant':dense=await providers.nearest(vector,list(documents),providers.profile())
-        else:
-            dense=await asyncio.to_thread(dense_ranks,chunks,vector)
+        try:
+            vector=(await providers.embed([query]))[0]
+            if s.knowledge_vector_store=='qdrant':dense=await providers.nearest(vector,list(documents),providers.profile())
+            else:
+                dense=await asyncio.to_thread(dense_ranks,chunks,vector)
+        except ValueError:
+            # 선택형 검색 서버 장애가 기존 SQLite 검색까지 중단시키지 않게 한다.
+            notices.append('벡터 검색 서버에 연결하지 못해 키워드 검색 결과를 사용했습니다.')
+    by_id={c.id:c for c in chunks}
+    dense=list(dict.fromkeys(cid for cid in dense if cid in by_id))
     fused={}
     for ranked in [lexical,dense]:
         for rank,cid in enumerate(ranked):fused[cid]=fused.get(cid,0)+1/(60+rank+1)
-    by_id={c.id:c for c in chunks}
     def match(chunk):
         doc = documents[chunk.document_id]
         return {'chunk_id':chunk.id,'document_id':doc.id,'filename':doc.filename,'location':chunk.location,
@@ -235,7 +259,14 @@ async def search(bind,user_id,selection,conversation_id,query,limit=8,*,include_
 
     ranked = sorted(fused, key=fused.get, reverse=True)[:30]
     # Intersect vector results with current SQL ACL/revision before reranking.
-    candidates = await providers.rerank(query, [match(by_id[cid]) for cid in ranked if cid in by_id])
+    candidates = [match(by_id[cid]) for cid in ranked if cid in by_id]
+    reranked=False
+    if candidates:
+        try:
+            candidates=await providers.rerank(query,candidates)
+            reranked=bool(s.knowledge_rerank_url)
+        except ValueError:
+            notices.append('재정렬 서버를 사용할 수 없어 기본 검색 순서를 유지했습니다.')
     attachment_ids = list(dict.fromkeys(selection.get('document_ids', []))) if include_attachments else []
     if attachment_ids:
         excerpts = include_attachment_chunks(chunks, [by_id[item['chunk_id']] for item in candidates], attachment_ids, limit)
@@ -244,7 +275,8 @@ async def search(bind,user_id,selection,conversation_id,query,limit=8,*,include_
     with Session(bind) as db:
         current={d.id:(d.revision,d.sha256) for d in selected_documents(db,user_id,selection,conversation_id)}
     candidates=[c for c in candidates if current.get(c['document_id'])==(c['revision'],c['sha256'])]
-    return {'matches':candidates[:limit],'mode':'hybrid' if dense else 'lexical','reranked':bool(s.knowledge_rerank_url)}
+    return {'matches':candidates[:limit],'mode':'hybrid' if dense else 'lexical','reranked':reranked,
+        'degraded':bool(notices),**({'notice':' '.join(notices)} if notices else {})}
 
 def automatic_query(user_id,conversation_id):
     shared=select(KnowledgeMember.base_id).where(KnowledgeMember.user_id==user_id)

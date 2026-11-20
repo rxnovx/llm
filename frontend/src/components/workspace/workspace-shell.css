@@ -54,5 +54,20 @@
 .settings-app-heading span { color:var(--fg-muted); font-size:10px; font-weight:400; padding:3px 6px; border:1px solid var(--border); border-radius:4px; }
 .settings-app-card { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:20px 0; border-bottom:1px solid var(--border); }.settings-app-card>div:first-child { min-width:0; }
 .settings-app-card strong { display:block; font-size:13px; font-weight:500; }.settings-app-card small { display:block; color:var(--fg-muted); font-size:11px; margin-top:6px; overflow-wrap:anywhere; }.settings-app-card p { color:var(--fg-muted); font-size:11px; line-height:1.7; margin:7px 0 0; }
+.settings-gitlab-provider { margin:22px 0; border-top:1px solid var(--border); padding-top:17px; }
+.settings-app-provider strong { font-size:13px; font-weight:600; }.settings-app-provider small { display:block; font-size:11px; color:var(--fg-muted); margin-top:7px; overflow-wrap:anywhere; }
+.settings-app-provider p { font-size:11px; color:var(--fg-muted); }.settings-gitlab-add { margin-top:15px; }
+.settings-webhooks { padding:17px; background:var(--surface-soft); border:1px solid var(--border); border-radius:7px; margin:12px 0 20px; min-width:0; }
+.settings-webhooks h4 { margin:0 0 12px; font-size:12px; font-weight:600; }.settings-webhooks p { font-size:11px; color:var(--fg-muted); line-height:1.8; }
+.settings-webhooks fieldset { display:grid; gap:12px; margin:15px 0; padding:0; border:0; }
+.settings-webhooks fieldset>label,.settings-webhook-setup>label { display:grid; gap:7px; font-size:11px; color:var(--fg-muted); }
+.settings-webhooks input:not([type=checkbox]),.settings-webhooks select { width:100%; min-width:0; padding:10px; font-size:12px; background:var(--surface); color:var(--fg); border:1px solid var(--border); border-radius:5px; }
+.settings-webhooks label.settings-webhook-notify { display:flex; gap:8px; align-items:center; }.settings-webhooks summary { font-size:12px; cursor:pointer; padding:10px 0; }
+.settings-webhook-row { padding:12px 0; border-bottom:1px solid var(--border); font-size:12px; }.settings-webhook-row strong { display:block; font-weight:500; margin-bottom:8px; overflow-wrap:anywhere; }
+.settings-webhook-row label { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--fg-muted); }
+.settings-webhook-setup { margin:20px 0 0; padding-top:16px; border-top:1px solid var(--border); }.settings-webhook-setup .cw-copy { margin:8px 0 15px; }
+.settings-webhook-events { margin-top:20px; }.settings-webhook-events header { display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+.settings-webhook-events ul { list-style:none; padding:0; margin:0; }.settings-webhook-events li { display:flex; align-items:center; flex-wrap:wrap; gap:7px 12px; padding:10px 0; border-top:1px solid var(--border); font-size:11px; }
+.settings-webhook-events li strong { font-weight:500; }.settings-webhook-events small { margin-left:7px; color:var(--primary); font-size:10px; }.settings-webhook-events time { color:var(--fg-muted); margin-left:auto; font-size:10px; }
 .settings-app-actions { display:flex; align-items:center; gap:12px; flex-shrink:0; }.settings-app-footnote { margin-top:25px; font-size:11px; }
 @media(max-width:600px) { .settings-app-card { flex-wrap:wrap; gap:12px; }.settings-app-actions { width:100%; justify-content:flex-end; } }

@@ -1,13 +1,13 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
-from . import config, merge_requests, service, transport
+from . import config, merge_requests, service, transport, webhooks
 
 router = APIRouter(prefix='/apps',tags=['apps'])
 Database = Annotated[Session,Depends(get_db)]
@@ -25,6 +25,11 @@ class CompleteInput(BaseModel):
     state: str = Field(min_length=32,max_length=200)
     code: str = Field('',max_length=2000)
     error: str = Field('',max_length=100)
+
+
+class WebhookInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    notifications_enabled: bool = False
 
 
 @router.get('/catalog')
@@ -135,3 +140,87 @@ async def branches(connection_id: UUID,project_id: int,context: Authenticated,db
     except (KeyError,TypeError):
         raise HTTPException(502,'GitLab 브랜치 응답 형식을 확인해 주세요.') from None
     return {'items':items, 'has_more':len(rows)==100}
+
+
+@router.get('/connections/{connection_id}/groups')
+async def groups(connection_id: UUID, context: Authenticated, db: Database,
+                 q: str = Query('', max_length=100), page: int = Query(1, ge=1, le=100)):
+    rows = await read(client_for(db, context, connection_id), '/groups', params={'search': q, 'per_page': 30, 'page': page})
+    if not isinstance(rows, list):
+        raise HTTPException(502, 'GitLab 그룹 응답 형식을 확인해 주세요.')
+    items = [{'id': row['id'], 'name': row['full_path']} for row in rows
+        if isinstance(row, dict) and type(row.get('id')) is int and isinstance(row.get('full_path'), str)]
+    return {'items': items, 'has_more': len(rows) == 30}
+
+
+@router.post('/connections/{connection_id}/projects/{project_id}/webhooks')
+async def subscribe(connection_id: UUID, project_id: int, data: WebhookInput, context: Authenticated, db: Database):
+    if project_id < 1:
+        raise HTTPException(422, '프로젝트 ID를 확인하세요.')
+    bind, user_id = db.get_bind(), context.user.id
+    db.rollback()
+    try:
+        return await webhooks.create(bind, user_id, connection_id, project_id, data.notifications_enabled)
+    except transport.GitlabError as error:
+        raise HTTPException(error.status if error.status in {403, 404, 429} else 502, str(error)) from None
+
+
+@router.get('/connections/{connection_id}/webhooks')
+def subscriptions(connection_id: UUID, context: Authenticated, db: Database):
+    from sqlalchemy import select
+    from .models import GitlabWebhookSubscription
+    service.owned(db, context.user.id, connection_id)
+    rows = db.scalars(select(GitlabWebhookSubscription).where(
+        GitlabWebhookSubscription.connection_id == str(connection_id),
+        GitlabWebhookSubscription.user_id == context.user.id)).all()
+    return {'items': [webhooks.public(row) for row in rows]}
+
+
+@router.get('/gitlab/webhook-subscriptions/{subscription_id}')
+async def webhook_status(subscription_id: UUID, context: Authenticated, db: Database):
+    bind, user_id = db.get_bind(), context.user.id
+    db.rollback()
+    try:
+        return await webhooks.events(bind, user_id, subscription_id)
+    except transport.GitlabError as error:
+        raise HTTPException(error.status if error.status in {403, 404, 429} else 502, str(error)) from None
+
+
+@router.patch('/gitlab/webhook-subscriptions/{subscription_id}')
+def configure_webhook(subscription_id: UUID, data: WebhookInput, context: Authenticated, db: Database):
+    row = webhooks.owned(db, context.user.id, subscription_id)
+    row.notifications_enabled = data.notifications_enabled
+    db.commit()
+    return webhooks.public(row)
+
+
+@router.post('/gitlab/webhook-subscriptions/{subscription_id}/seen')
+def mark_webhook_seen(subscription_id: UUID, context: Authenticated, db: Database):
+    from sqlalchemy import update
+    from .models import GitlabWebhookEvent
+    row = webhooks.owned(db, context.user.id, subscription_id)
+    db.execute(update(GitlabWebhookEvent).where(GitlabWebhookEvent.subscription_id == row.id).values(seen=True))
+    db.commit()
+    return {'seen': True}
+
+
+@router.delete('/gitlab/webhook-subscriptions/{subscription_id}')
+def unsubscribe(subscription_id: UUID, context: Authenticated, db: Database):
+    row = webhooks.owned(db, context.user.id, subscription_id)
+    db.delete(row)
+    db.commit()
+    return {'unsubscribed': True}
+
+
+@router.post('/gitlab/webhooks/{subscription_id}')
+async def receive_webhook(subscription_id: UUID, request: Request, db: Database,
+                          x_gitlab_token: str | None = Header(None), x_gitlab_event: str | None = Header(None),
+                          x_gitlab_event_uuid: str | None = Header(None)):
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 512 * 1024:
+            raise HTTPException(413, 'GitLab 이벤트 크기 제한을 초과했습니다.')
+    bind = db.get_bind()
+    db.rollback()
+    return await webhooks.receive(bind, subscription_id, x_gitlab_token, x_gitlab_event, x_gitlab_event_uuid, bytes(body))

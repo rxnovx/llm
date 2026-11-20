@@ -12,12 +12,34 @@ const rules = [
   [/^gitlab\/merge-request\/resolve$/, ["POST"]],
   [new RegExp(`^connections/${uuid}$`), ["DELETE"]],
   [new RegExp(`^connections/${uuid}/projects(?:/[1-9][0-9]*/(?:tree|branches))?$`), ["GET"]],
+  [new RegExp(`^connections/${uuid}/groups$`), ["GET"]],
+  [new RegExp(`^connections/${uuid}/webhooks$`), ["GET"]],
+  [new RegExp(`^connections/${uuid}/projects/[1-9][0-9]*/webhooks$`), ["POST"]],
+  [new RegExp(`^gitlab/webhook-subscriptions/${uuid}$`), ["GET", "PATCH", "DELETE"]],
+  [new RegExp(`^gitlab/webhook-subscriptions/${uuid}/seen$`), ["POST"]],
 ] as const;
 const cookiePath = "/api/apps/gitlab/oauth/complete";
 const cookieName = (key: string) => `llm_gitlab_oauth_${key}`;
 
 async function handle(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   const path = (await context.params).path.join("/");
+  // GitLab 서버의 서명 검증용 수신 경로에만 브라우저 CSRF 검사를 적용하지 않습니다.
+  // 사용자 쿠키와 앱 액세스 토큰은 전달하지 않고 서버가 구독 비밀값을 확인합니다.
+  if (request.method === "POST" && new RegExp(`^gitlab/webhooks/${uuid}$`).test(path)) {
+    const token = request.headers.get("x-gitlab-token");
+    if (!token || token.length > 200) return NextResponse.json({ detail: "GitLab 웹훅 인증을 확인하세요." }, { status: 401 });
+    const headers = new Headers({ "content-type": "application/json" });
+    for (const name of ["x-gitlab-token", "x-gitlab-event", "x-gitlab-event-uuid"]) {
+      const value = request.headers.get(name);
+      if (value) headers.set(name, value);
+    }
+    let body: ArrayBuffer;
+    try { body = await requestBody(request, 512 * 1024); }
+    catch (error) { return bodyError(error); }
+    return upstreamResponse(await authServerFetch(`/apps/${path}`, {
+      method: "POST", headers, body, signal: request.signal,
+    }, 30000));
+  }
   if (!rules.some(([pattern, methods]) => pattern.test(path) && (methods as readonly string[]).includes(request.method)))
     return NextResponse.json({ detail: "경로를 찾을 수 없습니다." }, { status: 404 });
   const rejection = rejectUnsafeMutation(request);
@@ -60,3 +82,4 @@ async function handle(request: NextRequest, context: { params: Promise<{ path: s
 export const GET = handle;
 export const POST = handle;
 export const DELETE = handle;
+export const PATCH = handle;

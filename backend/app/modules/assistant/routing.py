@@ -1,5 +1,6 @@
 """The model proposes a route. The host resolves authorization and verifies evidence."""
 import json
+import hashlib
 import re
 from typing import Literal
 from urllib.parse import quote
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.modules.auth.models import User
 from app.modules.chat import providers
+from app.modules.chat.trace import safe_text
 from app.modules.integrations import config
 from app.modules.integrations.models import AppConnection
 from app.modules.integrations.service import GitlabClient
@@ -45,6 +47,13 @@ class Plan(BaseModel):
 
 
 CITATION = re.compile(r'\[((?:KS|GL|MS|WS|CH|TA)\d+)\]')
+
+
+def simple_chat(question):
+    """정확히 일치하는 짧은 인사만 추가 라우팅 호출 없이 처리한다."""
+    text = re.sub(r'[\s!.?~。！]+', '', question).casefold()
+    return text in {'안녕', '안녕하세요', '안녕하십니까', '반가워', '반갑습니다', '고마워', '고맙습니다',
+                    '감사합니다', '잘자', '좋은아침', 'hello', 'hi', 'hey', 'thanks', 'thankyou', 'goodmorning'}
 
 
 class Review(BaseModel):
@@ -193,6 +202,22 @@ async def verify(bind,user_id,conversation_id,selection,sources):
     if selection and selection.workspace_id:
         with Session(bind,expire_on_commit=False) as db:row=workspaces.owned(db,user_id,selection.workspace_id,conversation_id)
         await workspaces.permission(bind,row)
+    checked = set()
+    for source in sources:
+        if source.get('app') != 'gitlab':continue
+        workspace_id = source.get('workspace_id')
+        if workspace_id and workspace_id not in checked:
+            with Session(bind,expire_on_commit=False) as db:
+                row = workspaces.owned(db,user_id,workspace_id,conversation_id)
+            await workspaces.permission(bind,row)
+            checked.add(workspace_id)
+        elif not workspace_id and source.get('connection_id') and source.get('project_id'):
+            key = (source['connection_id'],source['project_id'],source.get('connection_generation'))
+            if key in checked:continue
+            upstream = GitlabClient(bind,user_id,source['connection_id'])
+            upstream.generation = source.get('connection_generation')
+            await upstream.get(f'/projects/{int(source["project_id"])}')
+            checked.add(key)
 
 
 async def evidence(bind,user_id,conversation_id,selection,sources,draft=''):
@@ -214,13 +239,23 @@ async def evidence(bind,user_id,conversation_id,selection,sources,draft=''):
                 snippets.append({'id':source['id'],'content':row.content.encode()[:900].decode(errors='ignore')})
         elif source.get('app') in {'web', 'chat_history', 'table_analysis'}:
             snippets.append({'id':source['id'],'content':source['excerpt']})
-        elif source.get('app')=='gitlab' and selection and selection.workspace_id:
-            with Session(bind,expire_on_commit=False) as db:row=workspaces.owned(db,user_id,selection.workspace_id,conversation_id)
+        elif source.get('app')=='gitlab' and (source.get('workspace_id') or selection and selection.workspace_id):
+            workspace_id = source.get('workspace_id') or selection.workspace_id
+            with Session(bind,expire_on_commit=False) as db:row=workspaces.owned(db,user_id,workspace_id,conversation_id)
             result=await workspaces.invoke(bind,row,'workspace_read_file',{'path':source['path'],'start_line':source['start_line'],
                 'end_line':min(source['end_line'],source['start_line']+60)})
             if source.get('content_hash') and result['content_hash']!=source['content_hash']:
                 raise HTTPException(409,'확인 중 소스 파일이 변경되었습니다. 다시 분석하세요.')
-            snippets.append({'id':source['id'],'content':result['content'].encode()[:900].decode(errors='ignore')})
+            snippets.append({'id':source['id'],'content':safe_text(result['content'].encode()[:900].decode(errors='ignore'))})
+        elif source.get('app')=='gitlab' and source.get('connection_id') and source.get('project_id'):
+            upstream = GitlabClient(bind,user_id,source['connection_id'])
+            upstream.generation = source.get('connection_generation')
+            raw = await upstream.get(f'/projects/{int(source["project_id"])}/repository/files/' + quote(source['path'],safe='') + '/raw',
+                params={'ref':source['commit']},raw=True,limit=256*1024)
+            if not isinstance(raw,str) or source.get('sha256') and hashlib.sha256(raw.encode()).hexdigest()!=source['sha256']:
+                raise HTTPException(409,'인용한 소스가 변경되었습니다. 다시 조회하세요.')
+            excerpt = '\n'.join(raw.splitlines()[source['start_line']-1:min(source['end_line'],source['start_line']+60)])
+            snippets.append({'id':source['id'],'content':safe_text(excerpt.encode()[:900].decode(errors='ignore'))})
     return snippets
 
 

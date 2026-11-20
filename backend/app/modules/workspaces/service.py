@@ -1,4 +1,5 @@
 import json
+import re
 import secrets
 import time
 from urllib.parse import quote
@@ -75,6 +76,26 @@ async def ensure(bind,user_id,conversation_id,selection,*,expected_commit=None,e
             row = None  # Keep the previous copy, but check out the current MR head.
         if row and expected_generation is not None and row.connection_generation != expected_generation:
             raise HTTPException(409, 'GitLab 계정 연결이 변경되었습니다. MR을 다시 선택하세요.')
+    if row and not execute and expected_commit is None:
+        # 읽기 전용 프로젝트 문맥도 원격 브랜치가 바뀌면 새 스냅샷을 사용한다.
+        # 실행 작업공간은 사용자의 미커밋 변경을 보존하고 게시 시 경합을 검사한다.
+        upstream = GitlabClient(bind,user_id,selection.connection_id)
+        upstream.generation = row.connection_generation
+        try:
+            head = await upstream.get(f'/projects/{selection.project_id}/repository/commits/' + quote(selection.ref,safe=''))
+        except GitlabError as error:
+            raise HTTPException(502,str(error)) from None
+        if not isinstance(head,dict) or not isinstance(head.get('id'),str) or not re.fullmatch('[a-fA-F0-9]{40,64}',head['id']):
+            raise HTTPException(502,'GitLab 브랜치의 최신 커밋을 확인할 수 없습니다.')
+        if head['id'] != json.loads(row.source_json).get('commit'):
+            with Session(bind,expire_on_commit=False) as db:
+                candidates = db.scalars(select(Workspace).where(Workspace.user_id==user_id,
+                    Workspace.conversation_id==conversation_id,Workspace.connection_id==str(selection.connection_id),
+                    Workspace.project_id==selection.project_id,Workspace.ref==selection.ref,
+                    Workspace.allow_execution.is_(False),Workspace.status=='ready').limit(100))
+                row = next((item for item in candidates if json.loads(item.source_json).get('commit')==head['id']),None)
+                if row:authorize(db,row)
+            selection.workspace_id = None
     if row:
         await permission(bind,row)
         try:
@@ -103,7 +124,6 @@ async def ensure(bind,user_id,conversation_id,selection,*,expected_commit=None,e
         else:
             commit=await upstream.get(path + f'/repository/commits/{ref}')
         namespace=validate_path(project['path_with_namespace'])
-        import re
         if not re.fullmatch('[a-fA-F0-9]{40,64}',commit['id']):raise ValueError()
     except GitlabError as error:raise HTTPException(502,str(error)) from None
     except (ValueError,KeyError,TypeError,AttributeError):raise HTTPException(502,'GitLab 저장소 응답 형식을 확인하세요.') from None

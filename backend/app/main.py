@@ -40,6 +40,8 @@ async def lifespan(app: FastAPI):
     app.state.started_at = int(time.time())
     # Additive account and chat tables; existing account data stays in place.
     Base.metadata.create_all(engine)
+    from app.modules.integrations.schema import upgrade_connections
+    upgrade_connections(engine)
     with Session(engine) as db:
         if db.get(SchedulerLock, 1) is None:
             db.add(SchedulerLock(id=1, version=0))

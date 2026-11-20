@@ -11,6 +11,23 @@ EXTENSIONS = {'.py','.js','.jsx','.ts','.tsx','.mjs','.cjs','.json','.md','.txt'
               '.c','.cpp','.h','.cs','.rb','.php','.sql','.sh','.html','.css','.vue','.svelte','.kt','.swift','.xml','.ini'}
 PUBLISH_MAX_FILES = 20
 PUBLISH_MAX_BYTES = 1024 * 1024
+ENTRY_NAMES = {'readme.md','package.json','pyproject.toml','requirements.txt','main.py','app.py','main.ts',
+               'main.tsx','index.ts','index.js','page.tsx','compose.yaml','compose.yml','docker-compose.yml','dockerfile','makefile'}
+
+
+def source_terms(query):
+    words=re.findall(r'[\w.-]+',query)[:100]
+    result=[]
+    for word in words:
+        result.append(word.casefold())
+        split=re.sub(r'([A-Z]+)([A-Z][a-z])',r'\1 \2',word)
+        split=re.sub(r'([a-z0-9])([A-Z])',r'\1 \2',split)
+        result.extend(part.casefold() for part in re.split(r'[_\s.-]+',split) if part)
+    return list(dict.fromkeys(result))[:100]
+
+
+def entrypoint(path):
+    return Path(path).name.casefold() in ENTRY_NAMES
 
 
 def allowed(path):
@@ -105,28 +122,33 @@ class Analyzer:
         root=self.store.repo(workspace_id)
         files,omitted=inventory(root,self.settings)
         counts=Counter(Path(path).suffix or 'other' for path,_ in files)
-        important=['README.md','package.json','pyproject.toml','requirements.txt','main.py','app/main.py','src/main.ts','src/app/page.tsx','compose.yaml']
-        ranked=sorted(files,key=lambda pair:(Path(pair[0]).name not in important,len(Path(pair[0]).parts),pair[0]))
+        ranked=sorted(files,key=lambda pair:(not entrypoint(pair[0]),len(Path(pair[0]).parts),pair[0]))
         return {'files':[{'path':p,'bytes':size} for p,size in ranked[:limit]],'total_files':len(files),'languages':dict(counts),
                 'truncated':omitted or len(files)>limit,'scope':'eligible text files; generated, binary and common secret files excluded'}
 
     def search(self,workspace_id,query,limit=40):
-        if not query or len(query)>200:
+        if not query or len(query)>200 or type(limit) is not int or not 1<=limit<=100:
             raise ValueError('검색어는 1~200자로 지정하세요.')
         root=self.store.repo(workspace_id)
         files,omitted=inventory(root,self.settings)
-        terms=[part.casefold() for part in re.findall(r'[\w.-]+',query)][:12]
+        terms=source_terms(query)[:24]
         if not terms:
             raise ValueError('검색할 단어를 입력하세요.')
         found=[]
-        for path,_ in sorted(files,key=lambda p:(not any(t in p[0].casefold() for t in terms),p[0])):
+        def path_score(path):
+            return sum(1 for term in terms if term in path.casefold())+(20 if query.casefold() in path.casefold() else 0)
+        for path,_ in sorted(files,key=lambda pair:(-path_score(pair[0]),pair[0])):
             try:
-                lines=read_text(root,path,self.settings).splitlines()
+                text=read_text(root,path,self.settings);lines=text.splitlines()
             except (ValueError,OSError):
                 continue
+            digest=hashlib.sha256(text.encode()).hexdigest()
+            path_match=any(term in path.casefold() for term in terms)
             for index,line in enumerate(lines):
-                if any(term in line.casefold() for term in terms):
-                    found.append({'path':path,'line':index+1,'text':line[:600],'match':'text'})
+                text_match=any(term in line.casefold() for term in terms)
+                if text_match or path_match and index==0:
+                    found.append({'path':path,'line':index+1,'text':line[:600],
+                        'match':'text' if text_match else 'path','content_hash':digest})
                     if len(found)>=limit:
                         return {'matches':found,'truncated':True,'resolution':'text_matches'}
         return {'matches':found,'truncated':omitted,'resolution':'text_matches'}

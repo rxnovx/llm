@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, m
 
 from app.core.config import Settings
 from app.core.tls import assistant_tls
-from . import usage
+from . import trace, usage
 
 if TYPE_CHECKING:
     from app.modules.workflows.images import ImageData
@@ -24,7 +24,9 @@ VISION_IMAGE_TOKENS = 1024
 
 
 class ProviderError(Exception):
-    pass
+    def __init__(self, message, *, code='provider_error'):
+        super().__init__(message)
+        self.code = code
 
 
 class ModelProfile(BaseModel):
@@ -35,6 +37,8 @@ class ModelProfile(BaseModel):
     max_concurrent: int = Field(2, ge=1, le=64)
     supports_tools: bool = False
     supports_vision: bool = False
+    supports_reasoning: bool = False
+    reasoning_visibility: Literal['off', 'public'] = 'off'
 
     @model_validator(mode='after')
     def budget(self):
@@ -63,6 +67,8 @@ class Connection(BaseModel):
     max_concurrent: int = Field(2, ge=1, le=64)
     supports_tools: bool = False
     supports_vision: bool = False
+    supports_reasoning: bool = False
+    reasoning_visibility: Literal['off', 'public'] = 'off'
 
     @model_validator(mode='after')
     def validate_url(self):
@@ -88,7 +94,8 @@ class Connection(BaseModel):
             raise ProviderError('이 연결에서 허용되지 않은 모델입니다.')
         return ModelProfile(name=model or self.model or 'demo', context_window=self.context_window,
             max_output_tokens=self.max_output_tokens, max_concurrent=self.max_concurrent,
-            supports_tools=self.supports_tools, supports_vision=self.supports_vision)
+            supports_tools=self.supports_tools, supports_vision=self.supports_vision,
+            supports_reasoning=self.supports_reasoning, reasoning_visibility=self.reasoning_visibility)
 
     def public(self):
         return {'id': self.id, 'name': self.name, 'provider': self.provider,
@@ -96,7 +103,8 @@ class Connection(BaseModel):
                 'models': [item.model_dump() for item in self.models],
                 'context_window': self.context_window, 'max_output_tokens': self.max_output_tokens,
                 'max_concurrent': self.max_concurrent, 'supports_tools': self.supports_tools,
-                'supports_vision': self.supports_vision}
+                'supports_vision': self.supports_vision, 'supports_reasoning': self.supports_reasoning,
+                'reasoning_visibility': self.reasoning_visibility}
 
 
 def connections(settings: Settings, db=None, user=None, *, include_disabled=False) -> list[Connection]:
@@ -158,22 +166,22 @@ def require_success(response, action, invalid_request):
         detail = '리디렉션을 거치지 않는 실제 API 주소를 등록해 주세요.'
     else:
         detail = invalid_request
-    raise ProviderError(f'{action} (HTTP {status}) · {detail}')
+    raise ProviderError(f'{action} (HTTP {status}) · {detail}', code='upstream_rejected')
 
 
 def transport_error(error):
     if isinstance(error, httpx.ConnectTimeout):
-        return ProviderError('모델 서버 접속 시간이 초과되었습니다. FastAPI 실행 환경의 주소·포트·방화벽을 확인해 주세요.')
+        return ProviderError('모델 서버 접속 시간이 초과되었습니다. FastAPI 실행 환경의 주소·포트·방화벽을 확인해 주세요.', code='connection_error')
     if isinstance(error, httpx.TimeoutException):
-        return ProviderError('모델 서버 응답 시간이 초과되었습니다. 모델 로딩·서버 부하·시간 제한을 확인해 주세요.')
+        return ProviderError('모델 서버 응답 시간이 초과되었습니다. 모델 로딩·서버 부하·시간 제한을 확인해 주세요.', code='timeout')
     cause = error.__cause__
     while cause:
         if isinstance(cause, ssl.SSLCertVerificationError):
-            return ProviderError('모델 서버의 TLS 인증서를 확인할 수 없습니다. 호스트 이름과 ASSISTANT_CA_BUNDLE을 확인해 주세요.')
+            return ProviderError('모델 서버의 TLS 인증서를 확인할 수 없습니다. 호스트 이름과 ASSISTANT_CA_BUNDLE을 확인해 주세요.', code='connection_error')
         cause = cause.__cause__
     if isinstance(error, httpx.ConnectError):
-        return ProviderError('모델 서버에 연결할 수 없습니다. FastAPI 실행 환경에서 주소·포트·방화벽을 확인해 주세요.')
-    return ProviderError('모델 서버와의 HTTP 통신이 중단되었습니다. 서버와 중간 프록시의 로그를 확인해 주세요.')
+        return ProviderError('모델 서버에 연결할 수 없습니다. FastAPI 실행 환경에서 주소·포트·방화벽을 확인해 주세요.', code='connection_error')
+    return ProviderError('모델 서버와의 HTTP 통신이 중단되었습니다. 서버와 중간 프록시의 로그를 확인해 주세요.', code='transport_error')
 
 
 async def list_models(connection: Connection) -> list[str]:
@@ -217,6 +225,7 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
         return
     vllm = connection.provider == 'vllm'
     profile = connection.profile(model)
+    public_trace = trace.ModelCall(connection, model, profile)
     output_limit = max_tokens or profile.max_output_tokens
     payload = {'model': model, 'messages': history, 'stream': True}
     options = {key: value for key, value in {'temperature': temperature, 'top_p': top_p, 'stop': stop}.items() if value is not None}
@@ -253,17 +262,26 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
                                 continue
                             delta = choices[0].get('delta', {})
                             text = delta.get('content', '')
-                            meter.output(delta.get('reasoning_content'))
+                            reasoning = reasoning_text(delta)
+                            meter.output(reasoning)
+                            note_reasoning(metadata, reasoning)
+                            await public_trace.reasoning(reasoning)
                             reason = choices[0].get('finish_reason')
                             if metadata is not None and reason in {'stop', 'length', 'content_filter'}:
                                 metadata['finish_reason'] = reason
                             complete = complete or reason is not None
                         else:
                             text = item.get('message', {}).get('content', '')
+                            reasoning = reasoning_text(item.get('message', {}))
+                            meter.output(reasoning)
+                            note_reasoning(metadata, reasoning)
+                            await public_trace.reasoning(reasoning)
                             complete = bool(item.get('done'))
                             if complete and metadata is not None and item.get('done_reason') in {'stop', 'length'}:
                                 metadata['finish_reason'] = item['done_reason']
                         if text and isinstance(text, str):
+                            # 추론 버퍼를 답변보다 먼저 전달하되 최종 답변에 합치지 않는다.
+                            await public_trace.reasoning('', final=True)
                             meter.output(text)
                             yield text
                         if not vllm and complete:
@@ -274,6 +292,120 @@ async def stream_reply(connection: Connection, model: str, history: list[dict], 
             raise transport_error(error) from None
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             raise ProviderError('모델 스트림의 응답 형식이 올바르지 않습니다. 서버 종류와 API 경로를 확인해 주세요.') from None
+        finally:
+            await public_trace.finish()
+
+
+def reasoning_text(message):
+    """서버가 명시한 별도 공개 채널만 읽는다. <think> 본문은 추측해서 분리하지 않는다."""
+    if not isinstance(message, dict):
+        return ''
+    for key in ('reasoning', 'reasoning_content', 'thinking'):
+        value = message.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ''
+
+
+def note_reasoning(metadata, text):
+    if metadata is not None and text:
+        metadata['has_reasoning'] = True
+        metadata['reasoning_chars'] = metadata.get('reasoning_chars', 0) + len(text)
+
+
+async def response_message(response, vllm, meter, public_trace, *, limit, streaming):
+    """도구/구조화 요청도 추론 이벤트를 기다리지 않고 전달한다.
+
+일부 호환 서버는 stream 요청에도 단일 JSON을 반환하므로 실제 Content-Type으로
+계약을 구분한다. 도구 실행 자체는 이 어댑터가 수행하지 않는다.
+    """
+    kind = response.headers.get('content-type', '').split(';', 1)[0].lower()
+    if not streaming or kind == 'application/json':
+        meter.streaming = False
+        raw = bytearray()
+        async for part in response.aiter_bytes():
+            raw.extend(part)
+            if len(raw) > limit:
+                raise ProviderError('모델의 응답이 크기 제한을 초과했습니다.')
+        data = json.loads(raw)
+        meter.observe(data, vllm)
+        message = data['choices'][0]['message'] if vllm else data['message']
+        reasoning = reasoning_text(message)
+        meter.output(reasoning)
+        await public_trace.reasoning(reasoning, final=True)
+        meter.output(message.get('content'))
+        if message.get('tool_calls'):
+            meter.output(json.dumps(message['tool_calls'], ensure_ascii=False))
+        return message
+
+    total, complete = 0, False
+    content, calls = [], {}
+    async for line in response.aiter_lines():
+        total += len(line.encode('utf-8'))
+        if total > limit:
+            raise ProviderError('모델의 응답이 크기 제한을 초과했습니다.')
+        if not line or (vllm and not line.startswith('data:')):
+            continue
+        raw = line[5:].strip() if vllm else line
+        if raw == '[DONE]':
+            complete = True
+            break
+        item = json.loads(raw)
+        meter.observe(item, vllm)
+        if item.get('error'):
+            raise ProviderError('모델 서버에서 응답 생성 중 오류가 발생했습니다.')
+        if vllm:
+            choices = item.get('choices') or []
+            if not choices:
+                continue
+            message = choices[0].get('delta') or {}
+            complete = complete or choices[0].get('finish_reason') is not None
+        else:
+            message = item.get('message') or {}
+            complete = bool(item.get('done'))
+        reasoning = reasoning_text(message)
+        meter.output(reasoning)
+        await public_trace.reasoning(reasoning)
+        text = message.get('content') or ''
+        if not isinstance(text, str):
+            raise ValueError()
+        if text:
+            await public_trace.reasoning('', final=True)
+            content.append(text)
+            meter.output(text)
+        incoming = message.get('tool_calls') or []
+        if not isinstance(incoming, list) or len(incoming) > 4:
+            raise ValueError()
+        for position, call in enumerate(incoming):
+            index = call.get('index', position)
+            if type(index) is not int or not 0 <= index < 4:
+                raise ValueError()
+            function = call.get('function') or {}
+            current = calls.setdefault(index, {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': '' if vllm else {}}})
+            if call.get('id'):
+                current['id'] = call['id']
+            if function.get('name'):
+                if vllm:
+                    current['function']['name'] += function['name']
+                else:
+                    current['function']['name'] = function['name']
+            arguments = function.get('arguments')
+            if vllm and arguments is not None:
+                if not isinstance(arguments, str):
+                    raise ValueError()
+                current['function']['arguments'] += arguments
+            elif arguments is not None:
+                if not isinstance(arguments, dict):
+                    raise ValueError()
+                current['function']['arguments'].update(arguments)
+        if incoming:
+            meter.output(json.dumps(incoming, ensure_ascii=False))
+        if not vllm and complete:
+            break
+    if not complete:
+        raise ProviderError('모델 서버의 응답이 중간에 끊겼습니다. 다시 시도해 주세요.')
+    await public_trace.reasoning('', final=True)
+    return {'content': ''.join(content), 'tool_calls': [calls[index] for index in sorted(calls)]}
 
 
 def with_images(payload, images, profile, vllm):
@@ -362,6 +494,7 @@ async def tool_reply(connection,model,history,tools,settings,*,images=()):
         raise ProviderError('이 모델은 도구 호출 사용이 설정되지 않았습니다. 운영자가 모델의 supports_tools를 확인해야 합니다.')
     vllm=connection.provider=='vllm'
     profile=connection.profile(model)
+    public_trace = trace.ModelCall(connection, model, profile)
     # Ollama uses object arguments; OpenAI-compatible providers use serialized arguments.
     outgoing=[]
     for item in history:
@@ -370,8 +503,11 @@ async def tool_reply(connection,model,history,tools,settings,*,images=()):
             entry['tool_calls']=[dict(call,function=dict(call['function'],arguments=(
                 json.dumps(call['function']['arguments']) if vllm and isinstance(call['function']['arguments'],dict) else call['function']['arguments']))) for call in entry['tool_calls']]
         outgoing.append(entry)
-    payload={'model':model,'messages':outgoing,'tools':tools,'stream':False}
+    streaming = trace.current.get() is not None
+    payload={'model':model,'messages':outgoing,'tools':tools,'stream':streaming}
     payload.update({'max_tokens':profile.max_output_tokens,'tool_choice':'auto'} if vllm else {'options':{'num_predict':profile.max_output_tokens,'num_ctx':profile.context_window}})
+    if vllm and streaming and usage.scope.get():
+        payload['stream_options'] = {'include_usage': True}
     request_payload = with_images(payload, images, profile, vllm)
     with usage.measure(connection, model, payload, profile.max_output_tokens, settings.llm_timeout_seconds,
                        extra_input_tokens=len(images) * VISION_IMAGE_TOKENS) as meter:
@@ -380,13 +516,8 @@ async def tool_reply(connection,model,history,tools,settings,*,images=()):
                 async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=request_payload) as response:
                     require_success(response, '모델 도구 호출 요청 거부', '모델의 도구 지원과 서버 파서 설정을 확인해 주세요.')
                     meter.accepted = True
-                    raw=bytearray()
-                    async for part in response.aiter_bytes():
-                        raw.extend(part)
-                        if len(raw)>256000:raise ProviderError('모델의 도구 응답이 크기 제한을 초과했습니다.')
-            data=json.loads(raw)
-            meter.observe(data, vllm)
-            message=data['choices'][0]['message'] if vllm else data['message']
+                    message = await response_message(response, vllm, meter, public_trace,
+                                                     limit=256000, streaming=streaming)
             content=message.get('content') or ''
             calls=message.get('tool_calls') or []
             if not isinstance(content,str) or not isinstance(calls,list) or len(calls)>4:raise ValueError()
@@ -398,24 +529,28 @@ async def tool_reply(connection,model,history,tools,settings,*,images=()):
                 if not isinstance(arguments,dict) or not isinstance(function['name'],str):raise ValueError()
                 normalized.append({'id':str(call.get('id') or f'call-{index}-{secrets.token_hex(4)}'),'type':'function',
                     'function':{'name':function['name'],'arguments':arguments}})
-            meter.output(content)
-            meter.output(json.dumps(normalized, ensure_ascii=False))
             return {'role':'assistant','content':content,'tool_calls':normalized}
         except httpx.HTTPError as error:
             raise transport_error(error) from None
         except (ValueError,KeyError,IndexError,TypeError,AttributeError):
             raise ProviderError('모델 도구 응답을 처리하지 못했습니다. 도구 호출을 지원하는 모델과 parser 설정을 확인하세요.') from None
+        finally:
+            await public_trace.finish()
 
 async def structured_reply(connection,model,messages,schema,settings,*,images=()):
     """Bounded JSON decision; never executes tools or accepts a server URL from the model."""
     profile=connection.profile(model)
     vllm=connection.provider=='vllm'
-    payload={'model':model,'messages':messages,'stream':False}
+    public_trace = trace.ModelCall(connection, model, profile)
+    streaming = trace.current.get() is not None
+    payload={'model':model,'messages':messages,'stream':streaming}
     if vllm:
         payload.update(max_tokens=min(1024,profile.max_output_tokens),temperature=0,
             response_format={'type':'json_schema','json_schema':{'name':'assistant_decision','schema':schema,'strict':True}})
     else:
         payload.update(format=schema,options={'temperature':0,'num_predict':min(1024,profile.max_output_tokens),'num_ctx':profile.context_window})
+    if vllm and streaming and usage.scope.get():
+        payload['stream_options'] = {'include_usage': True}
     request_payload = with_images(payload, images, profile, vllm)
     with usage.measure(connection, model, payload, min(1024, profile.max_output_tokens), settings.llm_timeout_seconds,
                        extra_input_tokens=len(images) * VISION_IMAGE_TOKENS) as meter:
@@ -424,16 +559,10 @@ async def structured_reply(connection,model,messages,schema,settings,*,images=()
                 async with session.stream('POST',endpoint(connection,'chat/completions' if vllm else 'api/chat'),json=request_payload) as response:
                     require_success(response, '모델 구조화 요청 거부', '모델 서버의 JSON 스키마 출력 지원을 확인해 주세요.')
                     meter.accepted = True
-                    raw=bytearray()
-                    async for part in response.aiter_bytes():
-                        raw.extend(part)
-                        if len(raw)>65536:raise ProviderError('자동 판단 응답이 너무 큽니다.')
-            value=json.loads(raw)
-            meter.observe(value, vllm)
-            message=value['choices'][0]['message'] if vllm else value['message']
+                    message = await response_message(response, vllm, meter, public_trace,
+                                                     limit=65536, streaming=streaming)
             content=message.get('content','')
             if not isinstance(content,str):raise ValueError()
-            meter.output(content)
             result=json.loads(content)
             if not isinstance(result,dict):raise ValueError()
             return result
@@ -441,3 +570,5 @@ async def structured_reply(connection,model,messages,schema,settings,*,images=()
             raise transport_error(error) from None
         except (ValueError,KeyError,IndexError,TypeError,AttributeError):
             raise ProviderError('자동 판단 응답을 처리하지 못했습니다. 구조화 출력 설정을 확인하세요.') from None
+        finally:
+            await public_trace.finish()

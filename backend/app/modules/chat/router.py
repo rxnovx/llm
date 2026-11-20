@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
 from app.modules.chat.models import Admission, ContextNote, Conversation, GenerationRun, Message
-from app.modules.chat import canvas, context as context_budget, history, providers, scheduler
+from app.modules.chat import canvas, context as context_budget, history, providers, scheduler, trace
 from app.modules.integrations import config as gitlab_config, service as gitlab_connections
 from app.modules.integrations import merge_requests
 from app.modules.integrations.models import MessageContext
@@ -184,6 +184,7 @@ def get_conversation(conversation_id: UUID, context: Authenticated, db: Database
         if item.generation_until<=time.time():
             for message in db.scalars(select(Message).where(*pending)):
                 message.status='error';message.error='이전 응답의 연결 또는 서버 작업이 중단되었습니다. 저장된 부분 답변을 확인하고 재시도하세요.'
+                trace.mark_interrupted(db,message.id)
                 state=workflows.state_for(db,message);state.error_code='interrupted'
             if item.generation_id:
                 scheduler.finish(db,item.generation_id,'error')
@@ -335,6 +336,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     messages = select(Message).where(Message.conversation_id == item.id)
     for message in db.scalars(messages.where(Message.status == 'pending')):
         message.status, message.error = 'error', '이전 응답이 중단되었습니다.'
+        trace.mark_interrupted(db,message.id)
     previous_message, previous_connection = None, None
     if data.retry:
         rows = list(db.scalars(messages.order_by(Message.position.desc()).limit(2)))[::-1]
@@ -351,6 +353,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
             previous_message, previous_connection = message_data(assistant), item.connection_id
         else:
             assistant.content = ''
+        assistant.tool_traces.clear()
         assistant.error, assistant.status = None, 'pending'
         assistant.model, assistant.is_test = model, connection.provider == 'test'
     else:
@@ -369,7 +372,8 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         if app.get('mode')=='files':app.pop('mode',None)
         if app.get('workspace_id') is None:app.pop('workspace_id',None)
         if app.get('merge_request') is None:app.pop('merge_request',None)
-    if data.retry and (any(a.get('mode')=='execute' for a in apps) or (data.assistant.allow_writes if data.assistant else assistant.assistant_context and json.loads(assistant.assistant_context.data_json).get('allow_writes'))) and not data.confirm_write_retry:
+    from app.modules.integrations.actions import permissions as gitlab_api_permissions
+    if data.retry and (bool(gitlab_api_permissions(content)) or any(a.get('mode')=='execute' for a in apps) or (data.assistant.allow_writes if data.assistant else assistant.assistant_context and json.loads(assistant.assistant_context.data_json).get('allow_writes'))) and not data.confirm_write_retry:
         raise HTTPException(409,'외부 변경·명령이 다시 실행될 수 있습니다. 쓰기 재시도를 명시적으로 확인하세요.')
     workspace_mode=bool(apps and apps[0].get('mode') in {'workspace','execute'})
     if workspace_mode:
@@ -452,7 +456,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
         raise HTTPException(409, '동시에 처리된 요청입니다. 새 요청으로 다시 시도해 주세요.') from None
     return Turn(item.id, str(data.request_id), assistant.id, history,
         {'conversation': conversation_data(item), 'user_message': message_data(user_message),
-         'assistant_message': message_data(assistant) | {'content': ''}, **({'context': report} if report else {})},
+         'assistant_message': message_data(assistant) | {'content': '', 'generation_trace': None, 'tools': []}, **({'context': report} if report else {})},
         presentation, previous_message, previous_connection, started_clock,
         publish_gitlab=data.publish_gitlab, gitlab_generation=gitlab_generation, gitlab_request=gitlab_request,
         scheduled=scheduled)
@@ -534,6 +538,25 @@ async def scheduled_turn(bind, user_id, conversation_id, request_id, connection_
 
 def turn_events(bind, user_id, turn, data, connection):
     settings = get_settings()
+    secrets = [connection.api_key.get_secret_value()]
+    for name in ('jwt_secret_key', 'auth_proxy_secret', 'smtp_password', 'terminal_shared_secret',
+                 'image_generation_api_key', 'image_edit_api_key', 'audio_speech_api_key', 'audio_generation_api_key'):
+        value = getattr(settings, name, None)
+        secrets.append(value.get_secret_value() if hasattr(value, 'get_secret_value') else value)
+    def collect_secret(value):
+        if isinstance(value,dict):
+            for item in value.values():collect_secret(item)
+        elif isinstance(value,list):
+            for item in value:collect_secret(item)
+        elif isinstance(value,str) and len(value)>=6:
+            secrets.append(value)
+    for name in type(settings).model_fields:
+        value = getattr(settings,name,None)
+        if hasattr(value,'get_secret_value'):
+            raw = value.get_secret_value()
+            try:collect_secret(json.loads(raw))
+            except (ValueError,TypeError):collect_secret(raw)
+    recorder = trace.TraceSession(bind, user_id, turn.assistant_id, turn.request_id, secrets=secrets)
     options = turn.start['assistant_message']['assistant']
     image_mode = options.get('image_mode', 'auto')
     render_only = image_mode in {'generate', 'edit'}
@@ -665,7 +688,7 @@ def turn_events(bind, user_id, turn, data, connection):
                                 yield event(kind,payload)
                     elif apps:
                         phase='gitlab_read'
-                        yield event('tool', {'app':'gitlab','status':'reading','detail':'선택한 GitLab 파일을 읽고 있습니다.'})
+                        yield event('activity', recorder.activity('gitlab_read', 'running', '선택한 GitLab 파일을 읽고 있습니다.'))
                         with Session(bind) as session:
                             budget = context_budget.reference_budget(session,turn.conversation_id,admitted,
                                 turn.start['conversation']['model'],data.content.strip(),
@@ -674,6 +697,7 @@ def turn_events(bind, user_id, turn, data, connection):
                             yield await read_context(bind,user_id,GitlabSelection.model_validate(apps[0]),data.content,budget)
                         async with aclosing(guarded_parts(fetch_sources(),cancelled)) as results:
                             reference, sources = await anext(results)
+                        yield event('activity', recorder.activity('gitlab_read', 'complete', f'소스 구간 {len(sources)}개를 확인했습니다.'))
                         yield event('sources',{'sources':sources})
                     if not workspace_mode and not general_mode:
                         with Session(bind) as session:
@@ -681,11 +705,13 @@ def turn_events(bind, user_id, turn, data, connection):
                                 turn.start['conversation']['model'], data.content.strip(), extra_context=reference,
                                 answer_instruction=presentation.instruction)
                         yield event('context', report)
+                        yield event('activity',recorder.activity('model','running','모델 서버에서 답변을 생성하고 있습니다.'))
                         iterator = providers.stream_reply(admitted, turn.start['conversation']['model'], turn.history, settings)
                         async with aclosing(guarded_parts(iterator, cancelled)) as parts:
                             async for part in parts:
                                 for answer in answer_events(presentation.feed(part)):
                                     yield answer
+                        yield event('activity',recorder.activity('model','complete','모델 서버의 답변 생성을 마쳤습니다.'))
                     for answer in answer_events(presentation.finish()):
                         yield answer
                     if not presentation.content.strip():
@@ -698,9 +724,9 @@ def turn_events(bind, user_id, turn, data, connection):
         except (providers.ProviderError, GitlabError, TimeoutError) as caught:
             status = 'error'
             error_code = 'gitlab_error' if isinstance(caught,GitlabError) else 'provider_error' if isinstance(caught, providers.ProviderError) else 'queue_timeout' if str(caught) == 'queue' else 'timeout'
-            error = str(caught) if isinstance(caught, (providers.ProviderError,GitlabError)) else '대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.' if str(caught) == 'queue' else '응답 시간이 초과되었습니다. 다시 시도해 주세요.'
+            error = trace.safe_text(str(caught),secrets,300) if isinstance(caught, (providers.ProviderError,GitlabError)) else '대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.' if str(caught) == 'queue' else '응답 시간이 초과되었습니다. 다시 시도해 주세요.'
         except HTTPException as caught:
-            status,error='error',str(caught.detail)
+            status,error='error',trace.safe_text(str(caught.detail),secrets,300)
             if phase in {'generate_image', 'edit_image'}:
                 error_code = 'image_generation_error'
             else:
@@ -725,6 +751,7 @@ def turn_events(bind, user_id, turn, data, connection):
                             artifacts.settle_drafts(session,user_id,turn.request_id,turn.pending_artifacts)
                     except HTTPException as caught:
                         status,error,error_code = 'error',str(caught.detail),'context_limit'
+                recorder.finish(status, db=session)
                 if run and run.status in {'running', 'queued','tool_waiting'}:
                     run.status, run.error_code = status, error_code
                     run.finished_at = int(time.time())
@@ -751,6 +778,8 @@ def turn_events(bind, user_id, turn, data, connection):
                             message.source_record.sources_json = json.dumps(previous['sources'],ensure_ascii=False)
                         if message.assistant_context:message.assistant_context.data_json=json.dumps(previous.get('assistant',{}))
                         if message.decision_record:message.decision_record.data_json=json.dumps(previous.get('routing',{}),ensure_ascii=False)
+                        # 이전 답변을 보존할 때 작업 기록과 출처도 같은 버전으로 복원한다.
+                        workflows.apply_payload(session,message,previous)
                         item.connection_id, item.model = turn.previous_connection, previous['model']
                     if status!='complete':
                         from app.modules.workflows.models import Artifact
@@ -773,9 +802,9 @@ def turn_events(bind, user_id, turn, data, connection):
 
         token = usage.scope.set(usage.Scope(bind, user_id, turn.request_id))
         try:
-            async with aclosing(generate()) as events:
+            async with aclosing(recorder.stream(generate())) as events:
                 async for item in events:
-                    yield item
+                    yield event(*item) if isinstance(item, tuple) else item
         finally:
             usage.scope.reset(token)
 

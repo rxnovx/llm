@@ -52,13 +52,15 @@ def upstream(client, monkeypatch):
             if request.url.host == 'chat-server.test':
                 assert request.url.path == '/v1/chat/completions'
                 payload = json.loads(request.content)
+                assert payload['stream'] is True
+                content = json.dumps(plan) if 'response_format' in payload else '일반 답변'
+                chunk = {'choices': [{'delta': {'content': content}}]}
                 if payload['stream']:
                     return httpx.Response(200, content=(
-                        'data: {"choices":[{"delta":{"content":"일반 답변"}}]}\n\n'
+                        f'data: {json.dumps(chunk)}\n\n'
                         'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
                         'data: [DONE]\n\n'
-                    ).encode())
-                return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps(plan)}}]})
+                    ).encode(), headers={'content-type': 'text/event-stream'})
             assert str(request.url) == IMAGE_URL
             assert image_response is not None, 'Image provider called without an image request'
             return image_response
@@ -137,9 +139,10 @@ def test_image_generation_preserves_ordinary_chat_and_respects_opt_out(client, a
     if mode == 'demo':
         assert requests == [] and saved(client, headers, conversation)['is_test']
     else:
-        assert [json.loads(request.content)['stream'] for request in requests] == (
-            [False, True] if mode == 'direct' else [True]
-        )
+        payloads = [json.loads(request.content) for request in requests]
+        assert all(payload['stream'] is True for payload in payloads)
+        assert ['response_format' in payload for payload in payloads] == (
+            [True, False] if mode == 'direct' else [False])
         assert saved(client, headers, conversation)['content'] == '일반 답변'
 
 

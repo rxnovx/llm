@@ -1,4 +1,5 @@
 import type { Connection } from "./chat";
+import type { GenerationMetrics } from "./chat";
 
 export type OpsMode = "all" | "live" | "test";
 export type RunStatus = "complete" | "error" | "cancelled" | "queued" | "running" | "interrupted" | "tool_waiting";
@@ -24,3 +25,14 @@ export type ImageServers = Record<ImageProbeMode, { configured: boolean; model: 
   queue: { queued: number; running: number };
 };
 export type ImageProbeResult = { status: "ok"; format: string; size: number; elapsed_ms: number };
+
+export type CapabilityName = "chat" | "streaming" | "tools" | "structured_output" | "reasoning" | "vision" | "context" | "concurrency";
+export type CapabilityResult = { capability: CapabilityName; status: "verified" | "failed" | "unavailable" | "unverified" | "limited";
+  detail: string; elapsed_ms: number; checked_at: number; stale: boolean; metrics: GenerationMetrics & Record<string, unknown> };
+export type CapabilityReport = { model: string; items: CapabilityResult[] };
+export type ModelTelemetryReport = { hours: number; models: { connection_id: string; model: string; calls: number;
+  average_ms: number | null; average_first_token_ms: number | null; average_tokens_per_second: number | null;
+  average_server_first_token_ms?: number | null; speed_source?: "server_reported" | "client_observed" | "unavailable";
+  errors: number; error_rate: number; connection_errors?: number; connection_error_rate?: number;
+  reported_input_tokens: number; reported_output_tokens: number; reported_calls: number }[];
+  tools: { name: string; status: string; count: number }[]; note: string };

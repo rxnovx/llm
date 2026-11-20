@@ -32,6 +32,11 @@ server {
         proxy_read_timeout 1215s;
         proxy_pass http://127.0.0.1:3000;
     }
+    # 기능 8종의 명시적 순차 검사가 중간 프록시에서 끊기지 않게 합니다.
+    location ~ "^/api/admin/connections/[a-zA-Z0-9_-]{1,64}/capabilities/probe$" {
+        proxy_read_timeout 390s;
+        proxy_pass http://127.0.0.1:3000;
+    }
     location / {
         # Compose web is bound to loopback; the bundled Nginx may be omitted.
         proxy_pass http://127.0.0.1:3000;

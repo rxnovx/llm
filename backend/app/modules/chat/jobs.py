@@ -55,8 +55,10 @@ class GenerationJobs:
                         # Give the SSE reader a chance to consume bursts of
                         # events from a completed tool/model response.
                         await asyncio.sleep(0)
-            except Exception:
-                logger.exception('Chat generation job failed')
+            except Exception as error:
+                # 예외 원문에는 모델 응답·명령 출력·인증 값이 포함될 수 있다.
+                # 사용자에게는 연결 종료와 저장된 체크포인트로 복구를 안내한다.
+                logger.error('Chat generation job failed (%s)', type(error).__name__)
             finally:
                 subscription.publish(None)
 

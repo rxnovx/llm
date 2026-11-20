@@ -147,7 +147,8 @@ async def complete(bind, user_id, auth_version, session_id, state, code, denial,
         with Session(bind,expire_on_commit=False) as db:
             if not live_family(db,attempt):
                 raise HTTPException(401,'로그인 세션이 종료되어 GitLab 연결을 저장하지 않았습니다.')
-            row = db.scalar(select(AppConnection).where(AppConnection.user_id==attempt.user_id,AppConnection.provider_id==provider.id).with_for_update())
+            row = db.scalar(select(AppConnection).where(AppConnection.user_id==attempt.user_id,
+                AppConnection.provider_id==provider.id, AppConnection.external_id==external_id).with_for_update())
             if row is None:
                 row = AppConnection(user_id=attempt.user_id,provider_id=provider.id)
                 db.add(row)
@@ -188,9 +189,9 @@ def owned(db, user_id, connection_id):
 
 def require_publish(account, provider):
     if not provider.allow_publish:
-        raise HTTPException(403, '운영자가 이 GitLab 서버의 MR 쓰기를 허용해야 합니다.')
+        raise HTTPException(403, '운영자가 이 GitLab 서버의 이슈·MR 쓰기를 허용해야 합니다.')
     if account.status != 'connected' or not provider.can_publish(account.provider_fingerprint):
-        raise HTTPException(403, '계정 설정에서 이 GitLab 서버의 MR 작성 권한을 연결하세요.')
+        raise HTTPException(403, '계정 설정에서 이 GitLab 서버의 이슈·MR 작성 권한을 연결하세요.')
 
 
 async def credentials(bind, user_id, connection_id, *, force_version=None, publish=False):
@@ -279,6 +280,17 @@ class GitlabClient:
             raise HTTPException(409, 'GitLab 계정 연결이 변경되었습니다. 다시 선택해 주세요.')
         before_write()
         result = await transport.request(auth.provider, 'POST', '/api/v4' + path, token=auth.token,
+            payload=payload, limit=128 * 1024)
+        self.ensure_current()
+        return result
+
+    async def put(self, path, payload, *, before_write):
+        """고정된 GitLab 리소스의 편집만 호출하며 쓰기는 자동 재시도하지 않습니다."""
+        auth = await credentials(self.bind, self.user_id, self.id, publish=True)
+        if self.generation != auth.generation:
+            raise HTTPException(409, 'GitLab 계정 연결이 변경되었습니다. 다시 선택해 주세요.')
+        before_write()
+        result = await transport.request(auth.provider, 'PUT', '/api/v4' + path, token=auth.token,
             payload=payload, limit=128 * 1024)
         self.ensure_current()
         return result

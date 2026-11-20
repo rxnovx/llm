@@ -7,7 +7,7 @@ from pathlib import Path,PurePosixPath
 import re
 import time
 
-from .analysis import inventory,read_text
+from .analysis import inventory,read_text,entrypoint,source_terms
 
 CODE={'.py','.js','.jsx','.mjs','.cjs','.ts','.tsx'}
 SCOPE='Python/JS/TS static bindings; dynamic dispatch, runtime imports and unsupported language semantics are unresolved'
@@ -187,7 +187,9 @@ class CodeIndex:
             if path.endswith('.py'):
                 name=path[:-3].replace('/','.').removesuffix('.__init__');modules[name].append(path)
                 if name.startswith('src.'):modules[name[4:]].append(path)
-        return dict(docs=docs,files=files,modules=modules,truncated=truncated,root=root)
+        fingerprint=hashlib.sha256(json.dumps([(p,d['content_hash']) for p,d in sorted(docs.items())]).encode()).hexdigest()
+        return dict(docs=docs,files=files,modules=modules,truncated=truncated,root=root,snapshot_hash=fingerprint,
+            cache={'hits':sum(bool(d['cached']) for d in docs.values()),'parsed':sum(not d['cached'] for d in docs.values())})
 
     def targets(self,index,path,imp):
         if path.endswith('.py'):
@@ -260,10 +262,10 @@ class CodeIndex:
 
     def summary(self,workspace):
         index=self.build(workspace);docs=index['docs']
-        important={'README.md','package.json','pyproject.toml','main.py','app.py','index.ts','page.tsx'}
-        entries=sorted(index['files'],key=lambda p:(Path(p[0]).name not in important,len(Path(p[0]).parts),p[0]))
+        entries=sorted(index['files'],key=lambda p:(not entrypoint(p[0]),len(Path(p[0]).parts),p[0]))
         return dict(indexed_files=len(docs),symbols=sum(len(d['symbols']) for d in docs.values()),imports=sum(len(d['imports']) for d in docs.values()),
             entry_files=[p for p,_ in entries[:20]],truncated=index['truncated'],scope=SCOPE,
+            snapshot_hash=index['snapshot_hash'],cache=index['cache'],
             issues=[{'path':p,'parser':d['parser']} for p,d in docs.items() if 'error' in d['parser'] or d['parser']=='parser_not_installed'][:20])
 
     def definitions(self,workspace,name,path=''):
@@ -334,17 +336,32 @@ class CodeIndex:
 
     def context(self,workspace,query,limit=4):
         if not isinstance(query,str) or len(query)>2000 or not 1<=limit<=8:raise ValueError('문맥 검색어·파일 수 제한을 확인하세요.')
-        index=self.build(workspace);terms=set(re.findall(r'[\w.-]+',query.casefold()));candidates=[]
+        index=self.build(workspace);terms=set(source_terms(query));candidates=[];literal=query.strip().casefold()
         for path,doc in index['docs'].items():
             for symbol in doc['symbols']:
                 label=(path+' '+symbol['qualname']+' '+symbol['doc']).casefold()
                 score=sum(5 if term in symbol['qualname'].casefold() else 2 for term in terms if term in label)
-                candidates.append((score,path,max(1,symbol['start_line']-2),min(symbol['end_line'],symbol['start_line']+70)))
+                if score:candidates.append((score,path,max(1,symbol['start_line']-2),min(symbol['end_line'],symbol['start_line']+70),'symbol'))
+        # 심볼 이름에 없는 오류 메시지·파일명도 제한된 본문 검색으로 찾는다.
+        scanned=0;started=time.monotonic();search_truncated=False
         for path,_ in index['files']:
-            if Path(path).name in {'README.md','package.json','pyproject.toml','main.py','app.py','index.ts','page.tsx','requirements.txt'}:
-                candidates.append((1+sum(3 for t in terms if t in path.casefold()),path,1,70))
+            if entrypoint(path):candidates.append((1,path,1,70,'entrypoint'))
+            if any(term in path.casefold() for term in terms):
+                candidates.append((8+sum(3 for t in terms if t in path.casefold()),path,1,70,'path'))
+            if scanned>=8*1024*1024 or time.monotonic()-started>8:
+                search_truncated=True;break
+            try:text=read_text(index['root'],path,self.settings)
+            except (ValueError,OSError):continue
+            scanned+=len(text.encode())
+            matches=[]
+            for n,line in enumerate(text.splitlines(),1):
+                score=sum(2 for term in terms if term in line.casefold())
+                if literal and literal in line.casefold():score+=8
+                if score:matches.append((score,n))
+            for score,line in sorted(matches,key=lambda value:(-value[0],value[1]))[:2]:
+                candidates.append((score+3,path,max(1,line-7),line+30,'text'))
         result=[];seen=set();used=0
-        for score,path,start,end in sorted(candidates,key=lambda c:(-c[0],c[1],c[2])):
+        for score,path,start,end,kind in sorted(candidates,key=lambda c:(-c[0],c[1],c[2])):
             if path in seen:continue
             try:text=read_text(index['root'],path,self.settings)
             except (ValueError,OSError):continue
@@ -356,7 +373,8 @@ class CodeIndex:
             digest=hashlib.sha256(text.encode()).hexdigest()
             with self.store.db() as db:baseline=db.execute('SELECT hash FROM baseline_files WHERE workspace=? AND path=?',(workspace,path)).fetchone()
             result.append(dict(path=path,start_line=start,end_line=start+content.count('\n'),content=content,content_hash=digest,
-                working_copy=not baseline or baseline['hash']!=digest,match_score=score))
+                working_copy=not baseline or baseline['hash']!=digest,match_score=score,match_kind=kind))
             used+=len(content.encode());seen.add(path)
             if len(result)>=limit:break
-        return dict(sections=result,truncated=index['truncated'],method='path and scoped symbol ranking; selected actual source excerpts')
+        return dict(sections=result,truncated=index['truncated'] or search_truncated,snapshot_hash=index['snapshot_hash'],
+            method='bounded path, symbol and text ranking; selected actual source excerpts')

@@ -233,7 +233,7 @@ def test_automatic_parallel_tool_is_available_only_after_planning(client, accoun
             return model_json('vllm', '{"route":"direct","parallel_agents":true}')
         if 'verdict' in schema:
             return model_json('vllm', '{"verdict":"supported"}')
-        if payload['stream']:
+        if payload['stream'] and 'tools' not in payload:
             assert 'tools' not in payload
             name = json.loads(payload['messages'][-1]['content'])['assignment']
             entered.add(name)

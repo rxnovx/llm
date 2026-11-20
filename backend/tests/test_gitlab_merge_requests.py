@@ -117,7 +117,11 @@ def test_mr_link_or_number_reads_review_and_ci_without_a_worker(client, account,
                          '/api/v4/projects/7/jobs/66/trace', TARGET_PATH + '/diffs']
     trace = stream[-1][1]['message']['tools']
     for stage in ['gitlab_mr_overview', 'gitlab_mr_reviews', 'gitlab_mr_ci', 'gitlab_mr_diffs']:
-        assert {item['status'] for item in trace if item['name'] == stage} == {'running', 'complete'}
+        assert {item['status'] for item in trace if item['name'] == stage} == {'complete'}
+        transitions = [item for kind,item in stream if kind == 'activity' and item['name'] == stage]
+        assert [item['status'] for item in transitions] == ['running','complete']
+        assert transitions[0]['id'] == transitions[1]['id']
+        assert transitions[1]['duration_ms'] >= 0
     assert TRACE not in reply.text  # Remote logs go to the model, not the activity payload.
 
 

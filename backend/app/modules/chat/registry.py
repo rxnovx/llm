@@ -25,6 +25,8 @@ class ConnectionInput(BaseModel):
     max_concurrent: int = Field(2, ge=1, le=64)
     supports_tools: bool = False
     supports_vision: bool = False
+    supports_reasoning: bool = False
+    reasoning_visibility: Literal['off', 'public'] = 'off'
     auth_mode: Literal['inherit', 'none', 'reference'] = 'none'
     key_ref: str = Field('', max_length=64, pattern=r'^[a-zA-Z0-9_-]*$')
     revision: int = Field(0, ge=0)

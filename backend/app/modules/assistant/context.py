@@ -91,6 +91,8 @@ def active(db,user_id,selection,*,question='',conversation_id='',connection=None
     from app.modules.schedules import service as schedules
     from app.modules.workflows import artifact_revision, table_analysis
     from . import parallel, personal_tools, web_search
+    from .gitlab_tools import wants_api
+    if wants_api(question):return True
     if personal_tools.memory_command(question) or schedules.requested(question):
         return True
     if artifact_revision.requested(question) or table_analysis.requested(question) or personal_tools.history_requested(question) or web_search.requested(question):

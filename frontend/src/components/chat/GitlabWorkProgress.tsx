@@ -48,7 +48,7 @@ export function GitlabWorkProgress({ message, onFollowup }: { message: ChatMessa
     try { mr = JSON.parse(overview.detail) as MergeRequestSummary; } catch { /* Keep the other activity visible. */ }
   }
   const url = gitlabWebUrl(mr?.url);
-  const statuses = { running: "진행 중", complete: "완료", error: "오류", stopped: "중단" };
+  const statuses = { running: "진행 중", complete: "완료", error: "오류", cancelled: "중단", stopped: "중단" };
   const running = rows.findLast(row => row.status === "running");
   return <section className="cw-mr-progress" aria-label="GitLab MR 작업 진행">
     {url && mr && <header><a className="cw-text-button" href={url} target="_blank" rel="noreferrer">MR !{mr.iid} ↗</a>

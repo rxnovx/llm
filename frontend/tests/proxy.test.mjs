@@ -393,3 +393,74 @@ test('assistant proxy protects registry mutations and preserves upstream authori
   assert.equal((await fetch(origin+'/api/assistant/admin/secrets',{headers:csrf})).status,404);
   assert.equal((await fetch(origin+'/api/assistant/preferences',{method:'PUT',headers:csrf,body:'x'.repeat(65537)})).status,413);
 });
+
+test("GitLab webhook receiver forwards only bounded event credentials and no user session", async () => {
+  mode = "tokens";
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const body = '{ "project": {"id": 7}, "note": "한글 이벤트" }';
+  const response = await fetch(`${origin}/api/apps/gitlab/webhooks/${id}`, { method: "POST", headers: {
+    origin: "https://gitlab.example", cookie: "private=do-not-forward", authorization: "Bearer do-not-forward",
+    "x-gitlab-token": "test-webhook-secret", "x-gitlab-event": "Merge Request Hook", "x-gitlab-event-uuid": "delivery-1",
+    "x-oauth-browser": "do-not-forward", "content-type": "application/json",
+  }, body });
+  assert.equal(response.status, 200);
+  assert.equal(received.path, `/apps/gitlab/webhooks/${id}`);
+  assert.equal(received.body, body);
+  assert.equal(received.headers["x-gitlab-token"], "test-webhook-secret");
+  assert.equal(received.headers["x-gitlab-event"], "Merge Request Hook");
+  assert.equal(received.headers["x-gitlab-event-uuid"], "delivery-1");
+  assert.equal(received.headers.authorization, undefined);
+  assert.equal(received.headers.cookie, undefined);
+  assert.equal(received.headers["x-oauth-browser"], undefined);
+  assert.equal(received.headers.origin, undefined);
+  assert.match(response.headers.get("cache-control"), /no-store/);
+});
+
+test("only the exact signed webhook receiver bypasses browser CSRF", async () => {
+  mode = "tokens";
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const endpoint = `${origin}/api/apps/gitlab/webhooks/${id}`;
+  assert.equal((await fetch(endpoint, { method: "POST", body: "{}" })).status, 401);
+  assert.equal((await fetch(endpoint, { method: "GET" })).status, 404);
+  assert.equal((await fetch(`${endpoint}/admin`, { method: "POST", headers: { "x-gitlab-token": "test" }, body: "{}" })).status, 404);
+  assert.equal((await fetch(endpoint, { method: "POST", headers: { "x-gitlab-token": "test" }, body: "x".repeat(512 * 1024 + 1) })).status, 413);
+  assert.equal((await fetch(`${origin}/api/apps/gitlab/webhook-subscriptions/${id}`, { method: "PATCH", headers: { "x-gitlab-token": "test" }, body: "{}" })).status, 403);
+});
+
+test("webhook subscription settings retain session authorization and mutation CSRF checks", async () => {
+  mode = "tokens";
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const requests = [
+    ["GET", `/connections/${id}/webhooks`], ["GET", `/connections/${id}/groups?q=backend`],
+    ["POST", `/connections/${id}/projects/7/webhooks`], ["GET", `/gitlab/webhook-subscriptions/${id}`],
+    ["PATCH", `/gitlab/webhook-subscriptions/${id}`], ["POST", `/gitlab/webhook-subscriptions/${id}/seen`],
+    ["DELETE", `/gitlab/webhook-subscriptions/${id}`],
+  ];
+  for (const [method, path] of requests) {
+    const response = await fetch(`${origin}/api/apps${path}`, { method, headers: { ...csrf, authorization: "Bearer owner", cookie: "private=value" },
+      ...(method !== "GET" && { body: "{}" }) });
+    assert.equal(response.status, 200, `${method} ${path}`);
+    assert.equal(received.path, `/apps${path}`);
+    assert.equal(received.headers.authorization, "Bearer owner");
+    assert.equal(received.headers.cookie, undefined);
+  }
+});
+
+test("actual model capability and telemetry routes are exposed only through bounded admin paths", async () => {
+  mode = "tokens";
+  for (const path of ["telemetry?hours=24", "connections/office/capabilities?model=gemma-test"]) {
+    const response = await fetch(`${origin}/api/admin/${path}`, { headers: { authorization: "Bearer admin", cookie: "private=value" } });
+    assert.equal(response.status, 200);
+    assert.equal(received.path, `/admin/${path}`);
+    assert.equal(received.headers.authorization, "Bearer admin");
+    assert.equal(received.headers.cookie, undefined);
+  }
+  const path = "/api/admin/connections/office/capabilities/probe";
+  assert.equal((await fetch(origin + path, { method: "POST", body: "{}" })).status, 403);
+  const response = await fetch(origin + path, { method: "POST", headers: { ...csrf, authorization: "Bearer admin" },
+    body: JSON.stringify({ model: "gemma-test", checks: ["streaming"] }) });
+  assert.equal(response.status, 200);
+  assert.equal(received.path, "/admin/connections/office/capabilities/probe");
+  assert.equal(JSON.parse(received.body).checks[0], "streaming");
+  assert.equal((await fetch(`${origin}/api/admin/connections/office/capabilities/admin`, { headers: csrf })).status, 404);
+});

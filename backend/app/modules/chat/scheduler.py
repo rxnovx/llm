@@ -8,6 +8,9 @@ from app.modules.auth.models import User
 from app.modules.chat.models import Admission, Conversation, GenerationRun, SchedulerLock
 
 
+ACTIVE_STATES = frozenset({'queued', 'running', 'tool_waiting'})
+
+
 def lock(db):
     # An UPDATE takes a write/row lock on both SQLite and PostgreSQL. Keep the
     # transaction short; never hold this mutex across network calls or awaits.
@@ -38,6 +41,11 @@ def poll(db, request_id, settings, resolve, *, independent=False):
     run = db.get(GenerationRun, request_id)
     if not admission or not run:
         return 'cancelled', 0, None
+    # A late tool callback or a second polling worker must never resurrect a
+    # finished attempt. This is also required for independent Agent calls,
+    # which do not have a conversation lease to invalidate them.
+    if admission.state not in ACTIVE_STATES or run.status not in ACTIVE_STATES:
+        return 'cancelled', 0, None
     conversation = db.get(Conversation, run.conversation_id) if run.conversation_id else None
     user = db.get(User, run.user_id) if run.user_id else None
     owns_turn = conversation and conversation.generation_id == request_id and not conversation.cancel_requested
@@ -48,6 +56,8 @@ def poll(db, request_id, settings, resolve, *, independent=False):
     if admission.expires_at <= now:
         admission.state = 'error'
         return 'expired', 0, None
+    if admission.state == 'tool_waiting':
+        return 'tool_waiting', 0, None
     # Revalidate disabled connections, permissions and model limits while queued.
     connection = resolve(settings, run.connection_id, db, user)
     profile = connection.profile(run.model)
@@ -81,19 +91,26 @@ def finish(db, request_id, status):
 def release_for_tools(db,request_id,deadline):
     """Keep the conversation lease, return the inference permit during CPU/network work."""
     lock(db)
-    db.execute(update(Admission).where(Admission.request_id==request_id).values(state='tool_waiting',expires_at=deadline))
     run=db.get(GenerationRun,request_id)
-    if run:
-        run.status,run.deadline_at='tool_waiting',deadline
-        db.execute(update(Conversation).where(Conversation.id==run.conversation_id,Conversation.generation_id==request_id)
-            .values(generation_until=deadline))
+    if not run or run.status not in ACTIVE_STATES:
+        return False
+    changed = db.execute(update(Admission).where(Admission.request_id==request_id,
+        Admission.state.in_(ACTIVE_STATES)).values(state='tool_waiting',expires_at=deadline))
+    if not changed.rowcount:
+        return False
+    run.status,run.deadline_at='tool_waiting',deadline
+    db.execute(update(Conversation).where(Conversation.id==run.conversation_id,Conversation.generation_id==request_id)
+        .values(generation_until=deadline))
+    return True
 
 
 def requeue(db,request_id,settings):
     lock(db)
     run=db.get(GenerationRun,request_id)
     row=db.scalar(select(Admission).where(Admission.request_id==request_id))
-    if row:
-        db.delete(row);db.flush()
+    if not run or not row or run.status not in ACTIVE_STATES or row.state not in ACTIVE_STATES:
+        return False
+    db.delete(row);db.flush()
     enqueue(db,run,settings)
     run.status='queued'
+    return True

@@ -6,6 +6,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { chatFetch, chatJson } from "@/lib/chat-api";
 import { conversationHistoryPath, messagePageQuery } from "@/lib/chat-history";
 import { readChatStream } from "@/lib/chat-stream";
+import { appendReasoning, createGenerationBuffer, mergeTraceActivities } from "@/lib/generation-trace";
 import type { AuthUser } from "@/types/auth";
 import type { ChatConfig, ChatMessage, Connection, ContextReport, Conversation, ConversationDetail, QueueState } from "@/types/chat";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
@@ -21,14 +22,15 @@ import { updateConversationLocation, workspaceConversationId } from "@/lib/works
 import { backupOAuthDraft, takeOAuthDraft, OAUTH_LEAVING, gitlabMergeRequestLink, type GitlabSelection } from "@/lib/app-connections";
 import { appMentionAt, GITLAB_MENTION, hasGitlabMention, insertGitlabMention, removeAppMention } from "@/lib/app-mentions";
 import { GitlabScopeDialog } from "./GitlabScopeDialog";
-import { GitlabWorkProgress, gitlabWebUrl } from "./GitlabWorkProgress";
+import { gitlabWebUrl } from "./GitlabWorkProgress";
+import { GenerationTrace, hasGenerationTrace } from "./GenerationTrace";
+import { GitlabNotifications } from "./GitlabNotifications";
 import { MessageSources } from "./MessageSources";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { AssistantDialog } from './AssistantDialog';
 import { MessageWorkflow } from './MessageWorkflow';
 import { ProjectsDialog } from './ProjectsDialog';
 import { ScheduledTasksDialog } from './ScheduledTasksDialog';
-import { activityLabel } from './activity-labels';
 import { DraftAttachments, type DraftAttachment } from './DraftAttachments';
 import { ExistingImagePicker } from './ExistingImagePicker';
 import { useMessageHistory } from './useMessageHistory';
@@ -56,7 +58,6 @@ const automaticRouteLabels: Record<string, string> = {
   memory: "기억 관리",
   manage_schedule: "예약 작업 관리",
 };
-const activityStatusLabels = { running: "진행 중", complete: "완료", error: "오류" };
 function ReplyRoute({ routing }: { routing: ChatMessage['routing'] }) {
   const label = routingLabel(routing);
   return label ? <p className="cw-message-app">{label}</p> : null;
@@ -698,7 +699,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     if (!text || !canSend || sending.current || (retry ? hasNewer : !!attachmentIssue)) return;
     if (!user) { onGuestDraft(text); router.push("/login", { scroll: false }); return; }
     const last=messages.at(-1);
-    if(retry&&!confirmed&&(last?.assistant?.allow_writes||last?.apps?.some(a=>a.mode==='execute'))){setRetryConfirmation(text);return;}
+    if(retry&&!confirmed&&(last?.assistant?.allow_writes||last?.apps?.some(a=>a.mode==='execute')||last?.routing?.remote_writes||last?.recovery?.requires_confirmation)){setRetryConfirmation(text);return;}
     onGuestDraft("");
     cancelPage();
     setComposerDropdown(null);
@@ -728,6 +729,11 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     let canvasOffered = false;
     let requestId: string | undefined;
     let restoredQueue: QueueState | null = null;
+    const streamBuffer = createGenerationBuffer(({ answer, reasoning, truncated }) => {
+      if (controller.current !== abort || !assistantId) return;
+      setMessages(old => old.map(item => item.id === assistantId ? { ...item, content: item.content + answer,
+        ...((reasoning || truncated) && { generation_trace: appendReasoning(item.generation_trace, reasoning, truncated) }) } : item));
+    });
     try {
       if (current && hasNewer) {
         const detail = await chatJson<ConversationDetail>(conversationHistoryPath(current.id), { signal: abort.signal });
@@ -799,6 +805,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           setActive(conversation); updateConversation(conversation);
           requestAnimationFrame(() => { if (!canvasOffered && !abort.signal.aborted) editor.current?.focus(); });
         } else if (event.event === "canvas") {
+          streamBuffer.flush();
           const selection = event.data;
           setMessages(old => old.map(item => item.id === assistantId
             ? { ...item, routing: { ...item.routing, canvas: selection } } : item));
@@ -810,7 +817,13 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
             }
           }
         } else if (event.event === "delta") {
-          setMessages((old) => old.map((item) => item.id === assistantId ? { ...item, content: item.content + event.data.content } : item));
+          streamBuffer.push("answer", event.data.content);
+        } else if (event.event === "reasoning_delta") {
+          streamBuffer.push("reasoning", event.data.content, event.data.truncated);
+        } else if (event.event === "generation_metrics") {
+          streamBuffer.flush();
+          setMessages(old => old.map(item => item.id === assistantId ? { ...item,
+            generation_trace: { ...appendReasoning(item.generation_trace, ""), metrics: event.data.metrics } } : item));
         } else if(event.event==='artifact'){
           setMessages(old=>old.map(item=>item.id===assistantId?{...item,artifacts:[...(item.artifacts??[]),event.data]}:item));
         } else if(event.event==='coverage'){
@@ -828,7 +841,9 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           setToolStatus(event.data.status==='running'
             ? event.data.name === "gitlab_publication" ? "커밋을 완료하고 GitLab MR을 생성하고 있습니다." : event.data.detail
             : '');
-          setMessages(old=>old.map(item=>item.id===assistantId?{...item,tools:[...(item.tools??[]),event.data].slice(-150)}:item));
+          streamBuffer.flush();
+          setMessages(old=>old.map(item=>item.id===assistantId?{...item,tools:mergeTraceActivities(item.tools??[],event.data),
+            generation_trace:{...appendReasoning(item.generation_trace,""),steps:mergeTraceActivities(item.generation_trace?.steps??item.tools??[],event.data)}}:item));
         } else if(event.event==='workspace') {
           setMessages(old=>old.map(item=>item.id===assistantId?{...item,apps:event.data.selection?[event.data.selection]:item.apps?.map(selection=>({...selection,workspace_id:event.data.id}))}:item));
           if(!retry&&!event.data.automatic)setAppSelections(old=>old.map(selection=>
@@ -837,6 +852,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
             && selection.merge_request?.project_id === usedApps[0]?.merge_request?.project_id
               ? {...selection,workspace_id:event.data.id} : selection));
         } else {
+          streamBuffer.flush();
           generation.current = null;
           setQueue(null);
           setMessages((old) => old.map((item) => item.id === event.data.message.id ? event.data.message : item));
@@ -845,6 +861,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
         }
       });
     } catch (caught) {
+      streamBuffer.flush();
       if (controller.current !== abort) return;
       if (abort.signal.aborted) {
         setMessages((old) => old.map((item) => item.status === "pending" ? { ...item, status: "cancelled" } : item));
@@ -867,6 +884,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
         } catch { /* Preserve partial text and the original error while offline. */ }
       }
     } finally {
+      streamBuffer.dispose();
       if (!assistantId && uploadAttempts.length) await Promise.allSettled(uploadAttempts.map(cancelAttachmentUpload));
       if (controller.current === abort) {
         controller.current = null;
@@ -1114,6 +1132,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
       {active && !readOnly ? <button className="cw-title-button" disabled={busy || loading} aria-label="대화 이름 변경" title="대화 이름 변경" onClick={() => rename(active)}>
         <span className="cw-topbar-title">{active.title}</span><Icon name="edit" size={13} /></button> : <span className="cw-topbar-title">{active?.title||'새 대화'}</span>}</div>
       {user&&<div className="cw-topbar-project"><button className="cw-text-button" disabled={starting||uploading} onClick={()=>setProjectsOpen(true)}>{active?.project_name||projects.find(p=>p.id===projectId)?.name||'프로젝트'}</button>{active&&!readOnly&&messages.length>0&&<button className="cw-text-button" disabled={busy||loading||uploading} onClick={()=>void continueConversation()}>새 대화로 이어가기</button>}</div>}
+      {user&&<GitlabNotifications/>}
       {!user && <div className="cw-guest-topbar"><ThemeToggle /><Link href="/login">로그인</Link></div>}</header>
       <div className={`cw-content ${messages.length && !routePending ? "has-messages" : ""}`} ref={viewportRef}
         onScroll={() => onScroll(loading || starting || routePending ? undefined : active?.id)} aria-busy={loading || routePending && !routeError}>
@@ -1137,15 +1156,13 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
             {message.role === "user" ? <div className="cw-human-text">{message.content}</div> : <>
               {!!message.apps?.length && <p className="cw-message-app">GitLab · {message.apps[0].merge_request ? `기존 MR !${message.apps[0].merge_request.iid}` : message.apps[0].mode==='execute'?'프로젝트 분석·실행':message.apps[0].mode==='workspace'?'프로젝트 자동 분석':message.apps[0].paths.join(", ")}
                 {message.apps[0].workspace_id&&<button type="button" className="cw-text-button" onClick={()=>setWorkspaceOpen(true)}>작업공간 열기</button>}</p>}
-              {(message.apps?.[0]?.merge_request || message.tools?.some(tool => tool.name === "gitlab_mr_overview")) &&
-                <GitlabWorkProgress message={message} onFollowup={canSend ? openGitlabScope : undefined} />}
               <GitlabPublication tools={message.tools} />
               <ReplyRoute routing={message.routing} />
-              {!!message.tools?.length&&<details className="cw-tool-history"><summary>작업 기록 · {message.tools.filter(t=>t.status!=='running').length}개 결과</summary>{message.tools.map((tool,index)=><details key={index}><summary>{tool.step}. {activityLabel(tool.name)} · {activityStatusLabels[tool.status] ?? tool.status}</summary><pre>{tool.detail}</pre></details>)}</details>}
+              <GenerationTrace key={`${message.id}:${message.generation_trace?.request_id ?? "legacy"}`} message={message} onFollowup={canSend ? openGitlabScope : undefined} />
               {active && message.routing?.canvas
                 ? <CanvasAnswer message={message} expanded={canvasMessage?.id === message.id}
                     onOpen={trigger => canvas.open(active.id, message, trigger)} />
-                : message.content ? <MessageContent content={message.content} /> : message.status === "pending" ? toolStatus && !message.apps?.[0]?.merge_request ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
+                : message.content ? <MessageContent content={message.content} /> : message.status === "pending" && !hasGenerationTrace(message) ? toolStatus ? <p className="cw-tool-status" role="status">{toolStatus}</p> : <div className="cw-thinking" role="status"><span /><span /><span /><span className="cw-sr-only">응답을 기다리는 중</span></div> : null}
               <MessageSources sources={message.sources ?? []} onOpenConversation={openConversationAt} />
               {message.status === "error" && <p className="cw-message-error" role="alert">{message.error || "응답이 중단되었습니다. 다시 시도해 주세요."}</p>}
               {message.status === "cancelled" && <p className="cw-stopped">응답이 중지되었습니다.</p>}
@@ -1156,7 +1173,9 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
                   <Icon name="file" size={14} />캔버스에서 열기
                 </button>}
                 {!readOnly && !hasNewer && index === messages.length - 1 && <button className="cw-text-button" disabled={!canSend} onClick={() => void send(messages[index - 1]?.content, true)}><Icon name="refresh" size={14} />다시 생성</button>}</div>}</>}
-            {active&&!readOnly&&<MessageWorkflow message={message} conversationId={active.id} disabled={busy||loading||starting||uploading} onResult={result=>acceptWorkflow(result,active.id)} onFiles={files=>updateAnswerFiles(message,files)} onRetry={!hasNewer&&message.role==='assistant'&&index===messages.length-1?()=>void send(messages[index-1]?.content,true):undefined} onModels={openModels} onApps={()=>void openAssistant()} onReferenceImage={canUseImageInput ? referenceImage : undefined}/>}
+            {active&&!readOnly&&<MessageWorkflow message={message} conversationId={active.id} disabled={busy||loading||starting||uploading} onResult={result=>acceptWorkflow(result,active.id)} onFiles={files=>updateAnswerFiles(message,files)} onRetry={!hasNewer&&message.role==='assistant'&&index===messages.length-1?()=>void send(messages[index-1]?.content,true):undefined} onModels={openModels} onApps={()=>void openAssistant()}
+              onGitlabConnect={()=>{if(!draft.trim()&&messages[index-1]?.role==='user')setDraft(messages[index-1].content);}}
+              onReferenceImage={canUseImageInput ? referenceImage : undefined}/>}
           </article>)}{historyBoundary('newer')}</div>}
       </div>
       {!routePending && messages.length > 0 && <div className="cw-composer-dock">{(scrollDown || hasNewer) && <button className="cw-scroll-down" aria-label="최신 메시지로 이동"

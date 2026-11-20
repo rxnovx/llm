@@ -11,6 +11,7 @@ import "./admin.css";
 import { UsageManager } from "./UsageManager";
 import { FeedbackReview } from "./FeedbackReview";
 import { ConnectionManager } from "./ConnectionManager";
+import { ModelTelemetry } from "./ModelTelemetry";
 
 type Tab = "overview" | "connections" | "requests" | "users" | "audit" | "feedback" | "usage";
 const tabs: [Tab, string][] = [["usage", "토큰·서비스 키"], ["feedback", "답변 신고"],["overview", "개요"], ["connections", "모델 관리"], ["requests", "생성 요청"], ["users", "사용자"], ["audit", "감사 기록"]];
@@ -162,6 +163,7 @@ function Dashboard({ name, embedded }: { name: string; embedded: boolean }) {
         <section className="ops-panel"><header><div><h2>모델별 사용량</h2><p>최근 24시간 · 출력 문자는 토큰 수와 다릅니다.</p></div></header><div className="ops-table-scroll"><table><thead><tr><th>모델</th><th>연결</th><th>요청</th><th>출력 문자</th></tr></thead><tbody>
           {overview.model_usage.map((item, index) => <tr key={`${item.connection_id}-${item.model}-${index}`}><td><strong>{item.model}</strong>{item.is_test && <small className="ops-inline-tag">테스트</small>}</td><td>{item.connection_id}</td><td>{number(item.requests)}</td><td>{number(item.output_chars)}</td></tr>)}
           {!overview.model_usage.length && <tr><td colSpan={4} className="ops-empty">수집된 요청이 없습니다.</td></tr>}</tbody></table></div></section>
+        <ModelTelemetry revision={refresh} onForbidden={deny} />
       </> : tab === "usage" ? <UsageManager onForbidden={deny} /> : tab === "feedback" ? <FeedbackReview/> : tab === "connections" ? <ConnectionManager onForbidden={deny} /> : <section className="ops-panel"><header><div><h2>{tabs.find(([id]) => id === tab)?.[1]}</h2><p>{tab === "requests" ? "요청 메타데이터만 표시하며 대화 본문은 조회하지 않습니다." : tab === "users" ? "계정과 유효 로그인 세션 현황" : "인증·계정·권한 변경 기록"}</p></div>
         {tab === "requests" && <select aria-label="요청 상태" value={status} onChange={(event) => { setLoading(true); setStatus(event.target.value as RunStatus | "all"); setPage(0); }}><option value="all">전체 상태</option>{Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>}
         {tab === "users" && <form className="ops-user-search" onSubmit={(event) => { event.preventDefault(); setLoading(true); setQuery(search.trim()); setPage(0); setRefresh((old) => old + 1); }}>
