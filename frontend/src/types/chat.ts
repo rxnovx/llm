@@ -29,7 +29,10 @@ export type GenerationMetrics = { duration_ms?: number | null; first_token_ms?: 
 export type GenerationTrace = { request_id?: string; status?: string; started_at_ms?: number;
   reasoning: string; reasoning_truncated: boolean; steps: ToolActivity[]; metrics?: GenerationMetrics };
 export type Workspace = { id: string; conversation_id: string; status: string; allow_execution: boolean; ref: string; project_id: number; source: {project?:string;commit?:string} };
-export type Conversation = { id: string; title: string; connection_id: string; model: string; created_at: number; updated_at: number; busy: boolean;read_only?:boolean;project_id?:string|null;project_name?:string|null;parent_id?:string|null;auto_summary?:boolean;match?:{message_id:string;role:string;excerpt:string}|null };
+export type TitleGeneration = { status: "queued" | "running" | "complete" | "error" | "manual"; revision: number;
+  expires_at: number; error_code?: string | null; checks?: { format_valid?: boolean; source_anchor_hits?: number;
+    numbers_grounded?: boolean; semantic_verified?: boolean } };
+export type Conversation = { id: string; title: string; connection_id: string; model: string; created_at: number; updated_at: number; busy: boolean;title_generation?:TitleGeneration|null;read_only?:boolean;project_id?:string|null;project_name?:string|null;parent_id?:string|null;auto_summary?:boolean;match?:{message_id:string;role:string;excerpt:string}|null };
 export type CanvasSelection = { start: number; end: number | null };
 export type ChatMessage = { id: string; role: "user" | "assistant"; content: string; status: "pending" | "complete" | "cancelled" | "error";
   generation_trace?: GenerationTrace;

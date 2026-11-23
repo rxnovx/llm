@@ -130,6 +130,9 @@ def model_controls_smoke(client, access):
     canvas_question = '인수인계 문서 초안을 작성해 줘'
     canvas_intro, canvas_body, canvas_outro = '📋 초안입니다.\n\n', '# 인수인계\n\n- 첫날 일정\n', '\n담당자를 확인하세요.'
     requests = []
+    title_started, title_release = threading.Event(), threading.Event()
+    title_release.set()
+    title_question = 'HTTP 자동 제목 기능을 검증해 줘'
     class ModelServer(BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
@@ -139,6 +142,16 @@ def model_controls_smoke(client, access):
             self.wfile.write(b'{"data":[{"id":"wire"}]}')
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            schema=payload.get('response_format',{}).get('json_schema',{}).get('schema',{})
+            if 'title' in schema.get('properties',{}):
+                source=json.loads(payload['messages'][-1]['content'])['question']
+                if source==title_question:
+                    title_started.set();title_release.wait(8)
+                title='HTTP 자동 제목 검증' if source==title_question else source.strip()[:40]
+                self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers()
+                self.wfile.write(json.dumps({'choices':[{'message':{'content':json.dumps({'title':title},ensure_ascii=False)}}],
+                    'usage':{'prompt_tokens':7,'completion_tokens':4}},ensure_ascii=False).encode())
+                return
             requests.append(payload)
             index = len(requests)
             self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.end_headers()
@@ -172,8 +185,10 @@ def model_controls_smoke(client, access):
             result=client.post('/api/chat/conversations',headers=access,json={'connection_id':'wire-model','model':'wire'})
             assert result.status_code==201
             paths.append('/api/chat/conversations/'+result.json()['id'])
+        attempt_ids=[]
         def body(content):
-            return {'connection_id':'wire-model','model':'wire','content':content,'request_id':str(uuid.uuid4())}
+            identifier=str(uuid.uuid4());attempt_ids.append(identifier)
+            return {'connection_id':'wire-model','model':'wire','content':content,'request_id':identifier}
         with ThreadPoolExecutor() as executor:
             first=executor.submit(client.post,paths[0]+'/messages',headers=access,json=body('첫 요청'))
             assert entered.wait(5), 'First request never reached the local model double'
@@ -201,8 +216,17 @@ def model_controls_smoke(client, access):
         assert system['role'] == 'system' and system['content'].endswith('사용자가 작성한 이전 대화 요약 메모:\n유지할 결정 사항')
         assert question == {'role':'user','content':'요약 이후 질문'}
         assert requests[-1]['max_tokens']==256
-        stats=client.get('/api/admin/overview?mode=live',headers=access).json()
-        assert stats['requests_24h']['total']==3 and stats['requests_24h']['complete']==2 and stats['requests_24h']['cancelled']==1
+        deadline=time.monotonic()+5
+        while True:
+            stats=client.get('/api/admin/overview?mode=live',headers=access).json()
+            if stats['generating']==0 and stats['queued']==0:break
+            assert time.monotonic()<deadline, 'Independent title work did not release model admission'
+            time.sleep(.05)
+        # 운영 통계에는 별도 제목 모델 호출도 포함되므로, 채팅 시도 자체는 ID로 대조한다.
+        runs=client.get('/api/admin/requests?mode=live&limit=100',headers=access).json()['items']
+        tracked={row['id']:row['status'] for row in runs if row['id'] in attempt_ids}
+        assert len(tracked)==3 and list(tracked.values()).count('complete')==2 and list(tracked.values()).count('cancelled')==1
+        assert stats['requests_24h']['total']>=3 and stats['requests_24h']['cancelled']==1
         assert stats['generating']==0 and stats['queued']==0
 
         # Closing the first HTTP stream should only detach the viewer. With a
@@ -257,6 +281,24 @@ def model_controls_smoke(client, access):
         assert draft.status_code == 200 and draft.json() == {'content': canvas_body, 'revision': 0}
         print('PASS: model-selected Canvas appears before the reply finishes and reloads its Markdown block')
 
+        title_release.clear()
+        result=client.post('/api/chat/conversations',headers=access,json={'connection_id':'wire-model','model':'wire'})
+        title_chat=result.json()['id']
+        reply=client.post('/api/chat/conversations/'+title_chat+'/messages',headers=access,json={
+            'content':title_question,'request_id':str(uuid.uuid4()),'connection_id':'wire-model','model':'wire'})
+        assert 'event: done' in reply.text and not title_release.is_set()
+        assert title_started.wait(3)
+        title_release.set()
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline:
+            metadata=client.get('/api/chat/active?title_id='+title_chat,headers=access).json()['titles'][0]
+            if metadata['title_generation']['status']=='complete':break
+            time.sleep(.05)
+        assert metadata['title']=='HTTP 자동 제목 검증',metadata
+        assert metadata['title_generation']['checks']['semantic_verified'] is False
+        assert client.get('/api/chat/conversations/'+title_chat,headers=access).json()['conversation']['title']==metadata['title']
+        print('PASS: independent title generation finishes after SSE and refreshes through the authenticated BFF')
+
         checked = client.post('/api/admin/connections/wire-model/probe', headers=access, json={})
         assert checked.status_code == 200 and checked.json()['sample'] == '모델 응답', checked.text
         user_id = client.get('/api/account/users/me', headers=access).json()['subject']
@@ -276,7 +318,7 @@ def model_controls_smoke(client, access):
         assert client.get('/v1/models', headers=service).status_code == 401
         print('PASS: saved-model probe, gateway SSE, per-key token reporting and revocation')
     finally:
-        release.set(); release_background.set(); release_canvas.set()
+        release.set(); release_background.set(); release_canvas.set(); title_release.set()
         server.shutdown(); server.server_close(); thread.join(timeout=2)
 def workflows_smoke(client,access):
     """Real BFF, upload session, branch, version, output bytes and feedback routes."""

@@ -6,6 +6,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { chatFetch, chatJson } from "@/lib/chat-api";
 import { conversationHistoryPath, messagePageQuery } from "@/lib/chat-history";
 import { readChatStream } from "@/lib/chat-stream";
+import { applyTitlePatch, parseTitlePatches, pendingTitleIds } from "@/lib/chat-titles";
 import { appendReasoning, createGenerationBuffer, mergeTraceActivities } from "@/lib/generation-trace";
 import type { AuthUser } from "@/types/auth";
 import type { ChatConfig, ChatMessage, Connection, ContextReport, Conversation, ConversationDetail, QueueState } from "@/types/chat";
@@ -231,6 +232,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     ? `${active.id}:${canvasMessage.id}:${canvasMessage.active_version ?? "original"}`
     : "";
   const anyRunning = conversations.some(item => item.busy);
+  const titleIds = pendingTitleIds(conversations, active).join(",");
   useEffect(() => {
     if (!subject) return;
     const abort = new AbortController();
@@ -239,22 +241,28 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     return () => abort.abort();
   }, [subject]);
   useEffect(() => {
-    if (!subject || !anyRunning) return;
+    if (!subject || (!anyRunning && !titleIds)) return;
     const abort = new AbortController();
     let pending = false;
+    const started = Date.now();
     const timer = setInterval(() => {
       if (pending) return;
+      if (!anyRunning && Date.now() - started > 135_000) { clearInterval(timer); return; }
       pending = true;
-      void chatJson<{ ids: string[] }>('/active', {
+      const query = new URLSearchParams();
+      for (const id of titleIds.split(",").filter(Boolean)) query.append("title_id", id);
+      void chatJson<{ ids: string[]; titles?: unknown }>(`/active${query.size ? `?${query}` : ""}`, {
         signal: AbortSignal.any([abort.signal, AbortSignal.timeout(5000)]),
-      }).then(({ ids }) => {
+      }).then(({ ids, titles }) => {
         if (abort.signal.aborted) return;
         const running = new Set(ids);
-        setConversations(old => old.map(item => ({ ...item, busy: running.has(item.id) })));
+        const patches = parseTitlePatches(titles);
+        setConversations(old => old.map(item => applyTitlePatch({ ...item, busy: running.has(item.id) }, patches)));
+        setActive(old => old ? applyTitlePatch(old, patches) : old);
       }).catch(() => {}).finally(() => { pending = false; });
     }, 2500);
     return () => { abort.abort(); clearInterval(timer); };
-  }, [subject, anyRunning]);
+  }, [subject, anyRunning, titleIds]);
   const viewer = projects.find(project => project.id === (active ? active.project_id : projectId))?.role === 'viewer';
   const readOnly = !!active?.read_only || viewer;
   const canSend = ready && !readOnly && (!user || !!connection && (connection.is_test || !!model.trim())) && !busy && !loading && !starting && !initializing && !uploading && !routePending;

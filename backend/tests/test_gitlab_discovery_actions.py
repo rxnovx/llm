@@ -475,6 +475,43 @@ def test_webhook_secret_project_isolation_dedup_status_and_opt_in(client, accoun
     assert client.post(callback, headers=hook_headers, json=body).status_code == 401
 
 
+@pytest.mark.parametrize('change', ['reauthorized', 'disconnected', 'provider_removed'])
+def test_owner_can_remove_stale_webhook_without_reenabling_old_events(client, account, actions_setup, monkeypatch, change):
+    _, headers, connection, *_ = actions_setup
+    create_url = f'/apps/connections/{connection}/projects/7/webhooks'
+    row = client.post(create_url, headers=headers, json={}).json()
+    status_url = '/apps/gitlab/webhook-subscriptions/' + row['id']
+    callback = row['callback_path'].removeprefix('/api')
+    body = {'object_kind': 'pipeline', 'project': {'id': 7}, 'object_attributes': {'id': 11, 'status': 'failed'}}
+    hook_headers = {'X-Gitlab-Token': row['secret_token'], 'X-Gitlab-Event': 'Pipeline Hook'}
+    assert client.post(callback, headers=hook_headers, json=body).status_code == 200
+    if change == 'reauthorized':
+        assert publish_connection(client, headers) == connection
+    elif change == 'disconnected':
+        with client.db_factory() as db:
+            db.get(AppConnection, connection).status = 'expired'; db.commit()
+    else:
+        monkeypatch.setenv('GITLAB_INSTANCES_JSON', '[]'); get_settings.cache_clear()
+    assert client.get(status_url, headers=headers).status_code in {404, 409}
+    assert client.patch(status_url, headers=headers, json={'notifications_enabled': True}).status_code in {404, 409}
+    assert client.post(status_url + '/seen', headers=headers).status_code in {404, 409}
+    assert client.post(callback, headers=hook_headers, json=body).status_code in {404, 409}
+    other = auth(account('webhook_other'))
+    assert client.delete(status_url, headers=other).status_code == 404
+    assert client.delete(status_url).status_code == 401
+    if change == 'reauthorized':
+        assert client.post(create_url, headers=headers, json={}).status_code == 409
+    assert client.delete(status_url, headers=headers).json() == {'unsubscribed': True}
+    assert client.post(callback, headers=hook_headers, json=body).status_code == 401
+    with client.db_factory() as db:
+        assert db.get(GitlabWebhookSubscription, row['id']) is None
+        assert db.scalar(select(GitlabWebhookEvent).where(GitlabWebhookEvent.subscription_id == row['id'])) is None
+    if change == 'reauthorized':
+        replacement = client.post(create_url, headers=headers, json={})
+        assert replacement.status_code == 200
+        assert replacement.json()['id'] != row['id'] and replacement.json()['secret_token'] != row['secret_token']
+
+
 def test_legacy_account_constraint_migrates_atomically_and_preserves_foreign_keys(client, account, gitlab):
     headers = auth(account())
     connection = connect(client, headers)

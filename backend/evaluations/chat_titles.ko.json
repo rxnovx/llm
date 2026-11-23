@@ -1,0 +1,18 @@
+[
+  {"id":"auth", "question":"FastAPI 로그인 토큰이 만료되는 원인을 분석해 줘.", "reference_title":"FastAPI 로그인 토큰 만료 분석", "topic_groups":[["FastAPI"],["로그인","토큰"]], "forbidden":["완료","투자"]},
+  {"id":"gitlab", "question":"GitLab 프로젝트의 main과 develop 브랜치 차이를 비교해 줘.", "reference_title":"GitLab main·develop 브랜치 비교", "topic_groups":[["GitLab"],["브랜치","main"]], "forbidden":["병합 완료"]},
+  {"id":"termux", "question":"Termux Python 3.13에서 cryptography 설치 오류가 발생해.", "reference_title":"Termux Python 3.13 설치 오류", "topic_groups":[["Termux"],["오류","설치"]], "forbidden":["3.14","완료"]},
+  {"id":"sqlite", "question":"SQLite와 PostgreSQL의 동시 쓰기 차이를 설명해 줘.", "reference_title":"SQLite·PostgreSQL 동시 쓰기 비교", "topic_groups":[["SQLite"],["PostgreSQL"]], "forbidden":["MongoDB"]},
+  {"id":"qdrant", "question":"Qdrant 없이 문서 RAG 검색을 사용할 수 있어?", "reference_title":"Qdrant 없는 문서 RAG 검색", "topic_groups":[["Qdrant"],["RAG","검색"]], "forbidden":["설치 완료"]},
+  {"id":"presentation", "question":"사내 보안 교육용 PPTX 발표자료를 만들어 줘.", "reference_title":"사내 보안 교육 PPTX 제작", "topic_groups":[["보안"],["PPTX","발표"]], "forbidden":["여행","완료"]},
+  {"id":"csv", "question":"매출 CSV에서 월별 합계와 누락된 행을 확인해 줘.", "reference_title":"매출 CSV 월별 합계·누락 확인", "topic_groups":[["매출"],["CSV"],["합계","누락"]], "forbidden":["100만원"]},
+  {"id":"translation", "question":"영문 계약서 조항을 한국어로 번역해 줘.", "reference_title":"영문 계약서 조항 한국어 번역", "topic_groups":[["계약서"],["번역"]], "forbidden":["법적 효력 보장"]},
+  {"id":"image", "question":"첨부한 서버 구성도 이미지의 연결 관계를 설명해 줘.", "reference_title":"서버 구성도 이미지 연결 분석", "topic_groups":[["서버"],["구성도","이미지"]], "forbidden":["고양이"]},
+  {"id":"audio", "question":"회의 안내문을 읽어 주는 WAV 음성을 만들어 줘.", "reference_title":"회의 안내문 WAV 음성 제작", "topic_groups":[["회의"],["WAV","음성"]], "forbidden":["녹음 완료"]},
+  {"id":"code", "question":"C# LINQ 쿼리의 성능 병목을 찾아 줘.", "reference_title":"C# LINQ 성능 병목 분석", "topic_groups":[["C#"],["LINQ"],["성능","병목"]], "forbidden":["Java 전환 완료"]},
+  {"id":"test", "question":"로그인 함수의 pytest 경계 조건 테스트를 작성해 줘.", "reference_title":"로그인 함수 pytest 경계 테스트", "topic_groups":[["로그인"],["pytest","테스트"]], "forbidden":["테스트 통과"]},
+  {"id":"math", "question":"행렬 곱셈과 원소별 곱셈의 차이를 예제로 설명해 줘.", "reference_title":"행렬 곱셈과 원소별 곱셈 비교", "topic_groups":[["행렬"],["원소별"]], "forbidden":["미분"]},
+  {"id":"english", "question":"Explain Docker Compose networking between FastAPI and Next.js.", "reference_title":"Docker Compose networking for FastAPI and Next.js", "topic_groups":[["Docker"],["FastAPI"],["Next.js"]], "forbidden":["Kubernetes migration complete"]},
+  {"id":"model", "question":"H100 네 장에서 gpt-oss-120b 동시 요청 한도를 어떻게 정할까?", "reference_title":"H100 gpt-oss-120b 동시 요청 한도", "topic_groups":[["H100"],["gpt-oss"],["동시","한도"]], "forbidden":["1000명","보장"]},
+  {"id":"email", "question":"비밀번호 재설정 이메일이 오지 않는 원인을 찾아 줘.", "reference_title":"비밀번호 재설정 이메일 수신 오류", "topic_groups":[["비밀번호"],["이메일"]], "forbidden":["실제 암호","완료"]}
+]

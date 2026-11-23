@@ -43,6 +43,22 @@ class Subscription:
 class GenerationJobs:
     def __init__(self):
         self.tasks: set[asyncio.Task] = set()
+        self.closed=False
+
+    def start_background(self, operation):
+        """SSE 구독자 없이 실행하되 같은 종료·예외 관리에 포함한다."""
+        if self.closed:
+            operation.close()
+            return None
+        async def run():
+            try:
+                await operation
+            except Exception as error:
+                logger.error('Background generation job failed (%s)',type(error).__name__)
+        task=asyncio.create_task(run())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        return task
 
     def start(self, events: AsyncIterator[str]) -> Subscription:
         subscription = Subscription()
@@ -68,6 +84,7 @@ class GenerationJobs:
         return subscription
 
     async def close(self):
+        self.closed=True
         tasks = list(self.tasks)
         for task in tasks:
             task.cancel()

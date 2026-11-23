@@ -232,3 +232,69 @@ def test_trace_millisecond_columns_use_postgresql_bigint():
                           (trace.TraceActivity, ('started_at_ms', 'finished_at_ms'))):
         for field in fields:
             assert str(model.__table__.c[field].type.compile(dialect=postgresql.dialect())) == 'BIGINT'
+
+
+def framed_reply(kind, messages):
+    if kind == 'vllm':
+        frames = [dict(id='chatcmpl-' + 'a' * 50, object='chat.completion.chunk', created=1795420800,
+            model='internal-model-with-a-long-served-name', choices=[{'index': 0, 'delta': value, 'finish_reason': None}])
+            for value in messages]
+        return httpx.Response(200, text=''.join('data: ' + json.dumps(value, ensure_ascii=False) + '\n\n' for value in frames)
+            + 'data: [DONE]\n\n', headers={'content-type': 'text/event-stream'})
+    frames = [dict(model='internal-model-with-a-long-served-name', created_at='2026-11-23T01:00:00.000000Z',
+        message={'role': 'assistant', **value}, done=False, internal_metadata='framing-' * 12) for value in messages]
+    return httpx.Response(200, text=''.join(json.dumps(value, ensure_ascii=False) + '\n' for value in frames)
+        + json.dumps({'message': {}, 'done': True}) + '\n', headers={'content-type': 'application/x-ndjson'})
+
+
+@pytest.mark.parametrize('kind', ['vllm', 'ollama'])
+def test_token_by_token_answer_is_not_limited_by_repeated_json_envelopes(recorder, monkeypatch, kind):
+    content = '답변abc' * 1400
+    response = framed_reply(kind, [{'content': '답변abc'} for _ in range(1400)])
+    assert len(response.content) > 256000 and len(content.encode()) < 256000
+    monkeypatch.setattr(providers, 'client', lambda *_args: httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: response)))
+    async def operation():
+        result = await providers.tool_reply(connection(kind), 'fixture', [{'role': 'user', 'content': '긴 답변'}], [], Settings(_env_file=None))
+        assert result['content'] == content and result['tool_calls'] == []
+        yield 'complete', {'ok': True}
+    assert collect(recorder, operation)[-1][0] == 'complete'
+
+
+def test_fragmented_tool_arguments_are_bounded_by_payload_not_framing(recorder, monkeypatch):
+    arguments = json.dumps({'label': 'x' * 7000})
+    parts = [arguments[index:index + 5] for index in range(0, len(arguments), 5)]
+    messages = [{'tool_calls': [{'index': 0, 'id': 'tool-fragmented', 'function': {
+        **({'name': 'read_status'} if index == 0 else {}), 'arguments': part}}]} for index, part in enumerate(parts)]
+    response = framed_reply('vllm', messages)
+    assert len(response.content) > 256000
+    monkeypatch.setattr(providers, 'client', lambda *_args: httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: response)))
+    async def operation():
+        result = await providers.tool_reply(connection(), 'fixture', [{'role': 'user', 'content': '자료 조회'}], [], Settings(_env_file=None))
+        assert result['tool_calls'][0]['function']['arguments'] == {'label': 'x' * 7000}
+        yield 'complete', {'ok': True}
+    assert collect(recorder, operation)[-1][0] == 'complete'
+
+
+@pytest.mark.parametrize('kind', ['vllm', 'ollama'])
+@pytest.mark.parametrize('field', ['content', 'reasoning', 'arguments'])
+def test_actual_oversized_stream_payload_is_still_rejected(recorder, monkeypatch, kind, field):
+    text = '가' * 86000
+    if field == 'arguments':
+        value = {'tool_calls': [{'index': 0, 'function': {'name': 'read_status',
+            'arguments': json.dumps({'label': text}, ensure_ascii=False) if kind == 'vllm' else {'label': text}}}]}
+    else:
+        value = {('thinking' if kind == 'ollama' and field == 'reasoning' else field): text}
+    mock_stream(monkeypatch, kind, [value])
+    async def operation():
+        await providers.tool_reply(connection(kind), 'fixture', [{'role': 'user', 'content': '질문'}], [], Settings(_env_file=None))
+        yield 'unexpected', {}
+    with pytest.raises(providers.ProviderError, match='크기 제한'):
+        collect(recorder, operation)
+
+
+def test_stream_with_unbounded_metadata_is_still_rejected():
+    from unittest.mock import AsyncMock, Mock
+    body = ('data: ' + json.dumps({'metadata': 'x' * 200, 'choices': []}) + '\n\n') * 100
+    response = httpx.Response(200, text=body, headers={'content-type': 'text/event-stream'})
+    with pytest.raises(providers.ProviderError, match='크기 제한'):
+        asyncio.run(providers.response_message(response, True, Mock(), Mock(reasoning=AsyncMock()), limit=64, streaming=True))

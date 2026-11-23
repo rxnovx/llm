@@ -206,7 +206,7 @@ def mark_webhook_seen(subscription_id: UUID, context: Authenticated, db: Databas
 
 @router.delete('/gitlab/webhook-subscriptions/{subscription_id}')
 def unsubscribe(subscription_id: UUID, context: Authenticated, db: Database):
-    row = webhooks.owned(db, context.user.id, subscription_id)
+    row = webhooks.owned(db, context.user.id, subscription_id, allow_stale=True)
     db.delete(row)
     db.commit()
     return {'unsubscribed': True}

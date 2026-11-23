@@ -17,6 +17,8 @@ from app.db.session import create_db_engine, get_db
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("UPLOAD_DIRECTORY", str(tmp_path / "avatars"))
     monkeypatch.setenv("KNOWLEDGE_WORKER_ENABLED", "false")
+    # 채팅 계약 검사는 지정된 모델 호출만 검증한다. 제목 전용 검사는 별도로 활성화한다.
+    monkeypatch.setenv("LLM_TITLE_ENABLED", "false")
     monkeypatch.setenv("EMAIL_PROVIDER", "disabled")
     monkeypatch.setenv("EMAIL_VERIFICATION_REQUIRED", "false")
     monkeypatch.setenv("EXPOSE_AUTH_TOKENS_IN_RESPONSE", "false")

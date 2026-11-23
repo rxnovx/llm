@@ -3,20 +3,20 @@
 기준 원격 main: `e4ad6a9d9410e1ba519dd0959b28b465a3b893ea`
 작업 브랜치: `feat/offline-agent-trace-20261120`
 
-기존 SSE·GenerationJobs·ToolTrace·DB 대기열·OAuth·Terminal MCP·문서 RAG·파일 생성·Canvas를 재사용했습니다. 새 테이블은 공개 추론/작업 메타데이터·모델 측정/검사·GitLab 영수증/상태를 보완합니다. 설치·실행은 기존 명령을 유지합니다.
+기존 SSE·GenerationJobs·ToolTrace·DB 대기열·OAuth·Terminal MCP·문서 RAG·파일 생성·Canvas를 재사용했습니다. 새 테이블은 공개 추론/작업 메타데이터·모델 측정/검사·GitLab 영수증/상태·자동 제목 상태를 보완합니다. 제목은 같은 모델로 백그라운드에서 생성하며 설치·실행은 기존 명령을 유지합니다.
 
 실행 결과는 [검증 기록](../VALIDATION.md), 구성과 제약은 [운영 설명](../AGENT_SYSTEM.md)에 정리했습니다. 브라우저 50개 시나리오는 실행 환경의 Chromium 소켓 제한으로 미검증이며 실제 폐쇄망 모델·GitLab·GPU 성능을 검증했다고 주장하지 않습니다.
 
 | 파일 | 변경 목적 |
 | --- | --- |
-| `.env.example` | 추론 공개의 실제 설정 키와 기본값을 한글 주석으로 안내 |
+| `.env.example` | 공개 추론·자동 제목 설정을 한글 주석으로 안내 |
 | `AGENT_SYSTEM.md` | 구현·설정·배포·검증 범위·미검증 환경 문서화 |
 | `GITLAB_APPS.md` | 구현·설정·배포·검증 범위·미검증 환경 문서화 |
 | `LLM_CONNECTIONS.md` | 구현·설정·배포·검증 범위·미검증 환경 문서화 |
 | `OPERATIONS.md` | 구현·설정·배포·검증 범위·미검증 환경 문서화 |
 | `README.md` | 구현·설정·배포·검증 범위·미검증 환경 문서화 |
 | `VALIDATION.md` | 구현·설정·배포·검증 범위·미검증 환경 문서화 |
-| `backend/.env.example` | 추론 공개의 실제 설정 키와 기본값을 한글 주석으로 안내 |
+| `backend/.env.example` | 개별 실행의 공개 추론·자동 제목 설정을 한글 주석으로 안내 |
 | `backend/app/main.py` | 기존 GitLab 계정 제약 업그레이드 시작 훅 |
 | `backend/app/modules/admin/router.py` | 운영자 전용 실제 기능 검사·측정 API |
 | `backend/app/modules/assistant/automatic.py` | API 탐색과 코드 작업 라우팅·단순 인사 빠른 처리·쓰기 권한 전달 |
@@ -29,10 +29,10 @@
 | `backend/app/modules/assistant/repositories.py` | 최대 세 저장소 읽기 전용 정적 분석과 실제 소스 인용 |
 | `backend/app/modules/assistant/routing.py` | API/여러 작업공간 출처 검증·SHA 근거 조회 |
 | `backend/app/modules/chat/diagnostics.py` | 실제 모델 기능 검사·결과 보관·설정 변경 시 무효화 |
-| `backend/app/modules/chat/jobs.py` | 미처리 예외에서 민감 원문 로그 제거 |
-| `backend/app/modules/chat/providers.py` | vLLM/Ollama 공개 추론·구조화/도구 SSE 계약 |
+| `backend/app/modules/chat/jobs.py` | 기존 작업 관리자에서 제목의 비동기 실행·예외·종료 관리 |
+| `backend/app/modules/chat/providers.py` | 추론 채널 분리·도구/JSON SSE 처리, 본문과 전송 외피 크기 제한 분리 |
 | `backend/app/modules/chat/registry.py` | 기존 연결 설정과 추론 공개 설정 호환 |
-| `backend/app/modules/chat/router.py` | 백그라운드 SSE에 작업 과정 연결·중단 복구·쓰기 재시도 검사 |
+| `backend/app/modules/chat/router.py` | SSE 완료 후 제목 예약·소유자별 일괄 갱신·수동 이름 변경 통합 |
 | `backend/app/modules/chat/scheduler.py` | 종료 작업 재진입 차단·추론 슬롯 일관성 |
 | `backend/app/modules/chat/trace.py` | 공통 작업 ID·시간·보안 필터·추론 체크포인트 |
 | `backend/app/modules/chat/trace_history.py` | 답변 버전·분기·오류 복원의 기록 일관성과 조회 시 비밀값 제거 |
@@ -41,10 +41,10 @@
 | `backend/app/modules/integrations/config.py` | 비밀 파일의 이름 변경 Diff 우회 차단 |
 | `backend/app/modules/integrations/merge_requests.py` | MR Diff 양쪽 경로의 비밀 파일 검사 |
 | `backend/app/modules/integrations/models.py` | 다중 계정·쓰기 영수증·웹훅 상태 모델 |
-| `backend/app/modules/integrations/router.py` | 기존 OAuth/API와 새 탐색·다중 계정·웹훅 연결 |
+| `backend/app/modules/integrations/router.py` | GitLab 탐색·웹훅 API와 소유자의 만료된 로컬 구독 해제 |
 | `backend/app/modules/integrations/schema.py` | 기존 SQLite/PostgreSQL 계정 제약 업그레이드 |
 | `backend/app/modules/integrations/service.py` | 기존 OAuth/API와 새 탐색·다중 계정·웹훅 연결 |
-| `backend/app/modules/integrations/webhooks.py` | 인증·중복 방지·프로젝트 범위를 검사하는 상태 수신 |
+| `backend/app/modules/integrations/webhooks.py` | 인증된 이벤트·중복 방지, 오래된 구독 해제만 세대 검사 예외 적용 |
 | `backend/app/modules/knowledge/providers.py` | 언어·식별자·파일명 검색과 선택형 외부 검색 장애 복구·응답 검증 |
 | `backend/app/modules/knowledge/service.py` | 언어·식별자·파일명 검색과 선택형 외부 검색 장애 복구·응답 검증 |
 | `backend/app/modules/workflows/conversations.py` | 답변 버전·분기·쓰기 복구·작업 기록의 호환 조회 |
@@ -58,20 +58,20 @@
 | `backend/tests/test_generation_diagnostics.py` | 기능·권한·경합·실패·회귀 시나리오의 로컬 계약 검증 |
 | `backend/tests/test_generation_trace_integration.py` | 기능·권한·경합·실패·회귀 시나리오의 로컬 계약 검증 |
 | `backend/tests/test_gitlab_agent_discovery.py` | 기능·권한·경합·실패·회귀 시나리오의 로컬 계약 검증 |
-| `backend/tests/test_gitlab_discovery_actions.py` | 기능·권한·경합·실패·회귀 시나리오의 로컬 계약 검증 |
+| `backend/tests/test_gitlab_discovery_actions.py` | GitLab 권한·쓰기에 더해 재인증/해제/서버 제거 후 구독 복구 회귀 검증 |
 | `backend/tests/test_gitlab_merge_requests.py` | 기능·권한·경합·실패·회귀 시나리오의 로컬 계약 검증 |
 | `backend/tests/test_image_generation.py` | 기존 보안·오류·결과 검증을 유지하며 모의 모델을 실제 SSE/NDJSON 계약으로 갱신 |
 | `backend/tests/test_multimodal_workflows.py` | 기존 보안·오류·결과 검증을 유지하며 모의 모델을 실제 SSE/NDJSON 계약으로 갱신 |
 | `backend/tests/test_parallel_and_gateway.py` | 기존 보안·오류·결과 검증을 유지하며 모의 모델을 실제 SSE/NDJSON 계약으로 갱신 |
-| `backend/tests/test_reasoning_trace_provider.py` | 기능·권한·경합·실패·회귀 시나리오의 로컬 계약 검증 |
+| `backend/tests/test_reasoning_trace_provider.py` | 추론·답변 분리와 1,400조각 긴 응답·인수/추론 과다 출력 차단 회귀 검증 |
 | `backend/tests/test_result_files.py` | 기존 보안·오류·결과 검증을 유지하며 모의 모델을 실제 SSE/NDJSON 계약으로 갱신 |
 | `backend/tests/test_retrieval_incremental.py` | 기능·권한·경합·실패·회귀 시나리오의 로컬 계약 검증 |
-| `backend/tests/test_ten_user_queue.py` | 기능·권한·경합·실패·회귀 시나리오의 로컬 계약 검증 |
+| `backend/tests/test_ten_user_queue.py` | 10명 동시 처리·DB 한도, HTTPX 명시적 종료를 따르는 스트림 계측·전체 자원 반환 검증 |
 | `backend/tests/test_trace_jobs_recovery.py` | 기능·권한·경합·실패·회귀 시나리오의 로컬 계약 검증 |
 | `backend/tests/test_workspace_freshness.py` | 기능·권한·경합·실패·회귀 시나리오의 로컬 계약 검증 |
 | `deploy/nginx.conf` | 모델 기능 전체 검사에 필요한 프록시 제한 시간 |
 | `docs/agent-upgrade-changes.md` | 구현·설정·배포·검증 범위·미검증 환경 문서화 |
-| `frontend/package.json` | 채팅 검사 명령에 새 작업 과정 계약 검사 포함 |
+| `frontend/package.json` | 채팅 검사 명령에 작업 과정·자동 제목 계약 검사 포함 |
 | `frontend/playwright.config.ts` | 브라우저 시나리오만 수집하여 Node 테스트 중복 실행 방지 |
 | `frontend/src/app/api/admin/[...path]/route.ts` | 운영 진단 프록시 허용 경로·제한 시간 |
 | `frontend/src/app/api/apps/[...path]/route.ts` | 서명 검증 웹훅의 공개 수신 경로와 일반 설정 인증 분리 |
@@ -82,7 +82,7 @@
 | `frontend/src/components/admin/ConnectionManager.tsx` | 기존 운영 모달에 실제 모델 진단·추론 공개 설정 통합 |
 | `frontend/src/components/admin/ModelTelemetry.tsx` | 모델별 실제 호출 시간·오류·도구 결과 표시 |
 | `frontend/src/components/admin/admin.css` | 기존 디자인 체계에 맞춘 반응형 작업 과정·운영·연결 화면 |
-| `frontend/src/components/chat/ChatWorkspace.tsx` | 통합 작업 과정·재연결 초안·원격 쓰기 재시도 연결 |
+| `frontend/src/components/chat/ChatWorkspace.tsx` | 통합 작업 과정·초안·재시도와 기존 활성 대화 조회를 통한 자동 제목 갱신 |
 | `frontend/src/components/chat/GenerationTrace.tsx` | 추론·도구·GitLab·측정 정보를 통합한 접이식 화면 |
 | `frontend/src/components/chat/GitlabNotifications.tsx` | 사용자가 켠 웹훅 상태의 앱 내 알림 |
 | `frontend/src/components/chat/GitlabWorkProgress.tsx` | 통합 작업 과정·재연결 초안·원격 쓰기 재시도 연결 |
@@ -93,9 +93,20 @@
 | `frontend/src/lib/chat-stream.ts` | 공통 SSE·메시지·측정 타입 확장과 기존 형식 호환 |
 | `frontend/src/lib/generation-trace.ts` | 고정 ID 갱신·출력 병합·실측 출처 처리 |
 | `frontend/src/types/admin.ts` | 공통 SSE·메시지·측정 타입 확장과 기존 형식 호환 |
-| `frontend/src/types/chat.ts` | 공통 SSE·메시지·측정 타입 확장과 기존 형식 호환 |
+| `frontend/src/types/chat.ts` | 공개 추론·작업 측정과 선택형 제목 상태의 기존 API 호환 타입 |
 | `frontend/tests/generation-trace.spec.ts` | 브라우저 시나리오 정의(화면 실행 미검증) |
 | `frontend/tests/generation-trace.test.mjs` | 스트리밍·출력 병합·보안 프록시 계약 검사 |
 | `frontend/tests/gitlab-settings.spec.ts` | 브라우저 시나리오 정의(화면 실행 미검증) |
 | `frontend/tests/proxy.test.mjs` | 스트리밍·출력 병합·보안 프록시 계약 검사 |
 | `nginx.config.file` | 독립 배포 Nginx의 같은 진단 제한 시간 |
+| `backend/app/core/config.py` | 선택형 제목 생성·대기 포함 제한 시간 설정 |
+| `backend/app/modules/chat/models.py` | 기존 대화 열을 보존하는 제목 작업·수정 버전 보조 테이블 |
+| `backend/app/modules/chat/titles.py` | 동일 모델 제목 생성·검증·권한 재검사·수동 수정 경합·실패 복구 |
+| `backend/evaluate_titles.py` | 실제 모델·외부 응답·기준 제목 평가 명령, 자동 규칙과 의미 정확도 구분 |
+| `backend/evaluations/chat_titles.ko.json` | 한글 중심 대표 질문·사람이 작성한 기준 제목·주제 단서 16개 |
+| `backend/tests/conftest.py` | 다른 기능 계약 검사의 모델 호출 수에서 선택형 제목 기능 분리 |
+| `backend/tests/test_chat_titles.py` | 제목 HTTP 계약·SSE 분리·실패·권한·수동 수정·삭제·평가 정직성 검증 |
+| `frontend/src/lib/chat-titles.ts` | 소유한 제목 일괄 갱신·완료 상태·오래된 응답 버전 처리 |
+| `frontend/tests/chat-titles.test.mjs` | 제목 갱신의 수동 수정 버전·다른 대화·기존 상태 보존 검사 |
+| `scripts/smoke_standalone.py` | 실제 Python/Next 프로세스에서 답변 종료 후 제목 생성·BFF 갱신 검증 |
+| `docs/chat-title-evaluation.md` | 실제 모델 평가 방법·사람 검토 기준·자동 지표 한계·자원 사용 안내 |

@@ -338,11 +338,14 @@ async def response_message(response, vllm, meter, public_trace, *, limit, stream
             meter.output(json.dumps(message['tool_calls'], ensure_ascii=False))
         return message
 
-    total, complete = 0, False
+    total, payload_bytes, complete = 0, 0, False
+    # 토큰마다 반복되는 SSE/NDJSON 외피는 본문 한도에 넣지 않는다.
+    # 실제 출력은 기존 한도를 유지하고, 무의미한 메타데이터 전송도 별도로 제한한다.
+    wire_limit = limit * 256
     content, calls = [], {}
     async for line in response.aiter_lines():
-        total += len(line.encode('utf-8'))
-        if total > limit:
+        total += len(line.encode('utf-8')) + 1
+        if total > wire_limit:
             raise ProviderError('모델의 응답이 크기 제한을 초과했습니다.')
         if not line or (vllm and not line.startswith('data:')):
             continue
@@ -364,11 +367,14 @@ async def response_message(response, vllm, meter, public_trace, *, limit, stream
             message = item.get('message') or {}
             complete = bool(item.get('done'))
         reasoning = reasoning_text(message)
-        meter.output(reasoning)
-        await public_trace.reasoning(reasoning)
         text = message.get('content') or ''
         if not isinstance(text, str):
             raise ValueError()
+        payload_bytes += len(reasoning.encode('utf-8')) + len(text.encode('utf-8'))
+        if payload_bytes > limit:
+            raise ProviderError('모델의 응답이 크기 제한을 초과했습니다.')
+        meter.output(reasoning)
+        await public_trace.reasoning(reasoning)
         if text:
             await public_trace.reasoning('', final=True)
             content.append(text)
@@ -381,23 +387,36 @@ async def response_message(response, vllm, meter, public_trace, *, limit, stream
             if type(index) is not int or not 0 <= index < 4:
                 raise ValueError()
             function = call.get('function') or {}
-            current = calls.setdefault(index, {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': '' if vllm else {}}})
+            if index not in calls:
+                calls[index] = {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': '' if vllm else {}}}
+                if not vllm:payload_bytes += 2  # 최초 빈 인수 객체 {}
+            current = calls[index]
             if call.get('id'):
+                if not isinstance(call['id'], str):raise ValueError()
+                payload_bytes += len(call['id'].encode('utf-8')) - len(current['id'].encode('utf-8'))
                 current['id'] = call['id']
             if function.get('name'):
+                if not isinstance(function['name'], str):raise ValueError()
+                payload_bytes += len(function['name'].encode('utf-8'))
                 if vllm:
                     current['function']['name'] += function['name']
                 else:
+                    payload_bytes -= len(current['function']['name'].encode('utf-8'))
                     current['function']['name'] = function['name']
             arguments = function.get('arguments')
             if vllm and arguments is not None:
                 if not isinstance(arguments, str):
                     raise ValueError()
+                payload_bytes += len(arguments.encode('utf-8'))
                 current['function']['arguments'] += arguments
             elif arguments is not None:
                 if not isinstance(arguments, dict):
                     raise ValueError()
+                payload_bytes -= len(json.dumps(current['function']['arguments'], ensure_ascii=False).encode('utf-8'))
                 current['function']['arguments'].update(arguments)
+                payload_bytes += len(json.dumps(current['function']['arguments'], ensure_ascii=False).encode('utf-8'))
+            if payload_bytes > limit:
+                raise ProviderError('모델의 응답이 크기 제한을 초과했습니다.')
         if incoming:
             meter.output(json.dumps(incoming, ensure_ascii=False))
         if not vllm and complete:

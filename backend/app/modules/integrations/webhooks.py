@@ -18,12 +18,15 @@ from . import config, service
 from .models import GitlabWebhookEvent, GitlabWebhookSubscription
 
 
-def owned(db, user_id, subscription_id):
+def owned(db, user_id, subscription_id, *, allow_stale=False):
     row = db.scalar(select(GitlabWebhookSubscription).where(GitlabWebhookSubscription.id == str(subscription_id),
         GitlabWebhookSubscription.user_id == user_id))
     if not row:
         raise HTTPException(404, 'GitLab 상태 구독을 찾을 수 없습니다.')
     account = service.owned(db, user_id, row.connection_id)
+    # 인증된 소유자는 재인증·서버 설정 변경 후에도 로컬 구독을 해제할 수 있다.
+    # 이벤트 수신·조회·설정 변경에서는 이전 세대 검사를 계속 적용한다.
+    if allow_stale:return row
     if account.status != 'connected' or account.generation != row.generation:
         raise HTTPException(409, 'GitLab 계정이 변경되었습니다. 상태 구독을 다시 설정하세요.')
     if config.instance(account.provider_id).granted_scopes(account.provider_fingerprint) is None:

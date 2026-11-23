@@ -27,6 +27,24 @@ class Conversation(Base):
     generation_until: Mapped[int] = mapped_column(Integer, default=0)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     messages: Mapped[list['Message']] = relationship(cascade='all, delete-orphan', passive_deletes=True)
+    title_state: Mapped['ConversationTitle | None'] = relationship(
+        lazy='selectin',cascade='all, delete-orphan',passive_deletes=True,uselist=False,
+        foreign_keys='ConversationTitle.conversation_id')
+
+
+class ConversationTitle(Base):
+    """기존 대화 열을 변경하지 않는 자동 제목의 작업·수동 수정 상태."""
+    __tablename__ = 'chat_conversation_titles'
+    conversation_id: Mapped[str] = mapped_column(ForeignKey('chat_conversations.id',ondelete='CASCADE'),primary_key=True)
+    first_message_id: Mapped[str | None] = mapped_column(ForeignKey('chat_messages.id',ondelete='SET NULL'),nullable=True)
+    work_id: Mapped[str] = mapped_column(String(36),default=lambda:str(uuid.uuid4()))
+    status: Mapped[str] = mapped_column(String(20),default='queued')
+    revision: Mapped[int] = mapped_column(Integer,default=0)
+    expected_title: Mapped[str] = mapped_column(String(120),default='')
+    expires_at: Mapped[int] = mapped_column(Integer,default=0)
+    error_code: Mapped[str | None] = mapped_column(String(40),nullable=True)
+    updated_at: Mapped[int] = mapped_column(Integer,default=lambda:int(time.time()))
+    checks_json: Mapped[str] = mapped_column(Text,default='{}')
 
 
 class Message(Base):

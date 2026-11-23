@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     llm_connections_json: str = '[]'
     llm_timeout_seconds: int = Field(120, ge=5, le=600)
     llm_max_tokens: int = Field(2048, ge=64, le=16384)
+    llm_title_enabled: bool = True
+    llm_title_timeout_seconds: int = Field(20,ge=2,le=120)
     llm_provider_keys_json: SecretStr = SecretStr('{}')
     llm_user_concurrency: int = Field(2, ge=1, le=20)
     llm_user_queue_limit: int = Field(2, ge=1, le=20)

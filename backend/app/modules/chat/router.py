@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
 from app.modules.chat.models import Admission, ContextNote, Conversation, GenerationRun, Message
-from app.modules.chat import canvas, context as context_budget, history, providers, scheduler, trace
+from app.modules.chat import canvas, context as context_budget, history, providers, scheduler, trace, titles
 from app.modules.integrations import config as gitlab_config, service as gitlab_connections
 from app.modules.integrations import merge_requests
 from app.modules.integrations.models import MessageContext
@@ -83,6 +83,7 @@ class NoteInput(BaseModel):
 def conversation_data(item: Conversation, *, shared=False):
     return {key: getattr(item, key) for key in ('id', 'title', 'connection_id', 'model', 'created_at', 'updated_at')} | {
         'busy': bool(not shared and item.generation_id and item.generation_until > time.time()),
+        **({'title_generation':titles.public(item.title_state)} if not shared and item.title_state else {}),
         **workflows.conversation_extra(item),
         **({'read_only': True, 'parent_id': None} if shared else {}),
     }
@@ -152,13 +153,21 @@ def create_conversation(data: CreateConversationInput, context: Authenticated, d
 
 
 @router.get('/active')
-def active_conversations(context: Authenticated, db: Database):
+def active_conversations(context: Authenticated, db: Database, title_id: list[UUID] = Query(default=[],max_length=100)):
+    if title_id:scheduler.lock(db)
     rows = db.scalars(select(Conversation.id).where(
         Conversation.user_id == context.user.id,
         Conversation.generation_id.is_not(None),
         Conversation.generation_until > int(time.time()),
     ))
-    return {'ids': list(rows)}
+    ids=list(rows)
+    if not title_id:return {'ids':ids}
+    items=list(db.scalars(select(Conversation).where(Conversation.user_id==context.user.id,
+        Conversation.id.in_([str(value) for value in title_id]))))
+    for item in items:titles.expire(db,item.title_state)
+    db.commit()
+    return {'ids':ids,'titles':[{'id':item.id,'title':item.title,
+        'title_generation':titles.public(item.title_state)} for item in items]}
 
 
 @router.get('/conversations/{conversation_id}')
@@ -242,11 +251,13 @@ def save_context(conversation_id: UUID, data: NoteInput, context: Authenticated,
 
 @router.patch('/conversations/{conversation_id}')
 def rename_conversation(conversation_id: UUID, data: TitleInput, context: Authenticated, db: Database):
+    scheduler.lock(db)
     item = owned(db, conversation_id, context.user.id)
     title = data.title.strip()
     if not title:
         raise HTTPException(422, '대화 제목을 입력해 주세요.')
     item.title = title
+    titles.manual(db,item)
     db.commit()
     return conversation_data(item)
 
@@ -425,9 +436,9 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     if assistant.assistant_context is None:assistant.assistant_context=TurnContext(data_json=json.dumps(options))
     else:assistant.assistant_context.data_json=json.dumps(options)
     item.connection_id, item.model, item.updated_at = connection.id, model, now
-    if not data.retry and user_message.position == 0:
+    if not data.retry and user_message.position == 0 and not (item.title_state and item.title_state.status=='manual'):
         db.execute(update(Conversation).where(Conversation.id == item.id, Conversation.title == '새 대화')
-            .values(title=content.splitlines()[0][:60]))
+            .values(title=titles.fallback(content)))
         db.refresh(item, attribute_names=['title'])
     message_state=workflows.state_for(db,assistant)
     message_state.last_run=str(data.request_id);message_state.error_code=None;message_state.phase='queued'
@@ -513,7 +524,8 @@ async def send(conversation_id: UUID, data: TurnInput, request: Request, context
             data.apps = [GitlabSelection.model_validate(resolved['selection'])]
     connection = connection_for(data.connection_id, db, context.user)
     turn = prepare(db, conversation_id, context.user.id, data, connection, gitlab_request=gitlab_request)
-    subscription = request.app.state.generation_jobs.start(turn_events(db.get_bind(), user_id, turn, data, connection))
+    jobs=request.app.state.generation_jobs
+    subscription = jobs.start(turn_events(db.get_bind(), user_id, turn, data, connection,jobs=jobs))
     return StreamingResponse(subscription.stream(), media_type='text/event-stream',
         headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
@@ -536,7 +548,7 @@ async def scheduled_turn(bind, user_id, conversation_id, request_id, connection_
             pass
 
 
-def turn_events(bind, user_id, turn, data, connection):
+def turn_events(bind, user_id, turn, data, connection, *, jobs=None):
     settings = get_settings()
     secrets = [connection.api_key.get_secret_value()]
     for name in ('jwt_secret_key', 'auth_proxy_secret', 'smtp_password', 'terminal_shared_secret',
@@ -563,6 +575,7 @@ def turn_events(bind, user_id, turn, data, connection):
     presentation = turn.presentation
 
     async def generate():
+        title_work=None
         status, error = 'cancelled', None
         first_token_ms, error_code = None, 'cancelled'
         saved = None
@@ -788,6 +801,8 @@ def turn_events(bind, user_id, turn, data, connection):
                     if status=='complete':
                         session.expire(message,['generated_files'])
                         workflows.capture(session,message,turn.request_id)
+                        if jobs is not None and not turn.scheduled:
+                            title_work=titles.prepare(session,item,message,connection,settings)
                     item.generation_id, item.generation_until, item.cancel_requested = None, 0, False
                     item.updated_at = int(time.time())
                     session.commit()
@@ -795,6 +810,9 @@ def turn_events(bind, user_id, turn, data, connection):
                 else:
                     session.commit()
         if saved:
+            if title_work:
+                jobs.start_background(titles.generate(bind,user_id,turn.conversation_id,title_work,connection,
+                    turn.start['conversation']['model'],settings))
             yield event('done' if status == 'complete' else status, saved | {'detail': error})
 
     async def metered_events():

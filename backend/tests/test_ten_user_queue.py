@@ -104,12 +104,27 @@ def test_ten_chat_streams_complete_and_remain_private_under_a_shared_model_limit
         conversations.append(response.json()['id'])
     active = 0
     high_water = 0
+    closed = 0
     guard = threading.Lock()
 
     class ResponseBody(httpx.AsyncByteStream):
+        def __init__(self):
+            self.opened = False
+
+        async def aclose(self):
+            nonlocal active, closed
+            # HTTPX가 [DONE] 이후 호출하는 명시적 종료를 계측한다.
+            # 기본 AsyncByteStream.aclose는 비어 있어 generator GC로 세면 늦게 감소한다.
+            with guard:
+                if self.opened:
+                    self.opened = False
+                    active -= 1
+                    closed += 1
+
         async def __aiter__(self):
             nonlocal active, high_water
             with guard:
+                self.opened = True
                 active += 1
                 high_water = max(high_water, active)
             try:
@@ -119,12 +134,13 @@ def test_ten_chat_streams_complete_and_remain_private_under_a_shared_model_limit
                     await asyncio.sleep(0.04)
                 yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
             finally:
-                with guard:
-                    active -= 1
+                await self.aclose()
 
     def handle(request):
         assert request.method == 'POST' and request.url.path == '/v1/chat/completions'
         assert json.loads(request.content)['stream']
+        with client.db_factory() as db:
+            assert db.scalar(select(func.count(Admission.id)).where(Admission.state == 'running')) <= 3
         return httpx.Response(200, stream=ResponseBody())
 
     monkeypatch.setattr(providers, 'client', lambda *args, **kwargs:
@@ -144,6 +160,7 @@ def test_ten_chat_streams_complete_and_remain_private_under_a_shared_model_limit
     elapsed = time.monotonic() - started
     assert high_water == 3
     assert active == 0
+    assert closed == 10
     for index, identity in enumerate(identities):
         snapshot = client.get(f'/chat/conversations/{conversations[index]}', headers=auth(identity))
         assert snapshot.status_code == 200
