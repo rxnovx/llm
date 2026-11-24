@@ -4,6 +4,7 @@
 
 사용자 기능·설치·한도는 [USER_WORKFLOWS.md](USER_WORKFLOWS.md)에 정리했습니다.
 공개 추론·실시간 작업 과정, 자연어 GitLab 개발, 다중 계정·웹훅, 실제 모델 진단은 [AI 에이전트 운영·검증](AGENT_SYSTEM.md)을 참고하세요.
+대화 고정·보관과 백그라운드 **작업 센터**, ChatGPT와의 비교 범위·남은 차이는 [기능 대응표](docs/chatgpt-benchmark.md)에 정리했습니다. 기능 구현 대응률과 실제 모델 정확도는 구분합니다.
 사내 서버에 모델을 반입하고 Docker로 실행하려면 [폐쇄망 Docker 모델 설치 매뉴얼](docs/offline-models/README.md)을 참고하세요.
 
 ## 포함 기능

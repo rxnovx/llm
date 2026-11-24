@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useEffectEvent, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, useState, type FormEvent } from "react";
 import { WorkspaceLink as Link } from "@/components/shared/WorkspaceLink";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/authStore";
@@ -7,6 +7,7 @@ import { chatFetch, chatJson } from "@/lib/chat-api";
 import { conversationHistoryPath, messagePageQuery } from "@/lib/chat-history";
 import { readChatStream } from "@/lib/chat-stream";
 import { applyTitlePatch, parseTitlePatches, pendingTitleIds } from "@/lib/chat-titles";
+import { mergeConversation, updateConversationList, type OrganizationChange } from "@/lib/conversation-organization";
 import { appendReasoning, createGenerationBuffer, mergeTraceActivities } from "@/lib/generation-trace";
 import type { AuthUser } from "@/types/auth";
 import type { ChatConfig, ChatMessage, Connection, ContextReport, Conversation, ConversationDetail, QueueState } from "@/types/chat";
@@ -32,6 +33,9 @@ import { AssistantDialog } from './AssistantDialog';
 import { MessageWorkflow } from './MessageWorkflow';
 import { ProjectsDialog } from './ProjectsDialog';
 import { ScheduledTasksDialog } from './ScheduledTasksDialog';
+import { JobCenterDialog } from './JobCenterDialog';
+import { ArchivedChatsDialog } from './ArchivedChatsDialog';
+import './conversation-library.css';
 import { DraftAttachments, type DraftAttachment } from './DraftAttachments';
 import { ExistingImagePicker } from './ExistingImagePicker';
 import { useMessageHistory } from './useMessageHistory';
@@ -156,6 +160,10 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
   const [selected, setSelected] = useState("");
   const [model, setModel] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [jobsOpen, setJobsOpen] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [organizationBusy, setOrganizationBusy] = useState<string | null>(null);
+  const [historyRefresh, setHistoryRefresh] = useState(0);
   const [active, setActive] = useState<Conversation | null>(null);
   const [localDraft, setDraftValue] = useState(initialDraft);
   const draft = user ? localDraft : initialDraft;
@@ -207,6 +215,10 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
   const dismissRetry = useDialogDismiss(closeRetry);
   const dismissAction = useDialogDismiss(closeAction, !actionBusy);
   const editor = useRef<HTMLTextAreaElement>(null);
+  const closeJobs = useCallback(() => {
+    setJobsOpen(false);
+    requestAnimationFrame(() => { if (!document.querySelector("dialog:modal")) editor.current?.focus({ preventScroll: true }); });
+  }, []);
   const composing = useRef(false);
   const searchInput = useRef<HTMLInputElement>(null);
   const actionDialog = useRef<HTMLDialogElement>(null);
@@ -383,7 +395,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     const version=++listVersion.current,abort=new AbortController();setSearchLoading(true);
     const timer=setTimeout(()=>{void chatJson<{items:Conversation[];has_more:boolean}>(`/conversations?q=${encodeURIComponent(search.trim())}${projectId?'&project_id='+projectId:''}`,{signal:abort.signal}).then(v=>{if(version===listVersion.current){setConversations(v.items);setHasMore(v.has_more);}}).catch(e=>{if(!abort.signal.aborted)setError(errorText(e));}).finally(()=>{if(!abort.signal.aborted)setSearchLoading(false);});},250);
     return()=>{clearTimeout(timer);abort.abort();};
-  },[subject,search,projectId,initializing]);
+  },[subject,search,projectId,initializing,historyRefresh]);
   useEffect(()=>{if(retryConfirmation)retryDialog.current?.showModal();else retryDialog.current?.close();},[retryConfirmation]);
   useEffect(() => {
     if (!subject) return;
@@ -456,7 +468,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
         signal: AbortSignal.any([abort.signal, AbortSignal.timeout(5000)]),
       }).then((detail) => {
         if (!abort.signal.aborted && viewedId.current === active.id) {
-          setActive(detail.conversation); refreshLatest(detail); setQueue(detail.generation ?? null);
+          setActive(current => mergeConversation(current, detail.conversation)); refreshLatest(detail); setQueue(detail.generation ?? null);
           generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
         }
       }).catch(() => {}).finally(() => { pending = false; });
@@ -475,10 +487,10 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     return () => { clearTimeout(timer); abort.abort(); };
   }, [active?.id, readOnly, busy, selected, model, draft]);
 
-  const updateConversation = (item: Conversation) => setConversations(old=>projectId&&item.project_id!==projectId?old:[{...old.find(v=>v.id===item.id),...item},...old.filter(v=>v.id!==item.id)]);
+  const updateConversation = (item: Conversation) => setConversations(old => updateConversationList(old, item, search.trim(), projectId));
   const adoptConversation = (item: Conversation, mode: "push" | "replace") => {
     viewedId.current = item.id;
-    setActive(item);
+    setActive(current => mergeConversation(current, item));
     updateConversation(item);
     updateConversationLocation(item.id, mode);
   };
@@ -639,7 +651,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
       const detail = await chatJson<ConversationDetail>(conversationHistoryPath(id,
         matchId ? { around_message_id: matchId } : undefined), { signal: abort.signal });
       if (abort.signal.aborted || workspaceConversationId(window.location) !== id) return;
-      setActive(detail.conversation); replaceHistory(detail, matchId); setQueue(detail.generation ?? null);
+      setActive(current => mergeConversation(current, detail.conversation)); replaceHistory(detail, matchId); setQueue(detail.generation ?? null);
       generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
       if (preserveComposer) return;
       if (!detail.conversation.read_only) {
@@ -748,7 +760,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
         abort.signal.throwIfAborted();
         replaceHistory(detail);
         current = detail.conversation;
-        setActive(current);
+        setActive(previous => mergeConversation(previous, detail.conversation));
       }
       if (!current) current = await createConversation(abort.signal);
       if (files.length) {
@@ -810,7 +822,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           if (!retry && (!usedApps[0]?.mode || usedApps[0].mode==='files')) setAppSelections([]);
           acceptDraft();
           setMessages((old) => [...old.filter((item) => item.id !== human.id && item.id !== assistant.id), human, assistant]);
-          setActive(conversation); updateConversation(conversation);
+          setActive(current => mergeConversation(current, conversation)); updateConversation(conversation);
           requestAnimationFrame(() => { if (!canvasOffered && !abort.signal.aborted) editor.current?.focus(); });
         } else if (event.event === "canvas") {
           streamBuffer.flush();
@@ -864,7 +876,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
           generation.current = null;
           setQueue(null);
           setMessages((old) => old.map((item) => item.id === event.data.message.id ? event.data.message : item));
-          setActive(event.data.conversation); updateConversation(event.data.conversation);
+          setActive(current => mergeConversation(current, event.data.conversation)); updateConversation(event.data.conversation);
           if (event.data.detail) setError(event.data.detail);
         }
       });
@@ -881,7 +893,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
         try {
           const detail = await chatJson<ConversationDetail>(conversationHistoryPath(current.id), { signal: AbortSignal.timeout(5000) });
           if (controller.current === abort) {
-            setActive(detail.conversation); refreshLatest(detail); updateConversation(detail.conversation);
+            setActive(current => mergeConversation(current, detail.conversation)); refreshLatest(detail); updateConversation(detail.conversation);
             restoredQueue = detail.generation ?? null;
             generation.current = detail.generation ? { id: detail.generation.request_id, conversation: detail.conversation.id } : null;
             if (!assistantId && requestId && detail.generation?.request_id === requestId) {
@@ -913,6 +925,31 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     if (current) void chatJson(`/conversations/${current.conversation}/cancel`, { method: "POST", body: JSON.stringify({ request_id: current.id }) })
       .catch((caught) => setError(errorText(caught)));
   };
+  const forgetConversation = (id: string) => {
+    canvas.deleteEdits(id);
+    setConversations(old => old.filter(entry => entry.id !== id));
+    if (workspaceConversationId(window.location) === id) {
+      viewedId.current = null; resetConversation(); updateConversationLocation(null, "replace");
+    }
+  };
+  const acceptOrganization = (item: Conversation) => {
+    listVersion.current += 1;
+    updateConversation(item);
+    setActive(current => current?.id === item.id ? mergeConversation(current, item) : current);
+    setHistoryRefresh(value => value + 1);
+  };
+  const organizeConversation = async (item: Conversation, change: OrganizationChange) => {
+    if (organizationBusy) return;
+    setOrganizationBusy(item.id); setMenu("");
+    try {
+      const result = await chatJson<Conversation>(`/conversations/${item.id}/organization`, {
+        method: "PATCH", body: JSON.stringify({ ...change, revision: item.organization_revision ?? 0 }),
+        signal: AbortSignal.timeout(10000),
+      });
+      acceptOrganization(result); setError("");
+    } catch (caught) { setError(errorText(caught)); setHistoryRefresh(value => value + 1); }
+    finally { setOrganizationBusy(null); }
+  };
   const submitAction = async (event: FormEvent) => {
     event.preventDefault();
     if (!action || actionBusy) return;
@@ -920,17 +957,11 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     try {
       if (action.type === "rename") {
         const item = await chatJson<Conversation>(`/conversations/${action.item.id}`, { method: "PATCH", body: JSON.stringify({ title: title.trim() }) });
-        setConversations((old) => old.map((entry) => entry.id === item.id ? item : entry));
-        setActive(current => current?.id === item.id ? item : current);
+        setConversations((old) => old.map((entry) => entry.id === item.id ? mergeConversation(entry, item) : entry));
+        setActive(current => current?.id === item.id ? mergeConversation(current, item) : current);
       } else {
         await chatJson(`/conversations/${action.item.id}`, { method: "DELETE" });
-        canvas.deleteEdits(action.item.id);
-        setConversations((old) => old.filter((entry) => entry.id !== action.item.id));
-        if (workspaceConversationId(window.location) === action.item.id) {
-          viewedId.current = null;
-          resetConversation();
-          updateConversationLocation(null, "replace");
-        }
+        forgetConversation(action.item.id);
       }
       setError(""); setAction(null);
     } catch (caught) { setError(errorText(caught)); }
@@ -1105,20 +1136,23 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
     <aside className="cw-sidebar" aria-label="대화 탐색"><header className="cw-brand"><Link href="/" onClick={(event) => { event.preventDefault(); newConversation(); }} aria-label="LLM 새 대화"><Wordmark small /><span>llm<span className="cw-brand-dot">.</span></span></Link>
       <button className="cw-icon-button cw-mobile-only" aria-label="사이드바 접기" onClick={() => setSidebar(false)}><Icon name="panel" size={17} /></button></header>
       <div className="cw-sidebar-actions"><button className="cw-new-chat" disabled={starting||uploading} onClick={newConversation}><Icon name="plus" size={18} />새 대화<span>↗</span></button>
-        <button className="cw-search-button" onClick={() => { setSearching((old) => !old); requestAnimationFrame(() => searchInput.current?.focus()); }}><Icon name="search" size={17} />대화 찾기<kbd>⌘ K</kbd></button></div>
+        <button className="cw-search-button" onClick={() => { setSearching((old) => !old); requestAnimationFrame(() => searchInput.current?.focus()); }}><Icon name="search" size={17} />대화 찾기<kbd>⌘ K</kbd></button>
+        {user && <button className="cw-search-button" onClick={() => { setJobsOpen(true); setSidebar(false); }}><Icon name="clock" size={17} />작업 센터</button>}</div>
       {user&&<div className="cw-project-picker"><label className="cw-sr-only" htmlFor="project-filter">대화 프로젝트</label><select id="project-filter" value={projectId} disabled={starting||uploading} onChange={e=>chooseProject(e.target.value)}><option value="">내 대화</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><button className="cw-icon-button" aria-label="프로젝트 관리" disabled={starting||uploading} onClick={()=>setProjectsOpen(true)}><Icon name="plus" size={16}/></button></div>}
       {searching && <div className="cw-search-field"><input ref={searchInput} aria-label="대화 제목·본문 검색" placeholder="제목과 본문 전체 검색" value={search} onChange={(event) => setSearch(event.target.value)} />
         <button className="cw-icon-button" aria-label="검색 닫기" onClick={() => { setSearch(""); setSearching(false); }}><Icon name="close" size={14} /></button></div>}
-      <div className="cw-history"><div className="cw-section-label">대화 기록</div>
+      <div className="cw-history"><div className="cw-section-label cw-history-label">대화 기록{user && <button type="button" className="cw-icon-button" aria-label="보관된 대화 열기" title="보관된 대화" onClick={() => { setArchiveOpen(true); setSidebar(false); }}><Icon name="archive" size={15} /></button>}</div>
         {initializing && <p className="cw-history-empty" role="status">대화를 불러오는 중…</p>}
         {searchLoading&&<p className="cw-history-empty" role="status">전체 기록에서 검색 중…</p>}
         {!initializing && !searchLoading && !visible.length && <p className="cw-history-empty">{search ? "검색 결과가 없습니다." : <>아직 나눈 대화가 없어요.<br />첫 이야기를 시작해 보세요.</>}</p>}
         <nav aria-label="저장된 대화">{visible.map((item) => <div key={item.id} className={`cw-history-row ${active?.id === item.id ? "is-active" : ""}`}>
           <button className="cw-history-title" disabled={starting||uploading} onClick={() => void openConversation(item)} aria-current={active?.id === item.id ? "page" : undefined}>
-            <Icon name="chat" size={15} /><span>{item.title}{item.busy&&<small className="cw-search-excerpt">작업 중</small>}{item.match&&<small className="cw-search-excerpt">{item.match.excerpt}</small>}</span></button>
-          {!item.read_only&&<button className="cw-history-more" aria-label={`${item.title} 메뉴`} aria-expanded={menu === item.id} disabled={item.busy} onClick={() => setMenu(menu === item.id ? "" : item.id)}><Icon name="more" size={16} /></button>}
+            <Icon name={item.pinned ? "pin" : "chat"} size={15} /><span>{item.title}{item.pinned && <small className="cw-sr-only"> 고정된 대화</small>}{item.archived && <small className="cw-search-excerpt">보관된 대화</small>}{item.busy&&<small className="cw-search-excerpt">작업 중</small>}{item.match&&<small className="cw-search-excerpt">{item.match.excerpt}</small>}</span></button>
+          {!item.read_only&&<button className="cw-history-more" aria-label={`${item.title} 메뉴`} aria-expanded={menu === item.id} disabled={organizationBusy === item.id} onClick={() => setMenu(menu === item.id ? "" : item.id)}><Icon name="more" size={16} /></button>}
           {!item.read_only && menu === item.id && <div className="cw-row-menu"><button onClick={() => rename(item)}><Icon name="edit" size={14} />이름 변경</button>
-            <button className="cw-danger" onClick={() => { setAction({ type: "delete", item }); setMenu(""); setError(""); }}><Icon name="trash" size={14} />삭제</button></div>}</div>)}</nav>
+            <button disabled={!!organizationBusy} onClick={() => void organizeConversation(item, { pinned: !item.pinned })}><Icon name="pin" size={14} />{item.pinned ? "고정 해제" : "대화 고정"}</button>
+            <button disabled={!!organizationBusy} onClick={() => void organizeConversation(item, { archived: !item.archived })}><Icon name="archive" size={14} />{item.archived ? "보관 해제" : "보관"}</button>
+            <button className="cw-danger" disabled={item.busy} onClick={() => { setAction({ type: "delete", item }); setMenu(""); setError(""); }}><Icon name="trash" size={14} />삭제</button></div>}</div>)}</nav>
         {hasMore && <button className="cw-load-more" disabled={loading} onClick={() => void loadMore()}>이전 대화 더 보기</button>}</div>
       <footer className="cw-sidebar-footer">
         {user ? <div className="cw-account-wrap">{accountOpen && <div className="cw-account-menu"><Link href="/user/settings" onClick={() => { setAccountOpen(false); setSidebar(false); }}><Icon name="settings" size={15} />설정</Link>
@@ -1144,6 +1178,7 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
       {!user && <div className="cw-guest-topbar"><ThemeToggle /><Link href="/login">로그인</Link></div>}</header>
       <div className={`cw-content ${messages.length && !routePending ? "has-messages" : ""}`} ref={viewportRef}
         onScroll={() => onScroll(loading || starting || routePending ? undefined : active?.id)} aria-busy={loading || routePending && !routeError}>
+        {active?.archived && !routePending && <div className="cw-archived-banner" role="status">보관된 대화입니다.<button type="button" className="cw-text-button" disabled={!!organizationBusy} onClick={() => void organizeConversation(active, { archived: false })}>보관 해제</button></div>}
         {(loading || routePending && !routeError) && <p className="cw-loading" role="status">대화를 불러오는 중…</p>}
         {routePending ? routeError && conversationId && <div className="cw-welcome">
           <p role="alert">{routeError}</p>
@@ -1205,6 +1240,9 @@ function Workspace({ conversationId, pathname, user, ready, initialDraft, onGues
       onClose={canvas.close} onStop={busy ? stop : undefined} />}
     {projectsOpen&&<ProjectsDialog projects={projects} selected={active?.project_id||projectId} active={active} onProjects={setProjects} onChoose={chooseProject} onMoved={item=>{setActive(item);updateConversation(item);setProjectId(item.project_id||'');}} onClose={()=>setProjectsOpen(false)}/>}
     {schedulesOpen && <ScheduledTasksDialog onClose={closeSchedules} />}
+    {user && jobsOpen && <JobCenterDialog key={subject} onClose={closeJobs} />}
+    {user && archiveOpen && <ArchivedChatsDialog key={subject} onClose={() => { setArchiveOpen(false); restoreComposerFocus(); }}
+      onOpen={item => { setArchiveOpen(false); void openConversation(item); }} onChanged={acceptOrganization} onDeleted={forgetConversation} />}
     <dialog ref={retryDialog} className="cw-dialog cw-action-dialog" aria-label="외부 작업 재시도 확인" {...dismissRetry} onClose={closeRetry}><h2>쓰기 작업을 다시 실행할까요?</h2><p>이 요청은 명령 실행 또는 외부 서비스 변경을 허용했습니다. 이미 처리된 작업도 다시 실행될 수 있으니 작업 기록을 확인하세요.</p><div className="cw-action-buttons"><button className="cw-small-button" onClick={closeRetry}>취소</button><button className="cw-primary-button" onClick={()=>{const content=retryConfirmation;closeRetry();if(content)void send(content,true,true);}}>확인하고 재시도</button></div></dialog>
     {scopeOpen && <GitlabScopeDialog terminal={terminal} initialReference={scopeReference}
       canWriteModel={!!connection && !connection.is_test && !!(connection.models.find(item => item.name === model)?.supports_tools ?? connection.supports_tools)}

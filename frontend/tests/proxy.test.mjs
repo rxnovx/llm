@@ -464,3 +464,24 @@ test("actual model capability and telemetry routes are exposed only through boun
   assert.equal(JSON.parse(received.body).checks[0], "streaming");
   assert.equal((await fetch(`${origin}/api/admin/connections/office/capabilities/admin`, { headers: csrf })).status, 404);
 });
+
+test("job history reads and personal organization changes use authenticated bounded chat routes", async () => {
+  mode = "tokens";
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const result = await fetch(`${origin}/api/chat/jobs?view=finished&limit=20`, {
+    headers: { authorization: "Bearer owner", cookie: "private=value" },
+  });
+  assert.equal(result.status, 200);
+  assert.equal(received.path, "/chat/jobs?view=finished&limit=20");
+  assert.equal(received.headers.authorization, "Bearer owner");
+  assert.equal(received.headers.cookie, undefined);
+  const path = `${origin}/api/chat/conversations/${id}/organization`;
+  assert.equal((await fetch(path, { method: "PATCH", body: "{}" })).status, 403);
+  const updated = await fetch(path, { method: "PATCH", headers: { ...csrf, authorization: "Bearer owner" },
+    body: JSON.stringify({ pinned: true, revision: 0 }) });
+  assert.equal(updated.status, 200);
+  assert.equal(received.path, `/chat/conversations/${id}/organization`);
+  assert.deepEqual(JSON.parse(received.body), { pinned: true, revision: 0 });
+  assert.equal((await fetch(`${origin}/api/chat/jobs`, { method: "POST", headers: csrf, body: "{}" })).status, 404);
+  assert.equal((await fetch(`${path}/extra`, { method: "PATCH", headers: csrf, body: "{}" })).status, 404);
+});

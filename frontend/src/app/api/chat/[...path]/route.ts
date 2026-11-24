@@ -5,10 +5,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 const uuid = "[a-f0-9-]{36}";
 const rules = [
-  [/^(config|active)$/, ["GET"]],
+  [/^(config|active|jobs)$/, ["GET"]],
   [/^connections\/[a-zA-Z0-9_-]{1,64}\/check$/, ["POST"]],
   [/^conversations$/, ["GET", "POST"]],
   [new RegExp(`^conversations/${uuid}$`), ["GET", "PATCH", "DELETE"]],
+  [new RegExp(`^conversations/${uuid}/organization$`), ["PATCH"]],
   [new RegExp(`^conversations/${uuid}/(messages|cancel)$`), ["POST"]],
   [new RegExp(`^conversations/${uuid}/context/preview$`), ["POST"]],
   [new RegExp(`^conversations/${uuid}/context$`), ["PATCH"]],

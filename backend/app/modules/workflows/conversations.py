@@ -4,9 +4,9 @@ import json
 import time
 from uuid import uuid4
 from fastapi import HTTPException
-from sqlalchemy import and_,delete,func,or_,select
+from sqlalchemy import and_,case,delete,func,or_,select
 from sqlalchemy.orm import load_only, object_session
-from app.modules.chat.models import Conversation,Message,ContextNote
+from app.modules.chat.models import Conversation,ConversationOrganization,Message,ContextNote
 from app.modules.chat.scheduler import lock
 from app.modules.chat import trace_history
 from app.modules.chat.trace import safe_text
@@ -274,8 +274,12 @@ def _search_hit(row, start, *, include_hash=False):
     return hit
 
 
-def search(db,user_id,query='',project_id=None,limit=50,offset=0,*,assistant_scope=None):
-    statement = select(Conversation)
+def search(db,user_id,query='',project_id=None,limit=50,offset=0,*,assistant_scope=None,view='active'):
+    statement = select(Conversation).outerjoin(ConversationOrganization,ConversationOrganization.conversation_id==Conversation.id)
+    own_archived=and_(Conversation.user_id==user_id,ConversationOrganization.archived.is_(True))
+    if view=='archived':statement=statement.where(own_archived)
+    elif not query.strip() and not assistant_scope:
+        statement=statement.where(or_(Conversation.user_id!=user_id,ConversationOrganization.archived.is_(None),ConversationOrganization.archived.is_(False)))
     if project_id:
         project_access(db, user_id, project_id)
         statement=statement.join(ProjectConversation,ProjectConversation.conversation_id==Conversation.id).where(ProjectConversation.project_id==str(project_id))
@@ -298,7 +302,9 @@ def search(db,user_id,query='',project_id=None,limit=50,offset=0,*,assistant_sco
             *(Conversation.title.ilike(pattern, escape='\\') for pattern in patterns))))
     if assistant_scope:
         statement = statement.options(load_only(Conversation.id, Conversation.title, Conversation.user_id))
-    rows=list(db.scalars(statement.order_by(Conversation.updated_at.desc(),Conversation.id.desc()).offset(offset).limit(limit+1)))
+    own_pinned=and_(Conversation.user_id==user_id,ConversationOrganization.pinned.is_(True))
+    ordering=[case((own_pinned,1),else_=0).desc(),case((own_pinned,ConversationOrganization.pinned_at),else_=0).desc()]
+    rows=list(db.scalars(statement.order_by(*ordering,Conversation.updated_at.desc(),Conversation.id.desc()).offset(offset).limit(limit+1)))
     result=[]
     from app.modules.chat.router import conversation_data
     for row in rows[:limit]:

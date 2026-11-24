@@ -30,6 +30,18 @@ class Conversation(Base):
     title_state: Mapped['ConversationTitle | None'] = relationship(
         lazy='selectin',cascade='all, delete-orphan',passive_deletes=True,uselist=False,
         foreign_keys='ConversationTitle.conversation_id')
+    organization_state: Mapped['ConversationOrganization | None'] = relationship(
+        lazy='selectin',cascade='all, delete-orphan',passive_deletes=True,uselist=False)
+
+
+class ConversationOrganization(Base):
+    """개인 대화 정리 상태. 보관은 삭제·공유 권한 변경과 독립적이다."""
+    __tablename__ = 'chat_conversation_organization'
+    conversation_id: Mapped[str] = mapped_column(ForeignKey('chat_conversations.id',ondelete='CASCADE'),primary_key=True)
+    pinned: Mapped[bool] = mapped_column(Boolean,default=False)
+    archived: Mapped[bool] = mapped_column(Boolean,default=False)
+    pinned_at: Mapped[int] = mapped_column(Integer,default=0)
+    revision: Mapped[int] = mapped_column(Integer,default=0)
 
 
 class ConversationTitle(Base):

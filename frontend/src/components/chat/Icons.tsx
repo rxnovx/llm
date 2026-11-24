@@ -16,6 +16,8 @@ const paths = {
   image: "M4 4h16v16H4Zm0 13 5-5 4 4 3-3 4 4M9 8h.01",
   apps: "M4 4h6v6H4Zm10 0h6v6h-6ZM4 14h6v6H4Zm10 0h6v6h-6Z",
   clock: "M21 12a9 9 0 1 1-18 0 9 9 0 1 1 18 0ZM12 7v5l3 2",
+  pin: "M16 3l5 5-4 1-3 3-1 5-6-6 5-1 3-3ZM7 17l-4 4",
+  archive: "M3 3h18v5H3Zm2 5v13h14V8M9 12h6",
   idea: "M9 18h6m-6 3h6M8.5 14.5a6 6 0 1 1 7 0c-1 .7-1.5 1.6-1.5 2.5h-4c0-.9-.5-1.8-1.5-2.5",
   server: "M3 3h18v7H3Zm0 11h18v7H3ZM7 6.5h.01M7 17.5h.01", check: "m5 12 4 4L19 6",
   trash: "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7", more: "M5 12h.01M12 12h.01M19 12h.01",

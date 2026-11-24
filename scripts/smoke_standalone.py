@@ -243,6 +243,11 @@ def model_controls_smoke(client, access):
                 raise AssertionError('The first background job did not start')
         active = client.get('/api/chat/active', headers=access).json()['ids']
         assert paths[0].rsplit('/', 1)[1] in active
+        background_request=attempt_ids[-1]
+        jobs=client.get('/api/chat/jobs',headers=access).json()
+        background=next(row for row in jobs['items'] if row['id']==background_request)
+        assert background['status']=='running' and background['can_cancel'] and jobs['active_count']==1
+        assert 'content' not in background and 'reasoning' not in background
         second = client.post(paths[1]+'/messages', headers=access, json=body('새 대화 요청'))
         assert 'event: done' in second.text, second.text[-1500:]
         reopened = client.get(paths[0], headers=access).json()
@@ -255,6 +260,9 @@ def model_controls_smoke(client, access):
             time.sleep(0.1)
         assert reopened['messages'][-1]['status'] == 'complete'
         assert client.get('/api/chat/active', headers=access).json()['ids'] == []
+        finished=client.get('/api/chat/jobs?view=finished',headers=access).json()
+        recorded=next(row for row in finished['items'] if row['id']==background_request)
+        assert recorded['status']=='complete' and not recorded['can_cancel'] and recorded['elapsed_ms']>=0
         print('PASS: SSE disconnect, concurrent chat and recovery through the BFF')
 
         with client.stream('POST', paths[1]+'/messages', headers=access, json=body(canvas_question)) as response:
@@ -571,6 +579,26 @@ with tempfile.TemporaryDirectory(prefix="llm-accounts-smoke-") as temporary:
             assert client.get('/api/assistant/operations',headers=access).json()['documents']['ready']==1
             assert client.delete('/api/knowledge/bases/'+knowledge_id,headers=access).status_code==200
             workflows_smoke(client,access)
+            # 대화 정리는 메시지·실행 기록을 삭제하거나 새 모델 호출을 만들지 않는다.
+            library=client.post('/api/chat/conversations',headers=access,json={}).json()
+            library_path='/api/chat/conversations/'+library['id']
+            assert client.patch(library_path,headers=access,json={'title':'보관 검증 대화'}).status_code==200
+            pinned=client.patch(library_path+'/organization',headers=access,json={'pinned':True,'revision':0})
+            assert pinned.status_code==200 and pinned.json()['pinned']
+            assert client.get('/api/chat/conversations?limit=1',headers=access).json()['items'][0]['id']==library['id']
+            archived=client.patch(library_path+'/organization',headers=access,json={'archived':True,'revision':1})
+            assert archived.status_code==200 and archived.json()['archived'] and not archived.json()['pinned']
+            assert library['id'] not in {row['id'] for row in client.get('/api/chat/conversations',headers=access).json()['items']}
+            assert client.get('/api/chat/conversations?view=archived',headers=access).json()['items'][0]['id']==library['id']
+            search=client.get('/api/chat/conversations',headers=access,params={'q':'보관 검증'}).json()['items']
+            assert search[0]['id']==library['id'] and search[0]['archived']
+            assert client.get(library_path,headers=access).json()['conversation']['archived']
+            assert client.patch(library_path+'/organization',headers=access,json={'archived':False,'revision':1}).status_code==409
+            restored=client.patch(library_path+'/organization',headers=access,json={'archived':False,'revision':2})
+            assert restored.status_code==200 and not restored.json()['archived']
+            assert client.delete(library_path,headers=access).status_code==204
+            assert client.get('/api/chat/jobs?view=finished&limit=5',headers=access).status_code==200
+            print('PASS: pinned/archived chat storage, search, revision protection and job history through the BFF')
             assert client.get('/api/admin/overview').status_code == 401
             assert client.get('/admin').status_code == 200
             response = client.post("/api/auth/refresh")

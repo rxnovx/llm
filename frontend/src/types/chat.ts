@@ -32,7 +32,7 @@ export type Workspace = { id: string; conversation_id: string; status: string; a
 export type TitleGeneration = { status: "queued" | "running" | "complete" | "error" | "manual"; revision: number;
   expires_at: number; error_code?: string | null; checks?: { format_valid?: boolean; source_anchor_hits?: number;
     numbers_grounded?: boolean; semantic_verified?: boolean } };
-export type Conversation = { id: string; title: string; connection_id: string; model: string; created_at: number; updated_at: number; busy: boolean;title_generation?:TitleGeneration|null;read_only?:boolean;project_id?:string|null;project_name?:string|null;parent_id?:string|null;auto_summary?:boolean;match?:{message_id:string;role:string;excerpt:string}|null };
+export type Conversation = { id: string; title: string; connection_id: string; model: string; created_at: number; updated_at: number; busy: boolean;title_generation?:TitleGeneration|null;pinned?:boolean;archived?:boolean;pinned_at?:number;organization_revision?:number;read_only?:boolean;project_id?:string|null;project_name?:string|null;parent_id?:string|null;auto_summary?:boolean;match?:{message_id:string;role:string;excerpt:string}|null };
 export type CanvasSelection = { start: number; end: number | null };
 export type ChatMessage = { id: string; role: "user" | "assistant"; content: string; status: "pending" | "complete" | "cancelled" | "error";
   generation_trace?: GenerationTrace;

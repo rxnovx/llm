@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from contextlib import aclosing
 import json
 import time
-from typing import Annotated
+from typing import Annotated,Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.modules.auth.dependencies import Authenticated
 from app.modules.chat.models import Admission, ContextNote, Conversation, GenerationRun, Message
-from app.modules.chat import canvas, context as context_budget, history, providers, scheduler, trace, titles
+from app.modules.chat import canvas, context as context_budget, history, providers, scheduler, trace, titles,organization,runs
 from app.modules.integrations import config as gitlab_config, service as gitlab_connections
 from app.modules.integrations import merge_requests
 from app.modules.integrations.models import MessageContext
@@ -83,6 +83,7 @@ class NoteInput(BaseModel):
 def conversation_data(item: Conversation, *, shared=False):
     return {key: getattr(item, key) for key in ('id', 'title', 'connection_id', 'model', 'created_at', 'updated_at')} | {
         'busy': bool(not shared and item.generation_id and item.generation_until > time.time()),
+        **organization.public(item,shared=shared),
         **({'title_generation':titles.public(item.title_state)} if not shared and item.title_state else {}),
         **workflows.conversation_extra(item),
         **({'read_only': True, 'parent_id': None} if shared else {}),
@@ -131,8 +132,14 @@ async def check_connection(connection_id: str, context: Authenticated, db: Datab
 
 
 @router.get('/conversations')
-def list_conversations(context: Authenticated, db: Database, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0),q: str=Query('',max_length=300),project_id: UUID|None=None):
-    return workflows.search(db,context.user.id,q,str(project_id) if project_id else None,limit,offset)
+def list_conversations(context: Authenticated, db: Database, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0,le=2147483647),q: str=Query('',max_length=300),project_id: UUID|None=None,view: Literal['active','archived']='active'):
+    return workflows.search(db,context.user.id,q,str(project_id) if project_id else None,limit,offset,view=view)
+
+
+@router.get('/jobs')
+def list_jobs(context: Authenticated,db: Database,view: Literal['active','finished','all']='active',
+              limit: int=Query(30,ge=1,le=100),offset: int=Query(0,ge=0,le=2147483647)):
+    return runs.listing(db,context.user.id,view=view,limit=limit,offset=offset)
 
 
 @router.post('/conversations', status_code=201)
@@ -187,19 +194,7 @@ def get_conversation(conversation_id: UUID, context: Authenticated, db: Database
         return {'conversation': conversation_data(item, shared=True),
             'messages': [workflows.shared_payload(message, documents) for message in messages],
             'generation': None} | ({'message_page': page} if page is not None else {})
-    pending = (Message.conversation_id == item.id, Message.status == 'pending')
-    if item.generation_until<=time.time() and db.scalar(select(Message.id).where(*pending).limit(1)):
-        scheduler.lock(db);db.refresh(item)
-        if item.generation_until<=time.time():
-            for message in db.scalars(select(Message).where(*pending)):
-                message.status='error';message.error='이전 응답의 연결 또는 서버 작업이 중단되었습니다. 저장된 부분 답변을 확인하고 재시도하세요.'
-                trace.mark_interrupted(db,message.id)
-                state=workflows.state_for(db,message);state.error_code='interrupted'
-            if item.generation_id:
-                scheduler.finish(db,item.generation_id,'error')
-                run=db.get(GenerationRun,item.generation_id)
-                if run and run.status in {'queued','running','tool_waiting'}:run.status='error';run.error_code='interrupted';run.finished_at=int(time.time())
-            item.generation_id=None;item.generation_until=0;db.commit()
+    if runs.recover(db,item):db.commit()
     messages, page = history.read(db, item.id, message_limit, **page_options)
     admission = db.scalar(select(Admission).where(Admission.request_id == item.generation_id)) if item.generation_id else None
     position = db.scalar(select(func.count(Admission.id)).join(GenerationRun).where(
@@ -258,6 +253,15 @@ def rename_conversation(conversation_id: UUID, data: TitleInput, context: Authen
         raise HTTPException(422, '대화 제목을 입력해 주세요.')
     item.title = title
     titles.manual(db,item)
+    db.commit()
+    return conversation_data(item)
+
+
+@router.patch('/conversations/{conversation_id}/organization')
+def organize_conversation(conversation_id: UUID,data: organization.OrganizationInput,context: Authenticated,db: Database):
+    scheduler.lock(db)
+    item=owned(db,conversation_id,context.user.id)
+    organization.change(item,data)
     db.commit()
     return conversation_data(item)
 
@@ -436,6 +440,7 @@ def prepare(db: Session, conversation_id: UUID, user_id: str, data: TurnInput, c
     if assistant.assistant_context is None:assistant.assistant_context=TurnContext(data_json=json.dumps(options))
     else:assistant.assistant_context.data_json=json.dumps(options)
     item.connection_id, item.model, item.updated_at = connection.id, model, now
+    if not data.retry and not scheduled:organization.wake(item)
     if not data.retry and user_message.position == 0 and not (item.title_state and item.title_state.status=='manual'):
         db.execute(update(Conversation).where(Conversation.id == item.id, Conversation.title == '새 대화')
             .values(title=titles.fallback(content)))
